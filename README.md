@@ -35,7 +35,7 @@ exercised instead of just changing constants:
 
 ## Status
 
-- [ ] Phase 1 — Plugin layer
+- [x] Phase 1 — Plugin layer
 - [ ] Phase 2 — Rule engine
 - [ ] Phase 3 — DSL
 - [ ] Phase 4 — Capstone
