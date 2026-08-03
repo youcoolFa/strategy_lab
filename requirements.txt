@@ -1,0 +1,2 @@
+# Phase 1-2: stdlib only.
+# Phase 3 adds: pyyaml, pydantic
