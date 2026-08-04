@@ -1,14 +1,13 @@
 """
-Plugin contracts shared by every entry/exit/time-window module.
+所有 entry/exit/time-window 模組共用的 plugin 合約(接口)。
 
-Mirrors the shapes already implicit in sat_strategy/app/bot.py:
+對應 sat_strategy/app/bot.py 裡已經隱含存在的形狀:
   - EntrySignal   ~ compute_entry_price() + _place_entry_order()
   - ExitSignal    ~ _place_exit_order()
   - TimeWindow    ~ _window_end() / _should_stop_for_cleanup()
 
-Keeping the interfaces this close to the original bot's method shapes is
-deliberate: porting sat_strategy onto this architecture later should be a
-re-plug, not a redesign.
+刻意讓這些接口盡量貼近原本 bot 的方法形狀:之後要把 sat_strategy 移植到
+這套架構上時,應該是「重新接上去」,而不是「重新設計」。
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from typing import Optional, Protocol, Sequence, runtime_checkable
 
 @dataclass
 class StrategyContext:
-    """Snapshot of market/run state passed to plugins at decision time."""
+    """決策當下傳給 plugin 的市場/執行狀態快照。"""
 
     now: datetime
     price: float

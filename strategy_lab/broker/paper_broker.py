@@ -1,10 +1,10 @@
 """
-In-memory fake exchange. No network calls, no API keys.
+記憶體內的模擬交易所。沒有任何網路呼叫,不需要 API key。
 
-Fills limit orders when `tick(price)` crosses the order's limit price —
-buys fill at-or-below their price, sells fill at-or-above theirs — the same
-"closed" vs "open" status vocabulary sat_strategy/app/bot.py uses when
-polling a real exchange via ccxt.
+`tick(price)` 被呼叫、價格穿越限價單的價位時就會成交——buy 在價格
+「低於或等於」限價時成交,sell 在價格「高於或等於」限價時成交。
+狀態用的字眼(open/closed/canceled)跟 sat_strategy/app/bot.py 透過
+ccxt 輪詢真實交易所時用的字眼是一致的。
 """
 
 from __future__ import annotations
@@ -60,8 +60,7 @@ class PaperBroker:
         self._position_qty = max(0.0, self._position_qty - qty)
 
     def tick(self, price: float) -> None:
-        """Advance the market by one price sample and fill any open order
-        that price has crossed."""
+        """推進市場一個價格樣本,並成交所有被這個價格穿越的未成交單。"""
         for order in self._orders.values():
             if order.status != "open":
                 continue

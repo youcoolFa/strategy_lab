@@ -1,16 +1,14 @@
 """
-Orchestrator loop, generalized from sat_strategy/app/bot.py's
-SatStrategyBot.run(): idle -> entry placed -> filled -> exit placed ->
-filled -> idle, gated by a TimeWindow, executed against a PaperBroker
-instead of a real exchange via ccxt.
+主迴圈(orchestrator loop),泛化自 sat_strategy/app/bot.py 的
+SatStrategyBot.run():idle → 下單進場 → 成交 → 下單出場 → 成交 →
+回到 idle,由 TimeWindow 把關開始/結束,對象是 PaperBroker,不是透過
+ccxt 呼叫真實交易所。
 
-One generalization beyond bot.py: bot.py always places the exit order
-immediately after the entry fills (its exit condition is unconditionally
-true — "return to origin"). Here, an exit order is only placed once
-exit.should_exit(ctx) is true, so a strategy like MA-crossover's bracket
-TP/SL can wait for its trigger instead of resting an order immediately.
-For return_to_reference (always true), this reduces to exactly bot.py's
-behavior.
+比 bot.py 多做的一個泛化:bot.py 一旦進場成交,會「立刻」下出場單
+(它的出場條件是無條件成立的——「回到 origin」)。這裡則是只有在
+exit.should_exit(ctx) 為真的時候才下出場單,所以像 MA 交叉策略的
+止盈止損括號單這種,可以先等訊號觸發,不用一成交就馬上掛單等。對
+return_to_reference(永遠為真)來說,行為會退化成跟 bot.py 完全一樣。
 """
 
 from __future__ import annotations
@@ -57,9 +55,9 @@ class StrategyRunner:
     trades: List[Trade] = field(default_factory=list, init=False)
 
     def start(self, now: datetime, price: float) -> None:
-        """Capture origin_price and window_end ONCE for the whole window,
-        matching bot.py's run() (origin_price/entry_price are computed
-        before the while-loop, not recomputed each entry/exit cycle)."""
+        """在整個窗口期間只捕捉一次 origin_price 與 window_end,跟
+        bot.py 的 run() 一致(origin_price/entry_price 是在 while 迴圈
+        「開始之前」算好的,不會每次進出場循環都重算一次)。"""
         self.origin_price = price
         self.window_end = self.time_window.window_end(now)
         self.state = RunState.IDLE
@@ -71,7 +69,7 @@ class StrategyRunner:
         self.price_history.append(price)
         self.broker.tick(price)
 
-        assert self.window_end is not None, "call start() before tick()"
+        assert self.window_end is not None, "呼叫 tick() 前必須先呼叫 start()"
         if self.time_window.should_cleanup(now, self.window_end):
             self._cleanup()
             return
@@ -92,8 +90,8 @@ class StrategyRunner:
         tick_interval: timedelta,
         max_ticks: int = 100_000,
     ) -> None:
-        """Convenience loop for demos: drives tick() from a price feed
-        until the TimeWindow triggers cleanup and STOPPED is reached."""
+        """給 demo 用的便利迴圈:從一個價格 feed 持續驅動 tick(),直到
+        TimeWindow 觸發 cleanup、狀態走到 STOPPED 為止。"""
         price = next(feed)
         self.start(now, price)
         self.tick(now, price)
@@ -104,7 +102,7 @@ class StrategyRunner:
             price = next(feed)
             self.tick(now, price)
         if self.state != RunState.STOPPED:
-            raise RuntimeError("run() exceeded max_ticks without reaching STOPPED - check time_window config")
+            raise RuntimeError("run() 超過 max_ticks 仍未進入 STOPPED - 請檢查 time_window 設定")
 
     def _ctx(self, now: datetime, price: float) -> StrategyContext:
         return StrategyContext(

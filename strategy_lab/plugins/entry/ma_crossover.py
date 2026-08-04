@@ -1,6 +1,6 @@
-"""MA-crossover strategy's entry: buy when the fast SMA crosses above the
-slow SMA. Needs a price *history*, not a scalar reference — this is the
-point of divergence from deviation_from_reference.py's entry."""
+"""MA 均線交叉策略的進場邏輯:快線由下往上穿越慢線時買進。需要一段
+價格「歷史」,而不只是單一個數值——這正是它跟
+deviation_from_reference.py 進場邏輯分歧的地方。"""
 
 from __future__ import annotations
 

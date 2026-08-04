@@ -1,4 +1,4 @@
-"""Seedable random-walk price generator. No real market data."""
+"""可設定亂數種子的隨機漫步價格產生器。不是真實行情資料。"""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ class SyntheticFeed:
         trend_pct: float = 0.0,
     ) -> None:
         """
-        volatility_pct: max +/- percent random move per tick.
-        trend_pct: constant percent drift added every tick, on top of the
-          random move (set >0 to reliably exercise a crossover-up entry in
-          demos/tests without waiting on pure randomness).
+        volatility_pct: 每個 tick 隨機波動的最大正負百分比。
+        trend_pct: 每個 tick 額外疊加的固定漂移百分比(可正可負),
+          在隨機波動之上。設成 >0 可以讓 demo/測試穩定觸發向上的
+          均線交叉進場,不用完全靠隨機性碰運氣。
         """
         self._rng = random.Random(seed)
         self._price = start_price

@@ -1,6 +1,6 @@
-"""MA-crossover strategy's time window: a daily intraday session, e.g.
-HKT 09:00-17:00 every day. A genuinely different recurrence rule from
-WeeklyWindow's single-weekday session, not just different constants."""
+"""MA 均線交叉策略的時間窗:每天都有的盤中場次,例如 HKT 09:00-17:00。
+跟 WeeklyWindow 的單一星期場次比,是真正不同的週期規則,不只是換了
+幾個常數而已。"""
 
 from __future__ import annotations
 

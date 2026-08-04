@@ -1,7 +1,6 @@
-"""One full-cycle integration test per demo strategy: entry placed -> filled
--> exit placed -> filled -> back to idle -> cleanup at window end. Uses
-hand-picked deterministic price sequences (not SyntheticFeed) so the test
-isn't tied to any RNG behavior."""
+"""每個示範策略各一個完整流程的整合測試:下單進場 → 成交 → 下單出場 →
+成交 → 回到 idle → 窗口結束時清理。用手動挑選的確定性價格序列(不是
+SyntheticFeed),所以測試不會被任何隨機數行為綁住。"""
 
 from datetime import datetime, timedelta, timezone
 
@@ -23,19 +22,19 @@ class TestWeekendStrategyFullCycle:
             order_qty=1.0,
         )
         now = datetime(2026, 8, 1, 4, 0, tzinfo=timezone.utc)
-        runner.start(now, price=1000.0)  # origin_price=1000, entry target=990
+        runner.start(now, price=1000.0)  # origin_price=1000,進場目標=990
 
         runner.tick(now, 1000.0)
         assert runner.state == RunState.ENTRY_PENDING
 
-        runner.tick(now + timedelta(minutes=5), 985.0)  # crosses entry price -> filled
+        runner.tick(now + timedelta(minutes=5), 985.0)  # 穿越進場價 -> 成交
         assert runner.state == RunState.IN_POSITION
         assert runner.active_entry_price == 990.0
 
-        runner.tick(now + timedelta(minutes=10), 985.0)  # exit order placed at origin=1000
+        runner.tick(now + timedelta(minutes=10), 985.0)  # 出場單掛在 origin=1000
         assert runner.state == RunState.EXIT_PENDING
 
-        runner.tick(now + timedelta(minutes=15), 1000.0)  # price returns to origin -> exit filled
+        runner.tick(now + timedelta(minutes=15), 1000.0)  # 價格回到 origin -> 出場成交
         assert runner.state == RunState.IDLE
         assert len(runner.trades) == 1
         assert runner.trades[0].entry_price == 990.0
@@ -57,17 +56,17 @@ class TestCrossoverStrategyFullCycle:
         )
         now = datetime(2026, 8, 3, 9, 0, tzinfo=timezone.utc)
 
-        prices = [1000.0, 1000.0, 1000.0, 1000.0, 1020.0]  # last sample triggers the crossover
+        prices = [1000.0, 1000.0, 1000.0, 1000.0, 1020.0]  # 最後一筆觸發交叉
         runner.start(now, prices[0])
         for i, price in enumerate(prices):
             runner.tick(now + timedelta(minutes=i), price)
         assert runner.state == RunState.ENTRY_PENDING
 
-        runner.tick(now + timedelta(minutes=5), 1020.0)  # marketable limit fills same price
+        runner.tick(now + timedelta(minutes=5), 1020.0)  # 貼價限價單同價成交
         assert runner.state == RunState.IN_POSITION
         assert runner.active_entry_price == 1020.0
 
-        runner.tick(now + timedelta(minutes=6), 1031.0)  # +1.08% -> take-profit triggers
+        runner.tick(now + timedelta(minutes=6), 1031.0)  # +1.08% -> 觸發停利
         assert runner.state == RunState.EXIT_PENDING
 
         runner.tick(now + timedelta(minutes=7), 1031.0)

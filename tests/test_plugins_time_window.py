@@ -9,13 +9,13 @@ HKT = ZoneInfo("Asia/Hong_Kong")
 
 class TestWeeklyWindow:
     def test_window_end_finds_next_matching_weekday(self):
-        window = WeeklyWindow(end_weekday=0, end_time="06:00")  # Monday 06:00
-        now = datetime(2026, 8, 1, 4, 0, tzinfo=HKT)  # Saturday
+        window = WeeklyWindow(end_weekday=0, end_time="06:00")  # 星期一 06:00
+        now = datetime(2026, 8, 1, 4, 0, tzinfo=HKT)  # 星期六
         assert window.window_end(now) == datetime(2026, 8, 3, 6, 0, tzinfo=HKT)
 
     def test_window_end_same_day_if_still_ahead(self):
         window = WeeklyWindow(end_weekday=0, end_time="06:00")
-        now = datetime(2026, 8, 3, 5, 0, tzinfo=HKT)  # Monday, before 06:00
+        now = datetime(2026, 8, 3, 5, 0, tzinfo=HKT)  # 星期一,還沒到 06:00
         assert window.window_end(now) == datetime(2026, 8, 3, 6, 0, tzinfo=HKT)
 
     def test_should_cleanup_within_buffer(self):

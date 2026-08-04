@@ -52,7 +52,8 @@ class TestMACrossoverEntry:
 
     def test_enters_on_fresh_upward_crossover(self):
         plugin = MACrossoverEntry(fast_window=2, slow_window=4)
-        # fast_prev == slow_prev == 10 (flat), current price jump makes fast_now > slow_now
+        # fast_prev == slow_prev == 10(持平),當下這一筆價格跳升讓
+        # fast_now > slow_now,形成剛發生的向上交叉。
         ctx = make_ctx(price_history=(10, 10, 10, 10, 20))
         assert plugin.should_enter(ctx) is True
 

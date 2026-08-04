@@ -1,10 +1,10 @@
 """
-Phase 1 demo: MA-crossover-with-bracket-TP/SL strategy — same runner, same
-PaperBroker/SyntheticFeed as demo_weekend_phase1.py, completely different
-entry/exit/time-window plugin objects and zero shared branching logic in
-the runner itself.
+Phase 1 demo:MA 均線交叉 + 止盈止損括號單策略——跟
+demo_weekend_phase1.py 用同一個 runner、同一套 PaperBroker/SyntheticFeed,
+但進場/出場/時間窗的 plugin 物件完全不同,runner 裡也沒有任何共用的
+分支邏輯。
 
-Run: /opt/anaconda3/bin/python3 -m demo.demo_crossover_phase1
+執行方式:/opt/anaconda3/bin/python3 -m demo.demo_crossover_phase1
 """
 
 from __future__ import annotations
@@ -29,10 +29,10 @@ def main() -> None:
         order_qty=1.0,
     )
 
-    # Slight upward trend so the fast SMA reliably crosses above the slow
-    # SMA within the session instead of depending purely on randomness.
+    # 帶一點小幅上升趨勢,讓快線在盤中場次內能穩定穿越慢線,不用完全
+    # 靠隨機性碰運氣。
     feed = SyntheticFeed(start_price=60000.0, volatility_pct=0.15, trend_pct=0.03, seed=7)
-    start = datetime(2026, 8, 3, 9, 0, tzinfo=HKT)  # a Monday
+    start = datetime(2026, 8, 3, 9, 0, tzinfo=HKT)  # 一個星期一
     runner.run(now=start, feed=feed, tick_interval=timedelta(minutes=1))
 
     print(f"trades filled: {len(runner.trades)}")

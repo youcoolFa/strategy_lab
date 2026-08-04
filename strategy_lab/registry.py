@@ -1,10 +1,11 @@
 """
-Plugin registry: a plain dict, not `importlib.metadata` entry_points.
+Plugin 註冊表:用一個單純的 dict 實作,不用 `importlib.metadata` 的
+entry_points 機制。
 
-Entry points earn their packaging ceremony when third parties ship
-installable packages that need to be discovered without the host editing
-any file. Here there is one developer, one repo, and a new plugin is one
-file plus one import line in the matching plugins/<kind>/__init__.py.
+Entry points 那套打包儀式,是給第三方要發布「可安裝的套件」、又要讓
+host 不用改任何檔案就能自動發現時才值得用的。這裡只有一個開發者、一個
+repo,新增一個 plugin 就是「一個檔案 + 在對應的
+plugins/<kind>/__init__.py 加一行 import」而已。
 """
 
 from __future__ import annotations

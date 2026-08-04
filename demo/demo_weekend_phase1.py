@@ -1,9 +1,9 @@
 """
-Phase 1 demo: weekend mean-reversion strategy composed purely in Python —
-no rule engine, no DSL yet, just plugin objects wired directly into the
-runner. Trades against the in-memory PaperBroker + SyntheticFeed only.
+Phase 1 demo:週末均值回歸策略,純粹用 Python 手動組裝——還沒有 rule
+engine,也還沒有 DSL,就是把 plugin 物件直接接進 runner。只跟記憶體內的
+PaperBroker + SyntheticFeed 交易。
 
-Run: /opt/anaconda3/bin/python3 -m demo.demo_weekend_phase1
+執行方式:/opt/anaconda3/bin/python3 -m demo.demo_weekend_phase1
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def main() -> None:
     )
 
     feed = SyntheticFeed(start_price=60000.0, volatility_pct=0.3, seed=42)
-    start = datetime(2026, 8, 1, 4, 0, tzinfo=HKT)  # a Saturday
+    start = datetime(2026, 8, 1, 4, 0, tzinfo=HKT)  # 一個星期六
     runner.run(now=start, feed=feed, tick_interval=timedelta(minutes=5))
 
     print(f"origin_price = {runner.origin_price:.2f}")

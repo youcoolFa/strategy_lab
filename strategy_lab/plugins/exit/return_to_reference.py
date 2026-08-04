@@ -1,6 +1,6 @@
-"""Weekend mean-reversion's exit: close back at the same origin_price the
-entry was measured from. Ported from sat_strategy/app/bot.py's
-_place_exit_order(origin_price, ...)."""
+"""週末均值回歸策略的出場邏輯:回到跟進場時同一個 origin_price 就平倉。
+移植自 sat_strategy/app/bot.py 的
+_place_exit_order(origin_price, ...)。"""
 
 from __future__ import annotations
 
@@ -17,5 +17,5 @@ class ReturnToReferenceExit:
         return True
 
     def exit_price(self, ctx: StrategyContext) -> float:
-        assert ctx.origin_price is not None, "origin_price must be set before exit"
+        assert ctx.origin_price is not None, "出場前必須先設定 origin_price"
         return ctx.origin_price

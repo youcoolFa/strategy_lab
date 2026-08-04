@@ -1,8 +1,8 @@
-"""Weekend mean-reversion's time window: a single weekly session, default
-HKT Sat 04:00 -> Mon 06:00. Ported from sat_strategy/app/bot.py's
-_window_end()/_should_stop_for_cleanup() (minus its test-only env-var
-hooks, which are sat_strategy-specific dev conveniences, not part of the
-strategy's logic)."""
+"""週末均值回歸策略的時間窗:單一週期的每週場次,預設 HKT 週六 04:00 到
+週一 06:00。移植自 sat_strategy/app/bot.py 的
+_window_end()/_should_stop_for_cleanup()(拿掉了它裡面只給測試用的
+環境變數 hook——那些是 sat_strategy 專案自己的開發便利設計,不屬於
+策略邏輯本身)。"""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ from strategy_lab.registry import register
 @register("time_window", "weekly_window")
 @dataclass
 class WeeklyWindow:
-    start_weekday: int = 5  # Monday=0 ... Saturday=5
+    start_weekday: int = 5  # 星期一=0 ... 星期六=5
     start_time: str = "04:00"
-    end_weekday: int = 0  # Monday
+    end_weekday: int = 0  # 星期一
     end_time: str = "06:00"
     cleanup_buffer_minutes: int = 5
 
@@ -30,7 +30,7 @@ class WeeklyWindow:
                 if end_dt >= now:
                     return end_dt
             candidate += timedelta(days=1)
-        raise RuntimeError("could not find a window end within 8 days - check weekday/time config")
+        raise RuntimeError("在 8 天內找不到窗口結束時間 - 請檢查 weekday/time 設定")
 
     def should_cleanup(self, now: datetime, window_end: datetime) -> bool:
         return now >= window_end - timedelta(minutes=self.cleanup_buffer_minutes)
