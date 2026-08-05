@@ -53,6 +53,7 @@ class StrategyRunner:
     active_entry_price: Optional[float] = field(default=None, init=False)
     price_history: List[float] = field(default_factory=list, init=False)
     trades: List[Trade] = field(default_factory=list, init=False)
+    entry_time: Optional[datetime] = field(default=None, init=False)
 
     def start(self, now: datetime, price: float) -> None:
         """在整個窗口期間只捕捉一次 origin_price 與 window_end,跟
@@ -77,7 +78,7 @@ class StrategyRunner:
         if self.state == RunState.IDLE:
             self._try_enter(now, price)
         elif self.state == RunState.ENTRY_PENDING:
-            self._check_entry_fill()
+            self._check_entry_fill(now)
         elif self.state == RunState.IN_POSITION:
             self._try_exit(now, price)
         elif self.state == RunState.EXIT_PENDING:
@@ -112,6 +113,7 @@ class StrategyRunner:
             origin_price=self.origin_price,
             entry_price=self.active_entry_price,
             position_qty=self.broker.position_qty(),
+            entry_time=self.entry_time,
         )
 
     def _try_enter(self, now: datetime, price: float) -> None:
@@ -120,11 +122,12 @@ class StrategyRunner:
             self.entry_order = self.broker.place_limit_buy(price=self.entry.entry_price(ctx), qty=self.order_qty)
             self.state = RunState.ENTRY_PENDING
 
-    def _check_entry_fill(self) -> None:
+    def _check_entry_fill(self, now: datetime) -> None:
         assert self.entry_order is not None
         order = self.broker.fetch_order(self.entry_order.id)
         if order.status == "closed":
             self.active_entry_price = order.price
+            self.entry_time = now
             self.state = RunState.IN_POSITION
         elif order.status == "canceled":
             self.state = RunState.IDLE
@@ -143,6 +146,7 @@ class StrategyRunner:
             assert self.active_entry_price is not None
             self.trades.append(Trade(entry_price=self.active_entry_price, exit_price=order.price, qty=order.filled_qty))
             self.active_entry_price = None
+            self.entry_time = None
             self.state = RunState.IDLE
         elif order.status == "canceled":
             self.state = RunState.IN_POSITION

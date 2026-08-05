@@ -27,6 +27,7 @@ class StrategyContext:
     origin_price: Optional[float] = None
     entry_price: Optional[float] = None
     position_qty: float = 0.0
+    entry_time: Optional[datetime] = None
 
 
 @runtime_checkable

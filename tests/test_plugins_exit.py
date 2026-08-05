@@ -48,3 +48,20 @@ class TestBracketTPSLExit:
     def test_exit_price_is_current_price(self):
         plugin = BracketTPSLExit(take_profit_pct=1.0, stop_loss_pct=0.5)
         assert plugin.exit_price(make_ctx(price=1010.0)) == 1010.0
+
+from datetime import datetime, timezone, timedelta
+from strategy_lab.plugins.exit.max_hold_duration import MaxHoldDurationExit
+
+def test_exit_after_max_duration():
+    plugin = MaxHoldDurationExit(max_minutes=30)
+    entry_time = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    now = entry_time + timedelta(minutes=31)
+    ctx = make_ctx(now=now, entry_time=entry_time, price=100.0)
+    assert plugin.should_exit(ctx) is True
+
+def test_not_exit_before_max_duration():
+    plugin = MaxHoldDurationExit(max_minutes=30)
+    entry_time = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    now = entry_time + timedelta(minutes=29)
+    ctx = make_ctx(now=now, entry_time=entry_time, price=100.0)
+    assert plugin.should_exit(ctx) is False
