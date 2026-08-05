@@ -24,6 +24,11 @@
 - **MA 均線交叉 + 止盈止損括號單** —— 快/慢 SMA 交叉時進場,相對進場
   價的停利或停損任一觸發即出場,每日盤中場次的時間窗。
 
+## 文件
+
+架構圖、`engine/runner.py` 狀態機、資料流追蹤、已知限制,見
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
 ## 安裝
 
 ```bash
