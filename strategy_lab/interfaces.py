@@ -8,13 +8,22 @@
 
 刻意讓這些接口盡量貼近原本 bot 的方法形狀:之後要把 sat_strategy 移植到
 這套架構上時,應該是「重新接上去」,而不是「重新設計」。
+
+Phase 2 起,EntrySignal/ExitSignal 不再各自手寫 `should_enter`/
+`should_exit` 布林邏輯,改成暴露一個 `rule: Condition` 屬性,由
+`engine/runner.py` 呼叫 `rule.evaluate(ctx)` 決定「現在該不該觸發」。
+plugin 從此只保留「觸發之後價格怎麼算」這一半的邏輯——「什麼時候觸發」
+交給 rules/ 這一層。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Protocol, Sequence, runtime_checkable
+from typing import TYPE_CHECKING, Optional, Protocol, Sequence, runtime_checkable
+
+if TYPE_CHECKING:
+    from strategy_lab.rules.base import Condition
 
 
 @dataclass
@@ -32,13 +41,15 @@ class StrategyContext:
 
 @runtime_checkable
 class EntrySignal(Protocol):
-    def should_enter(self, ctx: StrategyContext) -> bool: ...
+    rule: "Condition"
+
     def entry_price(self, ctx: StrategyContext) -> float: ...
 
 
 @runtime_checkable
 class ExitSignal(Protocol):
-    def should_exit(self, ctx: StrategyContext) -> bool: ...
+    rule: "Condition"
+
     def exit_price(self, ctx: StrategyContext) -> float: ...
 
 

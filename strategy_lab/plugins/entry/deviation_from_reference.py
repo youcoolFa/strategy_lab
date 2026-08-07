@@ -1,13 +1,16 @@
-"""週末均值回歸策略的進場邏輯:當價格跌破「窗口開始時就固定住的參考價」
-(sat_strategy 的 origin_price)deviation_pct% 時買進。
-"""
+"""週末均值回歸策略的進場邏輯:買進條件是價格跌破 origin_price 的
+deviation_pct%。Phase 2 起,「什麼時候觸發」交給
+rules.conditions.PriceBelowReference,這個類別只保留「觸發後掛單價要
+算多少」。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from strategy_lab.interfaces import StrategyContext
 from strategy_lab.registry import register
+from strategy_lab.rules.base import Condition
+from strategy_lab.rules.conditions import PriceBelowReference
 
 
 def compute_entry_price(reference_price: float, deviation_pct: float) -> float:
@@ -19,11 +22,10 @@ def compute_entry_price(reference_price: float, deviation_pct: float) -> float:
 @dataclass
 class DeviationFromReferenceEntry:
     deviation_pct: float
+    rule: Condition = field(init=False)
 
-    def should_enter(self, ctx: StrategyContext) -> bool:
-        # 永遠嘗試進場——跟 bot.py 一樣,價格觸發條件是藏在掛出去的限價單
-        # 價位裡,不是在這裡先做一次判斷。
-        return True
+    def __post_init__(self) -> None:
+        self.rule = PriceBelowReference(self.deviation_pct)
 
     def entry_price(self, ctx: StrategyContext) -> float:
         assert ctx.origin_price is not None, "進場前必須先設定 origin_price"

@@ -8,7 +8,7 @@ time_window(時間窗)三類獨立模組,並透過統一的狀態機驅動執行
 不連接任何真實交易所,僅對內建的模擬交易所(paper broker)與合成價格
 產生器運作。
 
-本文件對應目前(Phase 1:Plugin 層)完成後的架構狀態,涵蓋元件關係、
+本文件對應目前(Phase 2:Rule Engine)完成後的架構狀態,涵蓋元件關係、
 核心狀態機、單次執行流程,以及目前已知的設計限制。
 
 ## 1. 元件關係圖
@@ -18,6 +18,12 @@ flowchart TD
     subgraph Contract["合約層"]
         I["interfaces.py<br/>StrategyContext<br/>EntrySignal / ExitSignal / TimeWindow"]
         R["registry.py<br/>dict 註冊表:(kind, name) → class"]
+    end
+
+    subgraph Rules["Rule 層(Phase 2)"]
+        RB["rules/base.py<br/>Condition Protocol"]
+        RC["rules/conditions.py<br/>PriceBelowReference / MovingAverageCross /<br/>PriceChangeFromEntry / MaxDurationElapsed 等"]
+        RComp["rules/composite.py<br/>And / Or / Not"]
     end
 
     subgraph Plugins["Plugin 層(策略邏輯)"]
@@ -46,8 +52,16 @@ flowchart TD
     T1 & T2 -. 實作 .-> I
     E1 & E2 & X1 & X2 & X3 & T1 & T2 -. "@register" .-> R
 
-    Run -->|"should_enter / entry_price"| E1
-    Run -->|"should_exit / exit_price"| X1
+    RC -. 實作 .-> RB
+    RComp -. 實作 .-> RB
+    RComp -->|"組合子條件"| RC
+
+    E1 & E2 -->|"__post_init__ 組出 self.rule"| RC
+    X1 -->|"__post_init__ 組出 self.rule"| RC
+    X2 & X3 -->|"__post_init__ 組出 self.rule"| RComp
+
+    Run -->|"rule.evaluate(ctx) / entry_price"| E1
+    Run -->|"rule.evaluate(ctx) / exit_price"| X1
     Run -->|"window_end / should_cleanup"| T1
     Run -->|"place_limit_* / fetch_order / tick"| B
     F -->|"next(feed) 提供價格"| Demo
@@ -58,17 +72,30 @@ flowchart TD
 
 - **合約層(interfaces.py / registry.py)**:定義 plugin 必須實作的形狀
   (`Protocol`),以及一個名稱到類別的查找表。不含任何策略邏輯。
+  `EntrySignal`/`ExitSignal` 自 Phase 2 起改為暴露 `rule: Condition`
+  屬性,而非各自手寫的 `should_enter`/`should_exit` 方法。
+- **Rule 層(Phase 2 新增)**:`rules/base.py` 定義 `Condition` 這個最小
+  合約(`evaluate(ctx) -> bool`);`rules/conditions.py` 是實際判斷市場
+  事實的具體條件;`rules/composite.py` 的 `And`/`Or`/`Not` 只依賴
+  `Condition` 合約,不知道被組合的是哪一種具體條件,因此可以任意疊代
+  巢狀。此層不依賴 Plugin 層或 `engine/runner.py`。
 - **Plugin 層**:每個檔案是一個獨立、可單元測試的策略邏輯單元,彼此不
-  互相依賴,也不依賴 `engine/runner.py`。
+  互相依賴,也不依賴 `engine/runner.py`。自 Phase 2 起,只負責兩件事:
+  在 `__post_init__` 組出一棵 `Condition` 樹存進 `self.rule`,以及計算
+  觸發後的價格(`entry_price`/`exit_price`)。「什麼時候觸發」完全交給
+  Rule 層。
 - **模擬交易所**:`PaperBroker` 模擬掛單/成交,`SyntheticFeed` 產生
   價格序列。兩者互不知曉對方存在,也不知曉「策略」的概念。
 - **主迴圈(StrategyRunner)**:唯一同時依賴合約層與模擬交易所的元件,
   以組合(而非繼承或匯入具體 plugin)的方式接收 `entry`/`exit`/
-  `time_window` 三個物件,驅動狀態機。
+  `time_window` 三個物件,驅動狀態機。它只呼叫 `rule.evaluate(ctx)`,
+  完全不需要知道 Rule 層的存在——這是 Rule 層可以整層插入、runner.py
+  幾乎不用改的原因(實際只改了兩行呼叫)。
 - **`registry.py` 現況**:各 plugin 透過 `@register` 裝飾器完成登記,
   但目前尚無任何執行路徑呼叫 `registry.get()` ——`demo/*.py` 是以直接
   `import` 具體類別的方式組裝策略。此查找表是為未來的 DSL 載入器保留
-  的介面。
+  的介面。Rule 層的 `Condition` primitives 目前未註冊進 `registry.py`,
+  屬於 Phase 3 待決事項。
 
 ## 2. `engine/runner.py` 狀態機
 
@@ -76,11 +103,11 @@ flowchart TD
 stateDiagram-v2
     [*] --> IDLE: start(now, price)<br/>設定 origin_price、window_end
 
-    IDLE --> ENTRY_PENDING: entry.should_enter(ctx) 為真<br/>_try_enter() 下限價買單
+    IDLE --> ENTRY_PENDING: entry.rule.evaluate(ctx) 為真<br/>_try_enter() 下限價買單
     ENTRY_PENDING --> IN_POSITION: 買單 status == closed<br/>_check_entry_fill() 記錄 active_entry_price、entry_time
     ENTRY_PENDING --> IDLE: 買單 status == canceled
 
-    IN_POSITION --> EXIT_PENDING: exit.should_exit(ctx) 為真<br/>_try_exit() 下限價賣單
+    IN_POSITION --> EXIT_PENDING: exit.rule.evaluate(ctx) 為真<br/>_try_exit() 下限價賣單
     EXIT_PENDING --> IDLE: 賣單 status == closed<br/>_check_exit_fill() 寫入 Trade,清空 active_entry_price/entry_time
     EXIT_PENDING --> IN_POSITION: 賣單 status == canceled
 
@@ -107,8 +134,10 @@ stateDiagram-v2
    1. 透過 `_ctx()` 組出一個 `StrategyContext`,其中的欄位(如
       `origin_price`、`active_entry_price`)取自 `StrategyRunner` 自身
       的內部狀態。
-   2. 呼叫 `self.entry.should_enter(ctx)` —— 此為本次呼叫中第一次觸及
-      具體 plugin 的邏輯。
+   2. 呼叫 `self.entry.rule.evaluate(ctx)` —— 此為本次呼叫中第一次觸及
+      具體 plugin/Rule 層的邏輯。`rule` 可能是單一條件(如
+      `PriceBelowReference`),也可能是 `And`/`Or`/`Not` 組成的巢狀樹;
+      `_try_enter()` 不需要知道是哪一種。
    3. 若結果為真,呼叫 `self.entry.entry_price(ctx)` 計算掛單價位,並
       呼叫 `self.broker.place_limit_buy(price=..., qty=...)` 送出訂單。
    4. 狀態轉移為 `ENTRY_PENDING`。
@@ -170,12 +199,26 @@ DSL 載入器後、`get()` 路徑被實際使用時才會由錯誤訊息主動�
 (slippage)或手續費。此簡化係為教學與架構驗證目的而設計,不適用於
 需要精確還原真實交易所行為的回測場景。
 
+### 4.5 Phase 2 對週末策略語意的調整
+
+Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
+「`should_enter`/`should_exit` 永遠回傳 `True`,實際的價格門檻交給限價
+單本身的掛單價擋」的設計,與 MA 交叉策略「每個 tick 真的檢查訊號」的
+設計不對稱。Phase 2 為了讓兩個示範策略在同一套 `Condition` 語言下描述,
+將週末策略的進出場邏輯也改為真正的價格檢查
+(`PriceBelowReference`/`PriceAtOrAboveReference`)。
+
+此調整不影響最終成交價與交易筆數(兩個 demo 重跑後數字與 Phase 1 完全
+一致),差異僅在於:訂單現在是「條件成立後才下單」,而非「窗口一開始
+就掛著等」——在價格於窗口內反覆穿越門檻的情境下,理論上可能造成下單
+時機的 1 個 tick 延遲,但不影響最終成交結果。
+
 ## 5. 文件維護提醒
 
 每個 Phase 完成後,應檢視並更新以下對應章節:
 
-| Phase | 內容變更 | 需更新的章節 |
-|---|---|---|
-| Phase 2(Rule Engine) | `plugins/` 的 `should_enter`/`should_exit` 改為宣告 `Condition` 樹 | §1 元件關係圖需新增 `rules/` 子圖;§3 資料流追蹤需改為描述 `plugin.rule.evaluate(ctx)` 呼叫方式 |
-| Phase 3(DSL) | `registry.get()` 開始被 `dsl/loader.py` 實際呼叫 | §1 補充 `dsl/` 元件與資料流;§4.3 移除或修正「死碼路徑」描述 |
-| Phase 4(Capstone) | 三個 YAML 策略熱切換驗證完成 | 新增一節記錄熱切換測試結果與計時演練結論 |
+| Phase | 內容變更 | 需更新的章節 | 狀態 |
+|---|---|---|---|
+| Phase 2(Rule Engine) | `plugins/` 的 `should_enter`/`should_exit` 改為宣告 `Condition` 樹 | §1 元件關係圖新增 `rules/` 子圖;§2 狀態圖標籤;§3 資料流追蹤改為 `plugin.rule.evaluate(ctx)`;新增 §4.5 | 已完成 |
+| Phase 3(DSL) | `registry.get()` 開始被 `dsl/loader.py` 實際呼叫 | §1 補充 `dsl/` 元件與資料流;§4.3 移除或修正「死碼路徑」描述 | 待進行 |
+| Phase 4(Capstone) | 三個 YAML 策略熱切換驗證完成 | 新增一節記錄熱切換測試結果與計時演練結論 | 待進行 |

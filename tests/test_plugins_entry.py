@@ -1,8 +1,13 @@
+"""Phase 2 起,entry plugin 只負責:(1) 在 __post_init__ 組出正確的
+Condition,(2) 計算 entry_price。真正的觸發邏輯真值表測試在
+tests/test_rules_conditions.py。"""
+
 from datetime import datetime, timezone
 
 from strategy_lab.interfaces import StrategyContext
 from strategy_lab.plugins.entry.deviation_from_reference import DeviationFromReferenceEntry, compute_entry_price
-from strategy_lab.plugins.entry.ma_crossover import MACrossoverEntry, simple_moving_average
+from strategy_lab.plugins.entry.ma_crossover import MACrossoverEntry
+from strategy_lab.rules.conditions import MovingAverageCross, PriceBelowReference
 
 
 def make_ctx(**overrides):
@@ -27,9 +32,10 @@ class TestComputeEntryPrice:
 
 
 class TestDeviationFromReferenceEntry:
-    def test_should_enter_is_always_true(self):
+    def test_rule_is_price_below_reference_with_matching_deviation(self):
         plugin = DeviationFromReferenceEntry(deviation_pct=0.75)
-        assert plugin.should_enter(make_ctx(origin_price=1000.0)) is True
+        assert isinstance(plugin.rule, PriceBelowReference)
+        assert plugin.rule.deviation_pct == 0.75
 
     def test_entry_price_uses_origin_price_not_current_price(self):
         plugin = DeviationFromReferenceEntry(deviation_pct=0.75)
@@ -37,30 +43,11 @@ class TestDeviationFromReferenceEntry:
         assert plugin.entry_price(ctx) == compute_entry_price(1000.0, 0.75)
 
 
-class TestSimpleMovingAverage:
-    def test_not_enough_data_returns_none(self):
-        assert simple_moving_average([1, 2], 3) is None
-
-    def test_average_of_last_n(self):
-        assert simple_moving_average([1, 2, 3, 4, 5], 3) == 4.0
-
-
 class TestMACrossoverEntry:
-    def test_no_entry_without_enough_history(self):
-        plugin = MACrossoverEntry(fast_window=2, slow_window=4)
-        assert plugin.should_enter(make_ctx(price_history=(1, 2, 3))) is False
-
-    def test_enters_on_fresh_upward_crossover(self):
-        plugin = MACrossoverEntry(fast_window=2, slow_window=4)
-        # fast_prev == slow_prev == 10(持平),當下這一筆價格跳升讓
-        # fast_now > slow_now,形成剛發生的向上交叉。
-        ctx = make_ctx(price_history=(10, 10, 10, 10, 20))
-        assert plugin.should_enter(ctx) is True
-
-    def test_no_entry_when_flat_no_crossover(self):
-        plugin = MACrossoverEntry(fast_window=2, slow_window=4)
-        ctx = make_ctx(price_history=(20, 20, 20, 20, 20))
-        assert plugin.should_enter(ctx) is False
+    def test_rule_is_moving_average_cross_with_matching_windows(self):
+        plugin = MACrossoverEntry(fast_window=5, slow_window=20)
+        assert isinstance(plugin.rule, MovingAverageCross)
+        assert (plugin.rule.fast_window, plugin.rule.slow_window) == (5, 20)
 
     def test_entry_price_is_current_price(self):
         plugin = MACrossoverEntry()

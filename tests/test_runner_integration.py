@@ -24,17 +24,29 @@ class TestWeekendStrategyFullCycle:
         now = datetime(2026, 8, 1, 4, 0, tzinfo=timezone.utc)
         runner.start(now, price=1000.0)  # origin_price=1000,進場目標=990
 
-        runner.tick(now, 1000.0)
+        # Phase 2 起,PriceBelowReference 是真的每 tick 檢查 ctx.price,
+        # 不再是「永遠 True、觸發交給掛單價」——所以價格還沒跌破目標時
+        # 不會下單,跟 Phase 1 的行為不同。
+        runner.tick(now, 1000.0)  # 價格==origin,還沒跌破 990
+        assert runner.state == RunState.IDLE
+
+        runner.tick(now + timedelta(minutes=5), 995.0)  # 仍未跌破 990
+        assert runner.state == RunState.IDLE
+
+        runner.tick(now + timedelta(minutes=10), 989.0)  # 跌破 990,條件成立 -> 下單
         assert runner.state == RunState.ENTRY_PENDING
 
-        runner.tick(now + timedelta(minutes=5), 985.0)  # 穿越進場價 -> 成交
+        runner.tick(now + timedelta(minutes=15), 989.0)  # 限價單成交
         assert runner.state == RunState.IN_POSITION
         assert runner.active_entry_price == 990.0
 
-        runner.tick(now + timedelta(minutes=10), 985.0)  # 出場單掛在 origin=1000
+        runner.tick(now + timedelta(minutes=20), 995.0)  # 還沒回到 origin=1000
+        assert runner.state == RunState.IN_POSITION
+
+        runner.tick(now + timedelta(minutes=25), 1000.0)  # 回到 origin,條件成立 -> 下單
         assert runner.state == RunState.EXIT_PENDING
 
-        runner.tick(now + timedelta(minutes=15), 1000.0)  # 價格回到 origin -> 出場成交
+        runner.tick(now + timedelta(minutes=30), 1000.0)  # 出場單成交
         assert runner.state == RunState.IDLE
         assert len(runner.trades) == 1
         assert runner.trades[0].entry_price == 990.0

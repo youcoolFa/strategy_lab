@@ -40,7 +40,7 @@
 ## 進度
 
 - [x] Phase 1 —— Plugin 層
-- [ ] Phase 2 —— Rule engine
+- [x] Phase 2 —— Rule engine
 - [ ] Phase 3 —— DSL
 - [ ] Phase 4 —— 總結演練(Capstone)
 

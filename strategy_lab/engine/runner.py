@@ -4,11 +4,17 @@ SatStrategyBot.run():idle → 下單進場 → 成交 → 下單出場 → 成�
 回到 idle,由 TimeWindow 把關開始/結束,對象是 PaperBroker,不是透過
 ccxt 呼叫真實交易所。
 
-比 bot.py 多做的一個泛化:bot.py 一旦進場成交,會「立刻」下出場單
-(它的出場條件是無條件成立的——「回到 origin」)。這裡則是只有在
-exit.should_exit(ctx) 為真的時候才下出場單,所以像 MA 交叉策略的
-止盈止損括號單這種,可以先等訊號觸發,不用一成交就馬上掛單等。對
-return_to_reference(永遠為真)來說,行為會退化成跟 bot.py 完全一樣。
+比 bot.py 多做的一個泛化:bot.py 一旦進場成交,會「立刻」下出場單。
+這裡則是只有在 exit.rule.evaluate(ctx) 為真的時候才下出場單,所以像
+MA 交叉策略的止盈止損括號單這種,可以先等訊號觸發,不用一成交就馬上
+掛單等。
+
+Phase 2 起,「該不該進場/出場」不再是 plugin 自己手寫的
+`should_enter`/`should_exit` 布林方法,而是統一呼叫
+`entry.rule.evaluate(ctx)` / `exit.rule.evaluate(ctx)` —— `rule` 是
+rules/ 這一層組出來的 Condition 樹(見 strategy_lab/interfaces.py 的
+`EntrySignal`/`ExitSignal`)。這個檔案完全不需要知道 Condition 樹長
+什麼樣子,只需要知道它有 `.evaluate(ctx) -> bool`。
 """
 
 from __future__ import annotations
@@ -118,7 +124,7 @@ class StrategyRunner:
 
     def _try_enter(self, now: datetime, price: float) -> None:
         ctx = self._ctx(now, price)
-        if self.entry.should_enter(ctx):
+        if self.entry.rule.evaluate(ctx):
             self.entry_order = self.broker.place_limit_buy(price=self.entry.entry_price(ctx), qty=self.order_qty)
             self.state = RunState.ENTRY_PENDING
 
@@ -134,7 +140,7 @@ class StrategyRunner:
 
     def _try_exit(self, now: datetime, price: float) -> None:
         ctx = self._ctx(now, price)
-        if self.exit.should_exit(ctx):
+        if self.exit.rule.evaluate(ctx):
             qty = self.broker.position_qty()
             self.exit_order = self.broker.place_limit_sell(price=self.exit.exit_price(ctx), qty=qty)
             self.state = RunState.EXIT_PENDING
