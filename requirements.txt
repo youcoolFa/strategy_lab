@@ -2,3 +2,8 @@
 # Phase 3 adds:
 pyyaml>=6.0
 pydantic>=1.10,<2.0
+# Live migration (account_feed/market_feed/Bybit execution) adds:
+redis>=5.0
+loguru>=0.7
+pybit>=5.8
+

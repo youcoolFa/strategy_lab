@@ -8,8 +8,9 @@ time_window(排程時間窗)、kill_switch(市場行為觸發的終止條件,選
 四類獨立模組,並透過統一的狀態機驅動執行。系統不連接任何真實交易所,
 僅對內建的模擬交易所(paper broker)與合成價格產生器運作。
 
-本文件對應目前(Phase 3:DSL)完成後的架構狀態,涵蓋元件關係、核心
-狀態機、單次執行流程,以及目前已知的設計限制。
+本文件對應目前(Phase 3:DSL,加上 Live 遷移 Stage 1)完成後的架構
+狀態,涵蓋元件關係、核心狀態機、單次執行流程、目前已知的設計限制,
+以及往真實環境遷移的進度(§6)。
 
 ## 1. 元件關係圖
 
@@ -298,3 +299,54 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 | Phase 2 擴充(KillSwitch) | 新增第四種 plugin 類型,用市場行為(而非排程時間)終止整個策略迴圈 | §1 新增 `kill_switch/` 節點;§2 狀態圖收攤觸發條件;新增 §4.6 | 已完成 |
 | Phase 3(DSL) | `registry.get()` 開始被 `dsl/loader.py` 實際呼叫;新增 `strategies/*.yaml`、`demo/run_from_yaml.py`;順帶修正 `rules/composite.py` 的 `__eq__` 缺口 | §1 補充 `dsl/` 元件與資料流;§4.3 更新為「已解決」;新增 §4.7 | 已完成 |
 | Phase 4(Capstone) | 三個 YAML 策略熱切換驗證完成 | 新增一節記錄熱切換測試結果與計時演練結論 | 待進行 |
+| Live 遷移 Stage 1 | port `account_feed.py`/`market_feed.py` | 新增 §6 | 已完成 |
+| Live 遷移 Stage 2 | 新增 pybit 執行層,取代 ccxt | §6 更新 Stage 2 狀態 | 待進行 |
+| Live 遷移 Stage 3 | `StrategyRunner` 泛化支援真實 broker | §6 更新 Stage 3 狀態;可能需要更新 §1 元件關係圖 | 待進行 |
+
+## 6. Live 遷移(進行中)——`strategy_lab/live/`
+
+**這是唯一會連真實服務、需要真實憑證的部分。** 跟本文件前五節描述的
+「教學沙盒」核心(`broker/`、`plugins/`、`engine/`)刻意分開成獨立套件
+`strategy_lab/live/`,不混在同一個命名空間裡——沙盒的承諾(不呼叫任何
+真實交易所 API、不持有任何 API key)仍然對 `broker/`/`plugins/`/
+`engine/` 成立,`live/` 是額外疊加、明確標示風險等級不同的一層。
+
+目標是把 `sat_strategy`(目前正在真實 mainnet 帳戶上運行的機器人)移植
+過來,採分階段進行,每階段獨立驗證:
+
+- **Stage 1(已完成)**:`live/account_feed.py`、`live/market_feed.py`
+  ——從 `sat_strategy/app/{account_feed,market_feed}.py` 移植,行為完全
+  一致。訂閱 Fa_Successful_trade 透過 Redis 廣播的市場/帳戶資料
+  (ticker 走 Pub/Sub、wallet/position/order 走 Streams + consumer
+  group)。純邏輯(`_handle_entry`/`_handle_message`)獨立成
+  unit test;真的驅動訂閱迴圈的部分,用 `fakeredis`(記憶體內的 Redis
+  實作)寫 integration test,不需要真實 Redis server。
+- **Stage 2(待進行)**:新的 Bybit 原生 API(`pybit`)執行層,取代
+  `sat_strategy` 目前用的 ccxt。
+- **Stage 3(待進行)**:把 `engine/runner.py` 的 `StrategyRunner`
+  泛化成可以接真實 broker(目前 `broker` 欄位寫死是 `PaperBroker`
+  型別),再組裝成完整可執行的真實策略。
+
+### 6.1 測試心得:fakeredis 的 `block` 參數不是真的阻塞
+
+寫 `account_feed.py` 的 integration test 時,原本想用「先啟動 feed、
+背景 thread 進入阻塞讀取、再從另一個 client 發布新訊息,驗證背景
+thread 會被喚醒接到」這種寫法(最貼近真實使用情境)。但 `fakeredis`
+的 `XREADGROUP ... BLOCK 5000` 並不會真的阻塞等待——呼叫後幾乎立刻
+(<1ms)回傳空結果,不會等新資料進來才回傳。這造成兩個後果:
+
+1. 測試本身不穩定:訊息在背景 thread 「阻塞」期間才發布,常常來不及
+   被下一輪迴圈撿到,或需要不合理長的等待時間。
+2. 更嚴重的是,因為 `_consume_loop()` 的 `while` 迴圈中間沒有任何
+   `sleep`(設計上依賴 `block=5000` 幫忙節流),`block` 一旦不是真的
+   阻塞,這個迴圈在測試裡會變成完全不節流的忙迴圈,瘋狂搶 CPU/GIL,
+   干擾到同一個測試 process 裡其他 thread(包含其他測試)的排程。
+
+**這個限制只存在於 fakeredis,對著真實 Redis 跑完全沒有這個問題**
+(真實 Redis 的 `BLOCK` 是真的阻塞)。對策不是硬跟 fakeredis 的限制
+纏鬥,是換一種一樣有效、但不依賴「阻塞期間被喚醒」這個時序的測試
+寫法:讓 consumer group 跟訊息都在呼叫 `feed.start()` **之前**就準備
+好,這樣第一次 `xreadgroup(">")` 呼叫時資料已經存在,不需要任何跨
+thread 的喚醒時序。`market_feed.py` 的 Pub/Sub 沒有這個問題——
+fakeredis 的 `pubsub().listen()` 阻塞語意是正確的,新訊息發布後會
+確實喚醒背景 thread,所以那邊維持「先啟動、再發布」的寫法。
