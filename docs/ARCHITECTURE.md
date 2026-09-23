@@ -300,8 +300,8 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 | Phase 3(DSL) | `registry.get()` 開始被 `dsl/loader.py` 實際呼叫;新增 `strategies/*.yaml`、`demo/run_from_yaml.py`;順帶修正 `rules/composite.py` 的 `__eq__` 缺口 | §1 補充 `dsl/` 元件與資料流;§4.3 更新為「已解決」;新增 §4.7 | 已完成 |
 | Phase 4(Capstone) | 三個 YAML 策略熱切換驗證完成 | 新增一節記錄熱切換測試結果與計時演練結論 | 待進行 |
 | Live 遷移 Stage 1 | port `account_feed.py`/`market_feed.py` | 新增 §6 | 已完成 |
-| Live 遷移 Stage 2 | 新增 pybit 執行層,取代 ccxt | §6 更新 Stage 2 狀態 | 待進行 |
-| Live 遷移 Stage 3 | `StrategyRunner` 泛化支援真實 broker | §6 更新 Stage 3 狀態;可能需要更新 §1 元件關係圖 | 待進行 |
+| Live 遷移 Stage 2 | 新增 `live/bybit_client.py`(pybit 執行層,取代 ccxt) | §6 更新 Stage 2 狀態;新增 §6.2 | 已完成 |
+| Live 遷移 Stage 3 | `StrategyRunner` 泛化支援真實 broker,接進真實 API key | §6 更新 Stage 3 狀態;可能需要更新 §1 元件關係圖 | 待進行(需要真實 API key) |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -321,11 +321,17 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
   group)。純邏輯(`_handle_entry`/`_handle_message`)獨立成
   unit test;真的驅動訂閱迴圈的部分,用 `fakeredis`(記憶體內的 Redis
   實作)寫 integration test,不需要真實 Redis server。
-- **Stage 2(待進行)**:新的 Bybit 原生 API(`pybit`)執行層,取代
-  `sat_strategy` 目前用的 ccxt。
-- **Stage 3(待進行)**:把 `engine/runner.py` 的 `StrategyRunner`
-  泛化成可以接真實 broker(目前 `broker` 欄位寫死是 `PaperBroker`
-  型別),再組裝成完整可執行的真實策略。
+- **Stage 2(已完成)**:`live/bybit_client.py`——包裝 `pybit`(Bybit V5
+  原生 SDK),取代 `sat_strategy` 目前用的 ccxt。方法對應 bot.py 原本
+  呼叫 ccxt 的方法一對一改寫(`get_last_price`/`place_limit_order`/
+  `place_market_order`/`get_order_status`/`cancel_order`/
+  `get_position_qty`)。**還沒接上任何真實 API key**——建構子透過
+  `http_client` 參數注入真正的 `pybit.unified_trading.HTTP` 或測試用
+  的假 client,unit/integration test 全部用假 client,不會打真正的
+  網路請求。見 §6.2。
+- **Stage 3(待進行,需要真實 API key)**:把 `engine/runner.py` 的
+  `StrategyRunner` 泛化成可以接真實 broker(目前 `broker` 欄位寫死是
+  `PaperBroker` 型別),再組裝成完整可執行的真實策略。
 
 ### 6.1 測試心得:fakeredis 的 `block` 參數不是真的阻塞
 
@@ -350,3 +356,35 @@ thread 會被喚醒接到」這種寫法(最貼近真實使用情境)。但 `fak
 thread 的喚醒時序。`market_feed.py` 的 Pub/Sub 沒有這個問題——
 fakeredis 的 `pubsub().listen()` 阻塞語意是正確的,新訊息發布後會
 確實喚醒背景 thread,所以那邊維持「先啟動、再發布」的寫法。
+
+### 6.2 `bybit_client.py`:用依賴注入避開「需要真實 API key 才能測試」
+
+`BybitClient` 的建構子不會自己在內部寫死
+`pybit.unified_trading.HTTP(...)`,而是透過 `http_client` 參數注入:
+不傳的話,預設才真的去建一個連真實 Bybit API 的 client(需要真實
+key/secret);測試時直接塞一個符合相同方法介面(`get_tickers`/
+`place_order`/`get_open_orders`/`get_order_history`/`cancel_order`/
+`get_positions`)的假物件進去。這是 Stage 2 完全不需要真實 API key
+就能把 unit test + integration test 寫完、跑綠的原因——跟
+`engine/runner.py` 的 `PaperBroker` 是同一種取捨:用一個滿足相同介面
+的假實作,把「策略邏輯」跟「這個假/真實作是怎麼運作的」分開測試。
+
+Unit test(`tests/unit/test_live_bybit_client.py`)用一個無狀態的假
+client(`FakeHTTP`),每個方法各自獨立驗證單一次呼叫的參數/回傳值轉換
+對不對。Integration test
+(`tests/integration/test_live_bybit_client_integration.py`)用一個
+**有狀態**的假 Bybit 伺服器(`StatefulFakeBybitServer`,角色類似
+`broker/paper_broker.py` 的 `PaperBroker`),模擬「下單後查 open、
+交易所端成交後再查變成 closed」這種跨多次呼叫的真實使用情境,包括
+`_cancel_order()` 對一張其實已經成交的單重複送取消時,`InvalidRequestError`
+要被吞掉、不能讓整個 cleanup 流程炸掉——對應 `sat_strategy/app/bot.py`
+`_cancel_order()` 的 `except ccxt.OrderNotFound: return` 那段邏輯。
+
+`get_order_status()` 的實作對應到 Bybit V5 API 一個跟 ccxt 不同的地方
+值得記錄:ccxt 的 `fetch_open_order`/`fetch_closed_order` 是兩個分開的
+方法,呼叫端(bot.py)自己判斷 `ccxt.OrderNotFound` 決定要不要 fallback
+查歷史;Bybit V5 原生 API 沒有這種「找不到就丟例外」的機制,
+`get_open_orders`/`get_order_history` 各自單純回傳空列表或有內容的
+列表,`BybitClient.get_order_status()` 內部自己做「先查 open,空的話
+查 history」的邏輯,把這個查詢順序的細節封裝起來,不讓呼叫端知道
+底層是兩個分開的 API。
