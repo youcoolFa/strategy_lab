@@ -304,7 +304,7 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 | Live 遷移 Stage 2 | 新增 `live/bybit_client.py`(pybit 執行層,取代 ccxt) | §6 更新 Stage 2 狀態;新增 §6.2 | 已完成 |
 | Live 遷移 Stage 3.1 | 泛化 `Broker`/`OrderLike` Protocol,`StrategyRunner.broker` 不再寫死 `PaperBroker` 型別 | §1 元件關係圖新增 Broker Protocol;§6 更新 Stage 3.1 狀態 | 已完成 |
 | Live 遷移 Stage 3.2 | `LiveBroker` 包裝 `BybitClient`,滿足 `Broker` Protocol;新增 `OrderResult.price` 欄位;修正共用假伺服器不模擬市價單立即成交的缺口 | §6 更新 Stage 3.2 狀態;新增 §6.3 | 已完成 |
-| Live 遷移 Stage 3.3 | `dry_run` 安全開關 | §6 更新 Stage 3.3 狀態 | 待進行 |
+| Live 遷移 Stage 3.3 | `LiveBroker` 新增 `dry_run` 安全開關(預設 `True`) | §6 更新 Stage 3.3 狀態;新增 §6.4 | 已完成 |
 | Live 遷移 Stage 3.4 | 真實執行入口 + 真實 API key | §6 更新 Stage 3.4 狀態 | 待進行(需要真實 API key) |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
@@ -353,9 +353,11 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
     (entry=買、exit=賣),不能因為呼叫端忘記傳而意外開出新倉。
     `tick(price)` 是刻意的 no-op。qty/price 精度目前沒有另外處理
     (不是這一步的範圍,見 §6.3 的討論)。見 §6.3。
-  - **3.3(待進行)**:`dry_run` 安全開關——目前 `BybitClient` 完全沒有
-    這個機制,呼應 `sat_strategy/app/bot.py` 每個下單方法前的
-    `if self.config.dry_run: return ...`。
+  - **3.3(已完成)**:`LiveBroker` 新增 `dry_run` 安全開關(預設
+    `True`),呼應 `sat_strategy/app/bot.py` 每個下單方法前的
+    `if self.config.dry_run: return ...`。放在 `LiveBroker` 而不是
+    `BybitClient`——`BybitClient` 保持忠實、無條件包裝真實 API,「要不要
+    真的下單」的決策屬於 `LiveBroker`。見 §6.4。
   - **3.4(待進行,需要真實 API key)**:`.env` 載入真實憑證 + 真正的
     執行入口(對應 `sat_strategy/app/bot.py` 的 `main()`)。
 
@@ -460,3 +462,33 @@ capstone 測試(把多個元件真的接在一起跑一次完整循環)才抓得
 Step 的範圍),留到真的要接真實帳戶、真實 symbol 時再處理——可以是
 `LiveBroker` 建構時傳入固定的精度設定,或呼叫 Bybit 的
 `get_instruments_info` 動態查詢,兩者取捨留到那時候再決定。
+
+### 6.4 `dry_run`:放在 `LiveBroker`,不是 `BybitClient`,而且「成交」的時機點刻意對齊 bot.py
+
+`dry_run`(預設 `True`)決定要不要真的呼叫 `BybitClient`。刻意放在
+`LiveBroker` 而不是 `BybitClient`:`BybitClient` 保持忠實、無條件包裝
+真實 API——即使在模擬模式下,可能還是想用它查真實價格;「要不要真的
+下單」這個決策,屬於策略執行邏輯這一層,對應到
+`sat_strategy/app/bot.py` 的 `_place_entry_order`/`_place_exit_order`/
+`_cancel_order`/`_get_open_position_qty`,不是 ccxt 那一層該管的事。
+
+**dry-run 訂單「成交」的時機點,刻意對齊 bot.py 的假設,不是下單當下
+就立即成交。** bot.py 的 dry-run 邏輯在 `_wait_until_filled_or_stop()`
+輪詢迴圈裡:「dry-run 模式沒有真的交易所可以查,直接視為立即成交,
+方便測試整體流程」——也就是說,是**第一次查詢訂單狀態時**才變成
+已成交,不是下單那一刻。`LiveBroker` 照同樣邏輯設計:`place_limit_buy`/
+`place_limit_sell` 回傳的訂單狀態是 `"open"`,要等**第一次
+`fetch_order()` 被呼叫**才轉成 `"closed"`。這個時機點的選擇,對
+`runner.py` 來說沒有可觀察的差異(它下單後一定會在下一次 tick 呼叫
+`fetch_order()` 才會知道有沒有成交),純粹是為了讓 `LiveBroker` 的
+dry-run 行為跟 bot.py 的既有假設完全對齊,而不是自己發明一套新的
+語意。
+
+**最強的安全驗證方式,不是斷言某個旗標,是斷言底層完全沒被呼叫過。**
+`tests/integration/test_live_broker_dry_run_integration.py` 用一個
+`RecordingBybitClient`——它不接受任何 `http_client`,任何方法被呼叫
+就直接 `AssertionError`。整個 `StrategyRunner` 跑完一次完整的
+進場→成交→出場→成交→收攤循環之後,斷言 `client.calls == []`——
+不是「檢查程式碼裡有沒有寫 `if dry_run`」這種靜態檢查,是讓整條路徑
+真的跑一次,用一個「只要被碰到就會炸」的假物件去證明底層真的完全
+沒被觸碰過。

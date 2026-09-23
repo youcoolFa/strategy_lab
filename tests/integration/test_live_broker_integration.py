@@ -8,7 +8,11 @@ PaperBroker 版本語意一致的完整進出場循環。runner.py 完全不知�
 跟 PaperBroker 版本的關鍵時序差異:PaperBroker.tick(price) 餵價格就會
 自動成交;LiveBroker.tick() 是 no-op,成交要靠外部呼叫
 server.fill_order() 模擬交易所端撮合,再讓 runner 下一次 tick() 去輪詢
-才會發現——這才是真實交易所非同步撮合的樣子。"""
+才會發現——這才是真實交易所非同步撮合的樣子。
+
+全部明確傳 `dry_run=False`——這裡就是要測「真的接上(假)交易所」那條
+路徑,`dry_run` 預設的安全值 `True` 會讓它完全不碰 `server`,那是
+test_live_broker_dry_run_integration.py 測的東西。"""
 
 from datetime import datetime, timedelta, timezone
 
@@ -24,7 +28,7 @@ from strategy_lab.plugins.time_window.weekly_window import WeeklyWindow
 
 def make_runner(server: StatefulFakeBybitServer) -> StrategyRunner:
     bybit_client = BybitClient(api_key="test", api_secret="test", http_client=server)
-    live_broker = LiveBroker(client=bybit_client, symbol="BTCUSDT")
+    live_broker = LiveBroker(client=bybit_client, symbol="BTCUSDT", dry_run=False)
     return StrategyRunner(
         entry=DeviationFromReferenceEntry(deviation_pct=1.0),
         exit=ReturnToReferenceExit(),
@@ -83,7 +87,7 @@ class TestStrategyRunnerWithLiveBroker:
 
         server = StatefulFakeBybitServer()
         bybit_client = BybitClient(api_key="test", api_secret="test", http_client=server)
-        live_broker = LiveBroker(client=bybit_client, symbol="BTCUSDT")
+        live_broker = LiveBroker(client=bybit_client, symbol="BTCUSDT", dry_run=False)
         runner = StrategyRunner(
             entry=DeviationFromReferenceEntry(deviation_pct=1.0),
             exit=ReturnToReferenceExit(),
