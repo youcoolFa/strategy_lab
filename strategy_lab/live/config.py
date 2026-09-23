@@ -1,0 +1,81 @@
+"""
+live/config.py
+
+對應 sat_strategy/app/config.py 的 StrategyConfig/load_config() 同一種
+設計:dataclass 預設值本身要是安全的,JSON 設定檔 + 環境變數才能覆蓋成
+真的要上線的樣子。`dry_run`/`testnet`/`use_live_ticker_feed` 的預設值
+逐項對照 sat_strategy 自己的預設值,不是隨意選的。
+
+**這個檔案不重複放策略參數**(symbol/order_qty/進出場邏輯/時間窗那些)
+——那些已經在 strategies/*.yaml 裡,透過 dsl.loader.load_strategy()
+讀取。這裡只放「怎麼執行」這一層的設定(要不要真的下單、連哪個網路、
+輪詢間隔、要不要用即時 feed),跟 sat_strategy 把所有參數混在同一個
+StrategyConfig 裡不一樣——Phase 3 的 DSL 已經把「策略是什麼」跟
+「怎麼跑」分開了,這裡沒有必要走回頭路。
+
+實際要上線的設定值(dry_run=false、testnet=false 這種),故意不由這個
+程式庫自己建立/提交進 git——那是使用者自己在部署時明確建立
+live_execution_config.json 的動作,不是「寫程式碼」這件事本身該包含
+的一步。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Optional
+
+from loguru import logger
+
+_DEFAULT_CONFIG_JSON_PATH = Path(__file__).resolve().parents[2] / "live_execution_config.json"
+
+
+@dataclass
+class ExecutionConfig:
+    # --- 要跑哪個策略(參數本身在 YAML 裡,不在這裡) ---
+    strategy_path: str = "strategies/weekend_mean_reversion.yaml"
+    symbol_override: Optional[str] = None  # Bybit 原生格式(如 "BTCUSDT");不設就從 YAML 的 symbol 轉換
+
+    # --- 執行安全設定(預設值對照 sat_strategy/app/config.py) ---
+    dry_run: bool = True
+    testnet: bool = True
+    poll_interval_seconds: int = 5
+    max_api_retries: int = 5
+    retry_backoff_cap_seconds: float = 30.0
+
+    # --- 即時行情 feed(對照 sat_strategy 的 use_live_ticker_feed) ---
+    # 預設關閉:Fa_Successful_trade 接的網路不一定跟這裡的 testnet 設定
+    # 一致,用錯網路的即時價格對策略是誤導,不是幫助。
+    use_live_ticker_feed: bool = False
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def load_execution_config(config_path: Optional[Path] = None) -> ExecutionConfig:
+    """先用 ExecutionConfig 的安全預設值,若設定檔存在就覆蓋,環境變數
+    最後覆蓋一次(方便在 shell 腳本裡臨時切換,不用改設定檔)。"""
+    config = ExecutionConfig()
+    path = config_path or _DEFAULT_CONFIG_JSON_PATH
+
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            overrides = json.load(f)
+        unknown_keys = set(overrides) - set(config.to_dict())
+        if unknown_keys:
+            logger.warning(f"{path} 裡有不認得的欄位,已忽略: {unknown_keys}")
+        for key, value in overrides.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+        logger.info(f"已從 {path} 載入執行參數覆蓋")
+
+    if os.getenv("STRATEGY_LAB_DRY_RUN") is not None:
+        config.dry_run = os.getenv("STRATEGY_LAB_DRY_RUN").lower() in ("1", "true", "yes")
+    if os.getenv("STRATEGY_LAB_TESTNET") is not None:
+        config.testnet = os.getenv("STRATEGY_LAB_TESTNET").lower() in ("1", "true", "yes")
+    if os.getenv("STRATEGY_LAB_USE_LIVE_FEED") is not None:
+        config.use_live_ticker_feed = os.getenv("STRATEGY_LAB_USE_LIVE_FEED").lower() in ("1", "true", "yes")
+
+    return config

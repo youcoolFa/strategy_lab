@@ -305,7 +305,7 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 | Live 遷移 Stage 3.1 | 泛化 `Broker`/`OrderLike` Protocol,`StrategyRunner.broker` 不再寫死 `PaperBroker` 型別 | §1 元件關係圖新增 Broker Protocol;§6 更新 Stage 3.1 狀態 | 已完成 |
 | Live 遷移 Stage 3.2 | `LiveBroker` 包裝 `BybitClient`,滿足 `Broker` Protocol;新增 `OrderResult.price` 欄位;修正共用假伺服器不模擬市價單立即成交的缺口 | §6 更新 Stage 3.2 狀態;新增 §6.3 | 已完成 |
 | Live 遷移 Stage 3.3 | `LiveBroker` 新增 `dry_run` 安全開關(預設 `True`) | §6 更新 Stage 3.3 狀態;新增 §6.4 | 已完成 |
-| Live 遷移 Stage 3.4 | 真實執行入口 + 真實 API key | §6 更新 Stage 3.4 狀態 | 待進行(需要真實 API key) |
+| Live 遷移 Stage 3.4 | `live/config.py`(執行參數)+ `live/main.py`(真正的執行入口)+ `StrategyRunner.request_stop()`(第三種收攤觸發);新增 `.env.example`/`live_execution_config.example.json` 範本 | §1 補充 `request_stop()`;§6 更新 Stage 3.4 狀態;新增 §6.5 | 程式碼已完成,**實際連真實帳戶執行需要使用者自己填入 `.env` 真實憑證** |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -358,8 +358,15 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
     `if self.config.dry_run: return ...`。放在 `LiveBroker` 而不是
     `BybitClient`——`BybitClient` 保持忠實、無條件包裝真實 API,「要不要
     真的下單」的決策屬於 `LiveBroker`。見 §6.4。
-  - **3.4(待進行,需要真實 API key)**:`.env` 載入真實憑證 + 真正的
-    執行入口(對應 `sat_strategy/app/bot.py` 的 `main()`)。
+  - **3.4(程式碼已完成,實際執行需要真實 API key)**:`live/config.py`
+    的 `ExecutionConfig`(執行參數,不重複放策略參數——那些在
+    `strategies/*.yaml` 裡)+ `live/main.py` 的 `main()`(對應
+    `sat_strategy/app/bot.py` 的 `main()`),真的用 `datetime.now()` +
+    `time.sleep()` 驅動 `runner.tick()`,不是靠 `SyntheticFeed`。順帶
+    幫 `StrategyRunner` 補上 `request_stop()`——第三種觸發 `_cleanup()`
+    的方式(跟 `time_window`/`kill_switch` 平行),對應
+    `bot.py` 的 `_stop_requested`,讓 SIGINT/SIGTERM 能優雅收攤而不是
+    直接砍掉 process 留下沒人管的真實掛單或部位。見 §6.5。
 
 ### 6.1 測試心得:fakeredis 的 `block` 參數不是真的阻塞
 
@@ -492,3 +499,39 @@ dry-run 行為跟 bot.py 的既有假設完全對齊,而不是自己發明一套
 不是「檢查程式碼裡有沒有寫 `if dry_run`」這種靜態檢查,是讓整條路徑
 真的跑一次,用一個「只要被碰到就會炸」的假物件去證明底層真的完全
 沒被觸碰過。
+
+### 6.5 `live/main.py`:真正的執行入口,以及一個補回去的缺口(`request_stop`)
+
+**執行參數(`live/config.py`)刻意不重複放策略參數。** `sat_strategy`
+的 `StrategyConfig` 把「策略是什麼」(symbol、entry_deviation_pct、
+時間窗)跟「怎麼執行」(dry_run、testnet、輪詢間隔)混在同一個
+dataclass 裡;`strategy_lab` 因為 Phase 3 已經有 DSL 把「策略是什麼」
+獨立成 `strategies/*.yaml`,`ExecutionConfig` 只放「怎麼執行」這一層,
+不重複定義。`dry_run`/`testnet`/`use_live_ticker_feed` 的預設值逐項
+對照 `sat_strategy/app/config.py` 自己的預設值,不是隨意選的。
+
+**真的要上線的設定值,不是這個程式庫自己建立的。** `live_execution_config.json`
+(`dry_run: false`、`testnet: false` 這種)故意沒有被這次工作建立或
+提交進 git——只有一個安全範本 `live_execution_config.example.json`
+(`dry_run: true`)。要不要把某個部署的設定改成正式上線,是使用者自己
+複製範本、改值的動作,不是寫程式碼這件事本身該包含的一步。`.env`
+同理,只留 `.env.example`,兩個檔案都已經加進 `.gitignore`。
+
+**`request_stop()`:寫 `main.py` 的即時迴圈時,發現 `StrategyRunner`
+少了一種「該不該收攤」的觸發方式。** `time_window`(排程時間)、
+`kill_switch`(市場行為)都已經有,但「收到 SIGINT/SIGTERM 外部訊號」
+完全沒有對應機制——如果直接讓 `main.py` 收到訊號就砍掉 process,
+一張真實掛單或一個真實部位可能就這樣被晾在那裡沒人管。補法是幫
+`StrategyRunner` 加一個公開方法 `request_stop()`(對應
+`sat_strategy/app/bot.py` 的 `_stop_requested`),`tick()` 裡新增
+第三個檢查,三者(`time_window`/`kill_switch`/`request_stop`)都觸發
+同一個 `_cleanup()`,`runner.py` 完全不需要分辨是哪一個觸發的——這跟
+`kill_switch` 當初被加進來的方式一模一樣,是同一種「新增一種平行的
+收攤觸發方式」的擴充模式,不是重新設計狀態機。
+
+**`run_forever()` 的無限迴圈本身,用可注入的假時鐘測試,不用真的等待
+牆上時間經過。** `now_fn` 參數預設是 `lambda: datetime.now(HKT)`,測試
+時可以換成一個手動推進的假時鐘,配合 monkeypatch 掉 `time.sleep`
+跟 `get_current_price`,讓迴圈在測試裡幾毫秒內跑完一次完整循環——跟
+這整個專案一路下來的依賴注入取捨完全一致(`SyntheticFeed`、
+`http_client`、`redis_url` 都是同一個模式)。

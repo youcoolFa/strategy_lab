@@ -22,8 +22,10 @@ rules/ 這一層組出來的 Condition 樹(見 strategy_lab/interfaces.py 的
 
 `kill_switch`(選填)是第四種、跟 `time_window` 平行的「該不該收攤」
 判斷,差別只在觸發原因:`time_window` 管排程時間,`kill_switch` 管市場
-行為(價格)。兩者都觸發同一個 `_cleanup()`,`tick()` 裡依序檢查,任一個
-成立就收攤,不需要分辨是哪一個觸發的。
+行為(價格)。`request_stop()`(對應 bot.py 的 `_stop_requested`)是第
+三種——外部訊號(SIGINT/SIGTERM)要求停止,不是策略邏輯自己判斷的。
+三者都觸發同一個 `_cleanup()`,`tick()` 裡依序檢查,任一個成立就收攤,
+不需要分辨是哪一個觸發的。
 """
 
 from __future__ import annotations
@@ -70,6 +72,14 @@ class StrategyRunner:
     price_history: List[float] = field(default_factory=list, init=False)
     trades: List[Trade] = field(default_factory=list, init=False)
     entry_time: Optional[datetime] = field(default=None, init=False)
+    _stop_requested: bool = field(default=False, init=False)
+
+    def request_stop(self) -> None:
+        """對應 sat_strategy/app/bot.py 的 _stop_requested——給外部訊號
+        處理器(SIGINT/SIGTERM)呼叫,不是策略邏輯自己決定要停。下一次
+        tick() 會觸發 _cleanup(),跟 time_window/kill_switch 待遇一樣:
+        取消未成交單、強制平倉,不會留下沒人管的真實掛單或部位。"""
+        self._stop_requested = True
 
     def start(self, now: datetime, price: float) -> None:
         """在整個窗口期間只捕捉一次 origin_price 與 window_end,跟
@@ -94,6 +104,10 @@ class StrategyRunner:
             return
 
         if self.kill_switch is not None and self.kill_switch.rule.evaluate(self._ctx(now, price)):
+            self._cleanup()
+            return
+
+        if self._stop_requested:
             self._cleanup()
             return
 

@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 .DS_Store
 .idea/
+
+# 真實憑證與真實執行設定——絕對不進 git,只留範本(*.example)。
+.env
+live_execution_config.json

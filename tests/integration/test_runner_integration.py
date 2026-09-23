@@ -135,3 +135,50 @@ class TestKillSwitchInterruptsMidPosition:
         assert runner.state == RunState.STOPPED
         assert runner.broker.position_qty() == 0.0  # 強制平倉
         assert runner.trades == []  # 不是走正常出場流程,不會產生 Trade 紀錄
+
+
+class TestRequestStopInterruptsMidPosition:
+    """對應 sat_strategy/app/bot.py 的 _stop_requested——收到外部訊號
+    (SIGINT/SIGTERM)時,要能跟 time_window/kill_switch 一樣觸發
+    _cleanup(),不能讓真實執行入口收到 Ctrl+C 時直接把 process 砍掉、
+    留下沒人管的真實掛單或部位。"""
+
+    def test_request_stop_triggers_cleanup_even_mid_position(self):
+        runner = StrategyRunner(
+            entry=DeviationFromReferenceEntry(deviation_pct=1.0),
+            exit=ReturnToReferenceExit(),
+            time_window=WeeklyWindow(end_weekday=0, end_time="06:00", cleanup_buffer_minutes=5),
+            order_qty=1.0,
+        )
+        now = datetime(2026, 8, 1, 4, 0, tzinfo=timezone.utc)
+        runner.start(now, price=1000.0)
+
+        runner.tick(now, 1000.0)
+        runner.tick(now + timedelta(minutes=5), 989.0)
+        assert runner.state == RunState.ENTRY_PENDING
+        runner.tick(now + timedelta(minutes=10), 989.0)
+        assert runner.state == RunState.IN_POSITION
+        assert runner.broker.position_qty() == 1.0
+
+        runner.request_stop()
+        runner.tick(now + timedelta(minutes=15), 989.0)  # 還沒等到正常出場訊號
+
+        assert runner.state == RunState.STOPPED
+        assert runner.broker.position_qty() == 0.0  # 強制平倉
+
+    def test_request_stop_before_start_does_not_crash_first_tick(self):
+        """呼叫順序不該有隱藏的相依性——在 start() 之前就 request_stop()
+        (例如啟動腳本一收到訊號就呼叫)不應該讓第一次 tick() 出錯。"""
+        runner = StrategyRunner(
+            entry=DeviationFromReferenceEntry(deviation_pct=1.0),
+            exit=ReturnToReferenceExit(),
+            time_window=WeeklyWindow(end_weekday=0, end_time="06:00", cleanup_buffer_minutes=5),
+            order_qty=1.0,
+        )
+        runner.request_stop()
+        now = datetime(2026, 8, 1, 4, 0, tzinfo=timezone.utc)
+        runner.start(now, price=1000.0)
+
+        runner.tick(now, 1000.0)
+
+        assert runner.state == RunState.STOPPED
