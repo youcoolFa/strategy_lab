@@ -14,6 +14,12 @@ Phase 2 起,EntrySignal/ExitSignal 不再各自手寫 `should_enter`/
 `engine/runner.py` 呼叫 `rule.evaluate(ctx)` 決定「現在該不該觸發」。
 plugin 從此只保留「觸發之後價格怎麼算」這一半的邏輯——「什麼時候觸發」
 交給 rules/ 這一層。
+
+KillSwitch 是第四種 plugin 類型:跟 TimeWindow 一樣是「什麼時候該收攤」,
+但觸發原因是市場行為(價格),不是排程時間到了——這是刻意跟 TimeWindow
+分開的兩個獨立合約,不是把價格判斷硬塞進 TimeWindow 裡。跟
+EntrySignal/ExitSignal 不同的是,KillSwitch 觸發後不用計算任何價格,
+只需要告訴 runner「該收攤了」,所以合約裡只有 `rule`,沒有價格方法。
 """
 
 from __future__ import annotations
@@ -57,3 +63,8 @@ class ExitSignal(Protocol):
 class TimeWindow(Protocol):
     def window_end(self, now: datetime) -> datetime: ...
     def should_cleanup(self, now: datetime, window_end: datetime) -> bool: ...
+
+
+@runtime_checkable
+class KillSwitch(Protocol):
+    rule: "Condition"

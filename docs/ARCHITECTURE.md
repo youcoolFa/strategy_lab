@@ -4,9 +4,9 @@
 
 strategy_lab 是一個以 Python `dataclass` 為基礎的交易策略回測框架,採
 Plugin 化設計,將策略邏輯拆分為 entry(進場)、exit(出場)、
-time_window(時間窗)三類獨立模組,並透過統一的狀態機驅動執行。系統
-不連接任何真實交易所,僅對內建的模擬交易所(paper broker)與合成價格
-產生器運作。
+time_window(排程時間窗)、kill_switch(市場行為觸發的終止條件,選填)
+四類獨立模組,並透過統一的狀態機驅動執行。系統不連接任何真實交易所,
+僅對內建的模擬交易所(paper broker)與合成價格產生器運作。
 
 本文件對應目前(Phase 2:Rule Engine)完成後的架構狀態,涵蓋元件關係、
 核心狀態機、單次執行流程,以及目前已知的設計限制。
@@ -34,6 +34,7 @@ flowchart TD
         X3["exit/max_hold_duration.py"]
         T1["time_window/weekly_window.py"]
         T2["time_window/daily_session.py"]
+        K1["kill_switch/sustained_breakout.py"]
     end
 
     subgraph Sim["模擬交易所"]
@@ -50,7 +51,8 @@ flowchart TD
     E1 & E2 -. 實作 .-> I
     X1 & X2 & X3 -. 實作 .-> I
     T1 & T2 -. 實作 .-> I
-    E1 & E2 & X1 & X2 & X3 & T1 & T2 -. "@register" .-> R
+    K1 -. 實作 .-> I
+    E1 & E2 & X1 & X2 & X3 & T1 & T2 & K1 -. "@register" .-> R
 
     RC -. 實作 .-> RB
     RComp -. 實作 .-> RB
@@ -59,13 +61,15 @@ flowchart TD
     E1 & E2 -->|"__post_init__ 組出 self.rule"| RC
     X1 -->|"__post_init__ 組出 self.rule"| RC
     X2 & X3 -->|"__post_init__ 組出 self.rule"| RComp
+    K1 -->|"__post_init__ 組出 self.rule<br/>(有狀態 Condition)"| RC
 
     Run -->|"rule.evaluate(ctx) / entry_price"| E1
     Run -->|"rule.evaluate(ctx) / exit_price"| X1
     Run -->|"window_end / should_cleanup"| T1
+    Run -->|"rule.evaluate(ctx)(選填)"| K1
     Run -->|"place_limit_* / fetch_order / tick"| B
     F -->|"next(feed) 提供價格"| Demo
-    Demo -->|"組裝 entry/exit/time_window<br/>建構 StrategyRunner"| Run
+    Demo -->|"組裝 entry/exit/time_window/kill_switch<br/>建構 StrategyRunner"| Run
 ```
 
 **元件職責:**
@@ -73,7 +77,12 @@ flowchart TD
 - **合約層(interfaces.py / registry.py)**:定義 plugin 必須實作的形狀
   (`Protocol`),以及一個名稱到類別的查找表。不含任何策略邏輯。
   `EntrySignal`/`ExitSignal` 自 Phase 2 起改為暴露 `rule: Condition`
-  屬性,而非各自手寫的 `should_enter`/`should_exit` 方法。
+  屬性,而非各自手寫的 `should_enter`/`should_exit` 方法。`KillSwitch`
+  是第四種 plugin 合約,跟 `TimeWindow` 一樣代表「該不該收攤」,但觸發
+  原因是市場行為(價格)而非排程時間,因此獨立成另一個合約,而不是把
+  價格判斷塞進 `TimeWindow`。它比 `EntrySignal`/`ExitSignal` 更簡單:
+  只有 `rule`,沒有價格方法,因為觸發後不需要算任何價格,只需要告訴
+  runner「收攤」。
 - **Rule 層(Phase 2 新增)**:`rules/base.py` 定義 `Condition` 這個最小
   合約(`evaluate(ctx) -> bool`);`rules/conditions.py` 是實際判斷市場
   事實的具體條件;`rules/composite.py` 的 `And`/`Or`/`Not` 只依賴
@@ -90,7 +99,12 @@ flowchart TD
   以組合(而非繼承或匯入具體 plugin)的方式接收 `entry`/`exit`/
   `time_window` 三個物件,驅動狀態機。它只呼叫 `rule.evaluate(ctx)`,
   完全不需要知道 Rule 層的存在——這是 Rule 層可以整層插入、runner.py
-  幾乎不用改的原因(實際只改了兩行呼叫)。
+  幾乎不用改的原因(實際只改了兩行呼叫)。`kill_switch` 是選填欄位
+  (預設 `None`),不傳就完全不影響既有行為;有傳的話,`tick()` 在
+  `time_window.should_cleanup()` 之後、狀態分派之前檢查它,任一個
+  成立就呼叫同一個 `_cleanup()`——不管當下處於哪個狀態(包含
+  `IN_POSITION` 這種還沒等到正常出場訊號的當下),都會立刻取消未成交
+  單、強制平倉、轉入 `STOPPED`。
 - **`registry.py` 現況**:各 plugin 透過 `@register` 裝飾器完成登記,
   但目前尚無任何執行路徑呼叫 `registry.get()` ——`demo/*.py` 是以直接
   `import` 具體類別的方式組裝策略。此查找表是為未來的 DSL 載入器保留
@@ -111,10 +125,10 @@ stateDiagram-v2
     EXIT_PENDING --> IDLE: 賣單 status == closed<br/>_check_exit_fill() 寫入 Trade,清空 active_entry_price/entry_time
     EXIT_PENDING --> IN_POSITION: 賣單 status == canceled
 
-    IDLE --> STOPPED: time_window.should_cleanup() == True<br/>_cleanup()
-    ENTRY_PENDING --> STOPPED: should_cleanup() == True<br/>_cleanup() 取消未成交買單
-    IN_POSITION --> STOPPED: should_cleanup() == True<br/>_cleanup() 市價平倉
-    EXIT_PENDING --> STOPPED: should_cleanup() == True<br/>_cleanup() 取消未成交賣單、市價平倉
+    IDLE --> STOPPED: time_window.should_cleanup() == True<br/>或 kill_switch.rule.evaluate(ctx) == True<br/>_cleanup()
+    ENTRY_PENDING --> STOPPED: 同上<br/>_cleanup() 取消未成交買單
+    IN_POSITION --> STOPPED: 同上<br/>_cleanup() 市價平倉
+    EXIT_PENDING --> STOPPED: 同上<br/>_cleanup() 取消未成交賣單、市價平倉
 
     STOPPED --> [*]
 ```
@@ -213,6 +227,25 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 就掛著等」——在價格於窗口內反覆穿越門檻的情境下,理論上可能造成下單
 時機的 1 個 tick 延遲,但不影響最終成交結果。
 
+### 4.6 KillSwitch:`price_history` 沒有時間戳記,只能用有狀態的 Condition 繞過
+
+`StrategyContext.price_history` 是 `Sequence[float]`,只有價格、沒有
+對應的時間戳記,因此無法從外部把它切成「每一天」的資料——這是實作
+「連續 N 天價格超過門檻」這類跨日條件時會直接撞到的限制,而且屬於
+§4.1 描述的「Context 擴充成本」的具體案例:要修就得幫
+`StrategyContext`/`StrategyRunner` 新增一份帶時間戳記的歷史,牽動的
+檔案跟修 `entry_time` 時一樣多。
+
+`rules/conditions.py` 的 `SustainedPriceBreakout` 選擇繞開這個限制,
+而不是去修 `StrategyContext`:讓這個 `Condition` 物件自己在
+`evaluate()` 呼叫之間累積內部狀態(用 `ctx.now`/`ctx.price` 逐 tick
+捲出每日收盤),不依賴 `price_history`。本檔案裡其他的 `Condition`
+(`PriceBelowReference`、`MovingAverageCross` 等)都是無狀態的純函式
+——同一組 `ctx` 呼叫幾次結果都一樣;`SustainedPriceBreakout` 是目前
+唯一的例外,呼叫結果會因為之前呼叫過幾次、傳過什麼 `ctx` 而改變。
+`Condition` 合約本身(`evaluate(ctx) -> bool`)並沒有禁止這件事——只是
+剛好在這個案例之前,沒有 primitive 需要用到而已。
+
 ## 5. 文件維護提醒
 
 每個 Phase 完成後,應檢視並更新以下對應章節:
@@ -220,5 +253,6 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 | Phase | 內容變更 | 需更新的章節 | 狀態 |
 |---|---|---|---|
 | Phase 2(Rule Engine) | `plugins/` 的 `should_enter`/`should_exit` 改為宣告 `Condition` 樹 | §1 元件關係圖新增 `rules/` 子圖;§2 狀態圖標籤;§3 資料流追蹤改為 `plugin.rule.evaluate(ctx)`;新增 §4.5 | 已完成 |
+| Phase 2 擴充(KillSwitch) | 新增第四種 plugin 類型,用市場行為(而非排程時間)終止整個策略迴圈 | §1 新增 `kill_switch/` 節點;§2 狀態圖收攤觸發條件;新增 §4.6 | 已完成 |
 | Phase 3(DSL) | `registry.get()` 開始被 `dsl/loader.py` 實際呼叫 | §1 補充 `dsl/` 元件與資料流;§4.3 移除或修正「死碼路徑」描述 | 待進行 |
 | Phase 4(Capstone) | 三個 YAML 策略熱切換驗證完成 | 新增一節記錄熱切換測試結果與計時演練結論 | 待進行 |

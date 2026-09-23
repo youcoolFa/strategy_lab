@@ -15,6 +15,11 @@ Phase 2 起,「該不該進場/出場」不再是 plugin 自己手寫的
 rules/ 這一層組出來的 Condition 樹(見 strategy_lab/interfaces.py 的
 `EntrySignal`/`ExitSignal`)。這個檔案完全不需要知道 Condition 樹長
 什麼樣子,只需要知道它有 `.evaluate(ctx) -> bool`。
+
+`kill_switch`(選填)是第四種、跟 `time_window` 平行的「該不該收攤」
+判斷,差別只在觸發原因:`time_window` 管排程時間,`kill_switch` 管市場
+行為(價格)。兩者都觸發同一個 `_cleanup()`,`tick()` 裡依序檢查,任一個
+成立就收攤,不需要分辨是哪一個觸發的。
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ from enum import Enum, auto
 from typing import Iterator, List, Optional
 
 from strategy_lab.broker.paper_broker import Order, PaperBroker
-from strategy_lab.interfaces import EntrySignal, ExitSignal, StrategyContext, TimeWindow
+from strategy_lab.interfaces import EntrySignal, ExitSignal, KillSwitch, StrategyContext, TimeWindow
 
 
 class RunState(Enum):
@@ -50,6 +55,7 @@ class StrategyRunner:
     time_window: TimeWindow
     order_qty: float
     broker: PaperBroker = field(default_factory=PaperBroker)
+    kill_switch: Optional[KillSwitch] = None
 
     state: RunState = field(default=RunState.IDLE, init=False)
     window_end: Optional[datetime] = field(default=None, init=False)
@@ -70,6 +76,8 @@ class StrategyRunner:
         self.state = RunState.IDLE
 
     def tick(self, now: datetime, price: float) -> None:
+        """每收到一個新價格就執行一次，根據目前狀態決定下一步動作。"""
+
         if self.state == RunState.STOPPED:
             return
 
@@ -78,6 +86,10 @@ class StrategyRunner:
 
         assert self.window_end is not None, "呼叫 tick() 前必須先呼叫 start()"
         if self.time_window.should_cleanup(now, self.window_end):
+            self._cleanup()
+            return
+
+        if self.kill_switch is not None and self.kill_switch.rule.evaluate(self._ctx(now, price)):
             self._cleanup()
             return
 
@@ -112,6 +124,7 @@ class StrategyRunner:
             raise RuntimeError("run() 超過 max_ticks 仍未進入 STOPPED - 請檢查 time_window 設定")
 
     def _ctx(self, now: datetime, price: float) -> StrategyContext:
+        """建立當前策略上下文，供 rule.evaluate() 使用。"""
         return StrategyContext(
             now=now,
             price=price,
@@ -123,12 +136,16 @@ class StrategyRunner:
         )
 
     def _try_enter(self, now: datetime, price: float) -> None:
+        """檢查是否滿足進場條件，若滿足則下進場限價單。"""
+
         ctx = self._ctx(now, price)
         if self.entry.rule.evaluate(ctx):
             self.entry_order = self.broker.place_limit_buy(price=self.entry.entry_price(ctx), qty=self.order_qty)
             self.state = RunState.ENTRY_PENDING
 
     def _check_entry_fill(self, now: datetime) -> None:
+        """檢查進場單是否已成交或被取消。"""
+
         assert self.entry_order is not None
         order = self.broker.fetch_order(self.entry_order.id)
         if order.status == "closed":
@@ -139,6 +156,7 @@ class StrategyRunner:
             self.state = RunState.IDLE
 
     def _try_exit(self, now: datetime, price: float) -> None:
+        """檢查是否滿足進場條件，若滿足則下進場限價單。"""
         ctx = self._ctx(now, price)
         if self.exit.rule.evaluate(ctx):
             qty = self.broker.position_qty()
@@ -146,6 +164,7 @@ class StrategyRunner:
             self.state = RunState.EXIT_PENDING
 
     def _check_exit_fill(self) -> None:
+        """檢查出場單是否已成交或被取消。"""
         assert self.exit_order is not None
         order = self.broker.fetch_order(self.exit_order.id)
         if order.status == "closed":
@@ -158,6 +177,7 @@ class StrategyRunner:
             self.state = RunState.IN_POSITION
 
     def _cleanup(self) -> None:
+        """時間窗口結束時，取消所有未成交單並強制平倉。"""
         for order in (self.entry_order, self.exit_order):
             if order is not None:
                 self.broker.cancel_order(order.id)

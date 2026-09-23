@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from strategy_lab.interfaces import StrategyContext
 from strategy_lab.rules.conditions import (
     MaxDurationElapsed,
@@ -9,6 +11,7 @@ from strategy_lab.rules.conditions import (
     PriceAtOrAboveReference,
     PriceBelowReference,
     PriceChangeFromEntry,
+    SustainedPriceBreakout,
     simple_moving_average,
 )
 
@@ -101,3 +104,45 @@ class TestMaxDurationElapsed:
     def test_false_when_no_entry_time(self):
         condition = MaxDurationElapsed(max_minutes=30)
         assert condition.evaluate(make_ctx(entry_time=None)) is False
+
+
+class TestSustainedPriceBreakout:
+    def _tick(self, day: int, price: float) -> StrategyContext:
+        return make_ctx(now=datetime(2026, 1, day, tzinfo=timezone.utc), price=price)
+
+    def test_requires_both_margin_pct_and_margin_fixed_to_be_exclusive(self):
+        with pytest.raises(ValueError):
+            SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0)
+        with pytest.raises(ValueError):
+            SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, margin_pct=5.0, margin_fixed=1.0)
+
+    def test_false_while_fewer_than_days_have_finalized(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=3, margin_pct=5.0)
+        assert condition.evaluate(self._tick(1, 103.0)) is False
+        assert condition.evaluate(self._tick(2, 105.0)) is False
+        assert condition.evaluate(self._tick(3, 106.0)) is False  # 第3天還沒結束,只結算了 day1/day2
+
+    def test_true_once_days_finalized_all_above_threshold_and_average_above_margin(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=3, margin_pct=5.0)
+        for day, price in [(1, 103.0), (2, 105.0), (3, 106.0)]:
+            condition.evaluate(self._tick(day, price))
+        # day4 第一筆 tick 才會把 day3 的收盤(106.0)結算進去
+        assert condition.evaluate(self._tick(4, 999.0)) is True
+
+    def test_false_when_not_every_day_above_threshold(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=3, margin_pct=5.0)
+        for day, price in [(1, 103.0), (2, 99.0), (3, 106.0)]:  # day2 收盤沒超過門檻
+            condition.evaluate(self._tick(day, price))
+        assert condition.evaluate(self._tick(4, 999.0)) is False
+
+    def test_false_when_average_below_margin(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=3, margin_pct=20.0)
+        for day, price in [(1, 103.0), (2, 105.0), (3, 106.0)]:  # 平均 104.67,目標 90*1.2=108
+            condition.evaluate(self._tick(day, price))
+        assert condition.evaluate(self._tick(4, 999.0)) is False
+
+    def test_margin_fixed_mode(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=3, margin_fixed=15.0)
+        for day, price in [(1, 103.0), (2, 105.0), (3, 106.0)]:  # 平均 104.67,目標 90+15=105
+            condition.evaluate(self._tick(day, price))
+        assert condition.evaluate(self._tick(4, 999.0)) is False

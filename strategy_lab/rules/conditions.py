@@ -9,9 +9,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import timedelta
-from typing import Literal, Optional, Sequence
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import List, Literal, Optional, Sequence
 
 from strategy_lab.interfaces import StrategyContext
 
@@ -89,3 +89,54 @@ class MaxDurationElapsed:
         if ctx.entry_time is None:
             return False
         return ctx.now - ctx.entry_time >= timedelta(minutes=self.max_minutes)
+
+
+@dataclass
+class SustainedPriceBreakout:
+    """連續 `days` 個「已經結束」的日曆日,每日收盤價都超過
+    threshold_price,且這幾天的平均收盤價超過 reference_price 加上
+    margin_pct%(或 margin_fixed 的絕對值)——用來當終止整套策略迴圈的
+    kill switch 觸發條件,不是進出場條件。
+
+    跟本檔案其他 condition 不同:這個物件會在 evaluate() 呼叫之間累積
+    內部狀態(逐 tick 捲出每日收盤),因為 StrategyContext.price_history
+    本身沒有帶時間戳記,無法從外部反推「哪幾筆屬於同一天」——這個限制
+    記錄在 docs/ARCHITECTURE.md。「今天」尚未結束的部分不計入,只用已經
+    跨過日期邊界、確定收盤的日子。
+    """
+
+    threshold_price: float
+    reference_price: float
+    days: int = 3
+    margin_pct: Optional[float] = None
+    margin_fixed: Optional[float] = None
+
+    _current_date: Optional[date] = field(default=None, init=False, repr=False)
+    _current_close: Optional[float] = field(default=None, init=False, repr=False)
+    _finalized_closes: List[float] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if (self.margin_pct is None) == (self.margin_fixed is None):
+            raise ValueError("must set exactly one of margin_pct / margin_fixed")
+
+    def evaluate(self, ctx: StrategyContext) -> bool:
+        self._observe(ctx)
+        if len(self._finalized_closes) < self.days:
+            return False
+        recent = self._finalized_closes[-self.days :]
+        if not all(close > self.threshold_price for close in recent):
+            return False
+        avg = sum(recent) / len(recent)
+        target = (
+            self.reference_price * (1 + self.margin_pct / 100)
+            if self.margin_pct is not None
+            else self.reference_price + self.margin_fixed
+        )
+        return avg > target
+
+    def _observe(self, ctx: StrategyContext) -> None:
+        today = ctx.now.date()
+        if self._current_date is not None and today != self._current_date:
+            self._finalized_closes.append(self._current_close)
+        self._current_date = today
+        self._current_close = ctx.price
