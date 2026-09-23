@@ -1,0 +1,42 @@
+# 跟 weekend_mean_reversion.yaml 用同一套進出場邏輯,多加一層
+# kill_switch:如果價格連續突破(不是短暫的均值回歸,而是趨勢真的變了),
+# 就終止整個策略迴圈、強制平倉,不再繼續嘗試「買跌」。
+#
+# 注意:kill_switch 的 threshold_price/reference_price 是「絕對價格」,
+# 不像 entry 的 deviation_pct 是「相對百分比」——不會隨市場自動縮放。
+# 下面這兩個數字是示範用的參考值(對照 BTC/USDT 現貨/合約大致價位區間
+# 抓的),實際上線前要照當下真實市場價位重新校準,不能直接沿用。
+#
+# hours: 24——time_window(weekly_window)整個窗口只有約 50 小時(週六
+# 04:00 到週一 06:00),kill switch 的「連續小時數」一定要明顯短於這個
+# 窗口長度,不然永遠沒有機會真的觸發(這個限制記錄在
+# docs/ARCHITECTURE.md)。
+name: mean_reversion_breakout_guard
+symbol: BTC/USDT
+order_qty: 1.0
+
+entry:
+  type: deviation_from_reference
+  params:
+    deviation_pct: 0.75
+
+exit:
+  type: return_to_reference
+  params: {}
+
+time_window:
+  type: weekly_window
+  params:
+    start_weekday: 5
+    start_time: "04:00"
+    end_weekday: 0
+    end_time: "06:00"
+    cleanup_buffer_minutes: 5
+
+kill_switch:
+  type: sustained_breakout
+  params:
+    threshold_price: 62000.0
+    reference_price: 60000.0
+    hours: 24.0
+    margin_pct: 3.0

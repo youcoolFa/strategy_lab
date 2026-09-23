@@ -107,8 +107,14 @@ class TestMaxDurationElapsed:
 
 
 class TestSustainedPriceBreakout:
-    def _tick(self, day: int, price: float) -> StrategyContext:
-        return make_ctx(now=datetime(2026, 1, day, tzinfo=timezone.utc), price=price)
+    """用「連續 hours 小時」的滾動視窗,不是日曆日——日曆日版本需要
+    TimeWindow 撐過至少 N+1 個日期邊界才可能觸發,`WeeklyWindow` 預設
+    只有約 50 小時,連續 3 個日曆日永遠撐不到(見
+    docs/ARCHITECTURE.md)。改成小時為單位後不再有這種隱性下限。"""
+
+    def _tick(self, hours_offset: float, price: float) -> StrategyContext:
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return make_ctx(now=base + timedelta(hours=hours_offset), price=price)
 
     def test_requires_both_margin_pct_and_margin_fixed_to_be_exclusive(self):
         with pytest.raises(ValueError):
@@ -116,33 +122,43 @@ class TestSustainedPriceBreakout:
         with pytest.raises(ValueError):
             SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, margin_pct=5.0, margin_fixed=1.0)
 
-    def test_false_while_fewer_than_days_have_finalized(self):
-        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=3, margin_pct=5.0)
-        assert condition.evaluate(self._tick(1, 103.0)) is False
+    def test_false_before_observation_window_is_covered(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, hours=6.0, margin_pct=5.0)
+        assert condition.evaluate(self._tick(0, 103.0)) is False
         assert condition.evaluate(self._tick(2, 105.0)) is False
-        assert condition.evaluate(self._tick(3, 106.0)) is False  # 第3天還沒結束,只結算了 day1/day2
+        assert condition.evaluate(self._tick(5, 106.0)) is False  # 還沒滿 6 小時
 
-    def test_true_once_days_finalized_all_above_threshold_and_average_above_margin(self):
-        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=3, margin_pct=5.0)
-        for day, price in [(1, 103.0), (2, 105.0), (3, 106.0)]:
-            condition.evaluate(self._tick(day, price))
-        # day4 第一筆 tick 才會把 day3 的收盤(106.0)結算進去
-        assert condition.evaluate(self._tick(4, 999.0)) is True
+    def test_true_once_window_covered_all_above_threshold_and_average_above_margin(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, hours=6.0, margin_pct=5.0)
+        condition.evaluate(self._tick(0, 103.0))
+        condition.evaluate(self._tick(3, 105.0))
+        assert condition.evaluate(self._tick(6, 106.0)) is True  # 剛好滿 6 小時
 
-    def test_false_when_not_every_day_above_threshold(self):
-        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=3, margin_pct=5.0)
-        for day, price in [(1, 103.0), (2, 99.0), (3, 106.0)]:  # day2 收盤沒超過門檻
-            condition.evaluate(self._tick(day, price))
-        assert condition.evaluate(self._tick(4, 999.0)) is False
+    def test_false_when_any_observation_in_window_is_at_or_below_threshold(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, hours=6.0, margin_pct=5.0)
+        condition.evaluate(self._tick(0, 103.0))
+        condition.evaluate(self._tick(3, 99.0))  # 這一筆沒超過門檻
+        assert condition.evaluate(self._tick(6, 106.0)) is False
 
     def test_false_when_average_below_margin(self):
-        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=3, margin_pct=20.0)
-        for day, price in [(1, 103.0), (2, 105.0), (3, 106.0)]:  # 平均 104.67,目標 90*1.2=108
-            condition.evaluate(self._tick(day, price))
-        assert condition.evaluate(self._tick(4, 999.0)) is False
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, hours=6.0, margin_pct=20.0)
+        condition.evaluate(self._tick(0, 103.0))
+        condition.evaluate(self._tick(3, 105.0))
+        # 平均約 104.67,目標 90*1.2=108
+        assert condition.evaluate(self._tick(6, 106.0)) is False
 
     def test_margin_fixed_mode(self):
-        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=3, margin_fixed=15.0)
-        for day, price in [(1, 103.0), (2, 105.0), (3, 106.0)]:  # 平均 104.67,目標 90+15=105
-            condition.evaluate(self._tick(day, price))
-        assert condition.evaluate(self._tick(4, 999.0)) is False
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, hours=6.0, margin_fixed=15.0)
+        condition.evaluate(self._tick(0, 103.0))
+        condition.evaluate(self._tick(3, 105.0))
+        # 目標 90+15=105,平均約 104.67 沒超過
+        assert condition.evaluate(self._tick(6, 106.0)) is False
+
+    def test_old_observations_outside_the_window_no_longer_count(self):
+        """滾動視窗:很久以前一筆低於門檻的觀察,一旦滑出視窗之外,不該
+        繼續拖累後面的判斷。"""
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, hours=6.0, margin_pct=5.0)
+        condition.evaluate(self._tick(0, 50.0))  # 很低,但之後會滑出視窗
+        condition.evaluate(self._tick(10, 103.0))
+        condition.evaluate(self._tick(13, 105.0))
+        assert condition.evaluate(self._tick(16, 106.0)) is True  # 視窗是 [10,16],t=0 已經滑出去了

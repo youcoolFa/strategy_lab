@@ -35,7 +35,7 @@ def main() -> None:
         time_window=WeeklyWindow(end_weekday=5, end_time="06:00", cleanup_buffer_minutes=5),
         order_qty=1.0,
         kill_switch=SustainedBreakoutKillSwitch(
-            threshold_price=1010.0, reference_price=1000.0, days=3, margin_pct=3.0
+            threshold_price=1010.0, reference_price=1000.0, hours=72.0, margin_pct=3.0
         ),
     )
 

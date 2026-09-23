@@ -258,21 +258,53 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 ### 4.6 KillSwitch:`price_history` 沒有時間戳記,只能用有狀態的 Condition 繞過
 
 `StrategyContext.price_history` 是 `Sequence[float]`,只有價格、沒有
-對應的時間戳記,因此無法從外部把它切成「每一天」的資料——這是實作
-「連續 N 天價格超過門檻」這類跨日條件時會直接撞到的限制,而且屬於
-§4.1 描述的「Context 擴充成本」的具體案例:要修就得幫
+對應的時間戳記,因此無法從外部把它切成「一段時間」的資料——這是實作
+「連續一段時間價格超過門檻」這類跨 tick 條件時會直接撞到的限制,而且
+屬於 §4.1 描述的「Context 擴充成本」的具體案例:要修就得幫
 `StrategyContext`/`StrategyRunner` 新增一份帶時間戳記的歷史,牽動的
 檔案跟修 `entry_time` 時一樣多。
 
 `rules/conditions.py` 的 `SustainedPriceBreakout` 選擇繞開這個限制,
 而不是去修 `StrategyContext`:讓這個 `Condition` 物件自己在
 `evaluate()` 呼叫之間累積內部狀態(用 `ctx.now`/`ctx.price` 逐 tick
-捲出每日收盤),不依賴 `price_history`。本檔案裡其他的 `Condition`
+記錄觀察歷史),不依賴 `price_history`。本檔案裡其他的 `Condition`
 (`PriceBelowReference`、`MovingAverageCross` 等)都是無狀態的純函式
 ——同一組 `ctx` 呼叫幾次結果都一樣;`SustainedPriceBreakout` 是目前
 唯一的例外,呼叫結果會因為之前呼叫過幾次、傳過什麼 `ctx` 而改變。
 `Condition` 合約本身(`evaluate(ctx) -> bool`)並沒有禁止這件事——只是
 剛好在這個案例之前,沒有 primitive 需要用到而已。
+
+#### 4.6.1 從「連續 N 個日曆日」改成「連續 N 小時」的滾動視窗(重構)
+
+`SustainedPriceBreakout` 最初的設計是「連續 N 個日曆日」:內部用
+`date` 分桶,只有觀察到新的日期時才把前一天「結算」進
+`_finalized_closes`。這個設計在建立
+[`strategies/mean_reversion_breakout_guard.yaml`](../strategies/mean_reversion_breakout_guard.yaml)
+時暴露出一個真實的相容性 bug:這個策略沿用了 `weekly_window` 的
+`TimeWindow`(週六 04:00 到週一 06:00,整個窗口只有約 50 小時),
+kill switch 卻設成 `days=3`——用實際跑一遍 `StrategyRunner` 的狀態
+軌跡驗證後發現,`days=3` **永遠不可能觸發**,因為窗口本身的
+`should_cleanup()` 一定先在窗口自然結束時把迴圈停掉,3 個日曆日永遠
+撐不到那個時間點。這不是理論上的邊界案例,是照著使用者原始需求(連續
+3 天)直接套用時就會踩到的真實缺口。
+
+修法(使用者明確指示:「不用 day,全部改用小時作時間單位作計算」):
+把 `days: int` 整個改成 `hours: float`(預設 `72.0`,取代原本的
+`days=3`),內部狀態也從「日曆日分桶」改成「滾動時間視窗」:
+`_history: List[Tuple[datetime, float]]` 記錄每筆 `(觀察時間, 價格)`,
+每次 `evaluate()` 都先用 `ctx.now - timedelta(hours=self.hours)` 當
+cutoff,把過期的觀察值剪掉。好處是不再有「日曆日邊界」造成的隱性
+下限——`hours` 可以設成任何比 `TimeWindow` 窗口長度短的數值(例如
+`mean_reversion_breakout_guard.yaml` 用 `hours: 24.0`,明顯短於
+`weekly_window` 的 ~50 小時),不需要再擔心它跟日曆日邊界對不齊。
+`plugins/kill_switch/sustained_breakout.py` 的 `SustainedBreakoutKillSwitch`
+同步把 `days` 欄位改名為 `hours`,兩者的預設值都是對齊的
+`72.0`。所有既有測試(`test_rules_conditions.py`、
+`test_plugins_kill_switch.py`、`test_dsl_strategies_regression.py`、
+`test_runner_integration.py`、`test_live_broker_integration.py`、
+`demo/demo_kill_switch_sandbox.py`)都已同步改用 `hours=`,並重新驗證
+通過(185/185 測試,含新增的 `mean_reversion_breakout_guard.yaml`
+DSL regression 測試與滾動視窗剪除邏輯的獨立測試)。
 
 ### 4.7 `And`/`Or`/`Not` 原本沒有結構化的 `__eq__`(Phase 3 TDD 過程中發現並修正)
 
@@ -306,6 +338,7 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 | Live 遷移 Stage 3.2 | `LiveBroker` 包裝 `BybitClient`,滿足 `Broker` Protocol;新增 `OrderResult.price` 欄位;修正共用假伺服器不模擬市價單立即成交的缺口 | §6 更新 Stage 3.2 狀態;新增 §6.3 | 已完成 |
 | Live 遷移 Stage 3.3 | `LiveBroker` 新增 `dry_run` 安全開關(預設 `True`) | §6 更新 Stage 3.3 狀態;新增 §6.4 | 已完成 |
 | Live 遷移 Stage 3.4 | `live/config.py`(執行參數)+ `live/main.py`(真正的執行入口)+ `StrategyRunner.request_stop()`(第三種收攤觸發);新增 `.env.example`/`live_execution_config.example.json` 範本 | §1 補充 `request_stop()`;§6 更新 Stage 3.4 狀態;新增 §6.5 | 程式碼已完成,**實際連真實帳戶執行需要使用者自己填入 `.env` 真實憑證** |
+| `mean_reversion_breakout_guard` 策略 | 新增 `strategies/mean_reversion_breakout_guard.yaml`;發現並修正 `SustainedPriceBreakout`/`SustainedBreakoutKillSwitch` 的 `days`(日曆日)跟 `weekly_window` 窗口長度不相容的缺口,改為 `hours`(滾動時間視窗) | 新增 §4.6.1;更新 §4.6 用語 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 

@@ -95,7 +95,7 @@ class TestStrategyRunnerWithLiveBroker:
             order_qty=0.01,
             broker=live_broker,
             kill_switch=SustainedBreakoutKillSwitch(
-                threshold_price=985.0, reference_price=900.0, days=3, margin_pct=5.0
+                threshold_price=985.0, reference_price=900.0, margin_pct=5.0  # hours 用預設 72
             ),
         )
         now = datetime(2026, 8, 2, 4, 0, tzinfo=timezone.utc)
@@ -109,11 +109,11 @@ class TestStrategyRunnerWithLiveBroker:
         assert runner.state == RunState.IN_POSITION
         assert runner.broker.position_qty() == 0.01
 
-        # 跨 3 天,價格持平在 989(高於 kill switch 門檻 985,低於出場
-        # 目標 1000),讓 kill switch 有機會結算滿 3 天。
-        runner.tick(now + timedelta(days=1), 989.0)
-        runner.tick(now + timedelta(days=2), 989.0)
-        runner.tick(now + timedelta(days=3), 989.0)  # 結算滿 3 天,kill switch 觸發
+        # 跨 72 小時,價格持平在 989(高於 kill switch 門檻 985,低於
+        # 出場目標 1000),讓 kill switch 有機會累積滿滾動視窗。
+        runner.tick(now + timedelta(hours=24), 989.0)
+        runner.tick(now + timedelta(hours=48), 989.0)
+        runner.tick(now + timedelta(hours=72), 989.0)  # 滿 72 小時,kill switch 觸發
 
         assert runner.state == RunState.STOPPED
         assert runner.broker.position_qty() == 0.0  # LiveBroker.market_close() 已透過假伺服器平倉

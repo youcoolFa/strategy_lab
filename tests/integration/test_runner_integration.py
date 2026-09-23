@@ -107,7 +107,7 @@ class TestKillSwitchInterruptsMidPosition:
             time_window=WeeklyWindow(end_weekday=5, end_time="06:00", cleanup_buffer_minutes=5),
             order_qty=1.0,
             kill_switch=SustainedBreakoutKillSwitch(
-                threshold_price=985.0, reference_price=900.0, days=3, margin_pct=5.0
+                threshold_price=985.0, reference_price=900.0, margin_pct=5.0  # hours 用預設 72
             ),
         )
         now = datetime(2026, 8, 2, 4, 0, tzinfo=timezone.utc)  # 星期日,window_end 遠在 6 天後
@@ -124,14 +124,15 @@ class TestKillSwitchInterruptsMidPosition:
         assert runner.broker.position_qty() == 1.0
 
         # 接下來價格持平在 989(高於 kill switch 門檻 985,低於出場目標
-        # 1000,所以正常出場訊號不會觸發),每跨一天讓前一天收盤結算一次。
-        runner.tick(now + timedelta(days=1), 989.0)
-        assert runner.state == RunState.IN_POSITION  # 只結算了 1 天收盤,還不夠 3 天
+        # 1000,所以正常出場訊號不會觸發),持續累積觀察時間直到滿
+        # 72 小時的滾動視窗。
+        runner.tick(now + timedelta(hours=24), 989.0)
+        assert runner.state == RunState.IN_POSITION  # 觀察時間還沒滿 72 小時
 
-        runner.tick(now + timedelta(days=2), 989.0)
-        assert runner.state == RunState.IN_POSITION  # 結算了 2 天,還不夠
+        runner.tick(now + timedelta(hours=48), 989.0)
+        assert runner.state == RunState.IN_POSITION  # 還沒滿
 
-        runner.tick(now + timedelta(days=3), 989.0)  # 結算滿 3 天,kill switch 觸發
+        runner.tick(now + timedelta(hours=72), 989.0)  # 滿 72 小時,kill switch 觸發
         assert runner.state == RunState.STOPPED
         assert runner.broker.position_qty() == 0.0  # 強制平倉
         assert runner.trades == []  # 不是走正常出場流程,不會產生 Trade 紀錄

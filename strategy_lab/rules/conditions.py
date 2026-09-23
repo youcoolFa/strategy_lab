@@ -10,8 +10,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, timedelta
-from typing import List, Literal, Optional, Sequence
+from datetime import datetime, timedelta
+from typing import List, Literal, Optional, Sequence, Tuple
 
 from strategy_lab.interfaces import StrategyContext
 
@@ -93,27 +93,32 @@ class MaxDurationElapsed:
 
 @dataclass
 class SustainedPriceBreakout:
-    """連續 `days` 個「已經結束」的日曆日,每日收盤價都超過
-    threshold_price,且這幾天的平均收盤價超過 reference_price 加上
+    """過去連續 `hours` 個小時內,每一筆觀察到的價格都超過
+    threshold_price,且這段期間的平均價格超過 reference_price 加上
     margin_pct%(或 margin_fixed 的絕對值)——用來當終止整套策略迴圈的
     kill switch 觸發條件,不是進出場條件。
 
+    用「連續小時數」而不是「連續日曆日」(舊版設計):日曆日版本需要跨過
+    日期邊界才會「結算」一天,若 `TimeWindow` 本身的時間窗撐不過
+    N+1 個日曆日,kill switch 實質上永遠不會觸發——`WeeklyWindow` 預設
+    只有約 50 小時,連續 3 個日曆日永遠撐不到,這是實際遇到的問題,
+    不是理論上的顧慮(見 docs/ARCHITECTURE.md)。改成小時為單位的滾動
+    視窗後,不再有這種「日曆日邊界」造成的隱性下限。
+
     跟本檔案其他 condition 不同:這個物件會在 evaluate() 呼叫之間累積
-    內部狀態(逐 tick 捲出每日收盤),因為 StrategyContext.price_history
-    本身沒有帶時間戳記,無法從外部反推「哪幾筆屬於同一天」——這個限制
-    記錄在 docs/ARCHITECTURE.md。「今天」尚未結束的部分不計入,只用已經
-    跨過日期邊界、確定收盤的日子。
+    內部狀態(記錄每次觀察到的 (時間, 價格)),因為
+    StrategyContext.price_history 本身沒有帶時間戳記,無法從外部反推
+    每一筆的觀察時間——這個限制記錄在 docs/ARCHITECTURE.md。
     """
 
     threshold_price: float
     reference_price: float
-    days: int = 3
+    hours: float = 72.0
     margin_pct: Optional[float] = None
     margin_fixed: Optional[float] = None
 
-    _current_date: Optional[date] = field(default=None, init=False, repr=False)
-    _current_close: Optional[float] = field(default=None, init=False, repr=False)
-    _finalized_closes: List[float] = field(default_factory=list, init=False, repr=False)
+    _first_observed_at: Optional[datetime] = field(default=None, init=False, repr=False)
+    _history: List[Tuple[datetime, float]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if (self.margin_pct is None) == (self.margin_fixed is None):
@@ -121,12 +126,15 @@ class SustainedPriceBreakout:
 
     def evaluate(self, ctx: StrategyContext) -> bool:
         self._observe(ctx)
-        if len(self._finalized_closes) < self.days:
+
+        assert self._first_observed_at is not None
+        if ctx.now - self._first_observed_at < timedelta(hours=self.hours):
+            return False  # 觀察時間還沒涵蓋完整的 hours 視窗
+
+        if not all(price > self.threshold_price for _, price in self._history):
             return False
-        recent = self._finalized_closes[-self.days :]
-        if not all(close > self.threshold_price for close in recent):
-            return False
-        avg = sum(recent) / len(recent)
+
+        avg = sum(price for _, price in self._history) / len(self._history)
         target = (
             self.reference_price * (1 + self.margin_pct / 100)
             if self.margin_pct is not None
@@ -135,8 +143,9 @@ class SustainedPriceBreakout:
         return avg > target
 
     def _observe(self, ctx: StrategyContext) -> None:
-        today = ctx.now.date()
-        if self._current_date is not None and today != self._current_date:
-            self._finalized_closes.append(self._current_close)
-        self._current_date = today
-        self._current_close = ctx.price
+        if self._first_observed_at is None:
+            self._first_observed_at = ctx.now
+        self._history.append((ctx.now, ctx.price))
+
+        cutoff = ctx.now - timedelta(hours=self.hours)
+        self._history = [(t, price) for (t, price) in self._history if t >= cutoff]

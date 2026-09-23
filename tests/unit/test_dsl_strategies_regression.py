@@ -8,6 +8,7 @@ from strategy_lab.plugins.entry.deviation_from_reference import DeviationFromRef
 from strategy_lab.plugins.entry.ma_crossover import MACrossoverEntry
 from strategy_lab.plugins.exit.bracket_tp_sl import BracketTPSLExit
 from strategy_lab.plugins.exit.return_to_reference import ReturnToReferenceExit
+from strategy_lab.plugins.kill_switch.sustained_breakout import SustainedBreakoutKillSwitch
 from strategy_lab.plugins.time_window.daily_session import DailySession
 from strategy_lab.plugins.time_window.weekly_window import WeeklyWindow
 
@@ -30,3 +31,20 @@ class TestMACrossoverBracketYaml:
         assert strategy.entry == MACrossoverEntry(fast_window=5, slow_window=20)
         assert strategy.exit == BracketTPSLExit(take_profit_pct=1.0, stop_loss_pct=0.5)
         assert strategy.time_window == DailySession(start_time="09:00", end_time="17:00", cleanup_buffer_minutes=2)
+
+
+class TestMeanReversionBreakoutGuardYaml:
+    def test_matches_weekend_mean_reversion_entry_exit_time_window(self):
+        """進出場邏輯跟 weekend_mean_reversion.yaml 完全一樣,差別只在
+        多了 kill_switch。"""
+        strategy = load_strategy(STRATEGIES_DIR / "mean_reversion_breakout_guard.yaml")
+        assert strategy.order_qty == 1.0
+        assert strategy.entry == DeviationFromReferenceEntry(deviation_pct=0.75)
+        assert strategy.exit == ReturnToReferenceExit()
+        assert strategy.time_window == WeeklyWindow()
+
+    def test_kill_switch_is_resolved_with_matching_params(self):
+        strategy = load_strategy(STRATEGIES_DIR / "mean_reversion_breakout_guard.yaml")
+        assert strategy.kill_switch == SustainedBreakoutKillSwitch(
+            threshold_price=62000.0, reference_price=60000.0, hours=24.0, margin_pct=3.0
+        )
