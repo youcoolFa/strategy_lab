@@ -26,3 +26,10 @@ class DailySession:
 
     def should_cleanup(self, now: datetime, window_end: datetime) -> bool:
         return now >= window_end - timedelta(minutes=self.cleanup_buffer_minutes)
+
+    def max_span(self) -> timedelta:
+        """假設策略確實在 start_time 當下啟動,回傳場次的跨度(見
+        WeeklyWindow.max_span() 的說明,道理一樣)。"""
+        start_h, start_m = map(int, self.start_time.split(":"))
+        start_dt = datetime(2024, 1, 1, start_h, start_m)
+        return self.window_end(start_dt) - start_dt

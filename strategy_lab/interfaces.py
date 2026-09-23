@@ -34,7 +34,7 @@ Live 遷移 Stage 1 起,`Broker`/`OrderLike` 把 `engine/runner.py` 原本
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Optional, Protocol, Sequence, runtime_checkable
 
 if TYPE_CHECKING:
@@ -72,6 +72,7 @@ class ExitSignal(Protocol):
 class TimeWindow(Protocol):
     def window_end(self, now: datetime) -> datetime: ...
     def should_cleanup(self, now: datetime, window_end: datetime) -> bool: ...
+    def max_span(self) -> timedelta: ...
 
 
 @runtime_checkable

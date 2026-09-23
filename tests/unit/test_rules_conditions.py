@@ -162,3 +162,38 @@ class TestSustainedPriceBreakout:
         condition.evaluate(self._tick(10, 103.0))
         condition.evaluate(self._tick(13, 105.0))
         assert condition.evaluate(self._tick(16, 106.0)) is True  # 視窗是 [10,16],t=0 已經滑出去了
+
+
+class TestSustainedPriceBreakoutTimeUnits:
+    """`hours` 是內部唯一表示,但 YAML/呼叫端不一定想自己換算成小數小時
+    ——`minutes`/`days` 是方便輸入用的替代參數,三者互斥(跟
+    margin_pct/margin_fixed 同樣的「恰好給一個」模式),換算後效果要
+    跟直接寫等值的 hours 完全一樣。不支援 months/years:日曆月、年的
+    長度不固定,會重新引入「日曆邊界」那類問題(見
+    docs/ARCHITECTURE.md §4.6.1)。"""
+
+    def _tick(self, hours_offset: float, price: float) -> StrategyContext:
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return make_ctx(now=base + timedelta(hours=hours_offset), price=price)
+
+    def test_days_param_converts_to_equivalent_hours_window(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, days=0.25, margin_pct=5.0)
+        condition.evaluate(self._tick(0, 103.0))
+        assert condition.evaluate(self._tick(5, 106.0)) is False  # 0.25 天 = 6 小時,還沒滿
+        assert condition.evaluate(self._tick(6, 106.0)) is True
+
+    def test_minutes_param_converts_to_equivalent_hours_window(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, minutes=360.0, margin_pct=5.0)
+        condition.evaluate(self._tick(0, 103.0))
+        assert condition.evaluate(self._tick(5, 106.0)) is False  # 360 分鐘 = 6 小時,還沒滿
+        assert condition.evaluate(self._tick(6, 106.0)) is True
+
+    def test_default_with_no_unit_given_is_still_seventy_two_hours(self):
+        condition = SustainedPriceBreakout(threshold_price=100.0, reference_price=90.0, margin_pct=5.0)
+        assert condition.window_duration == timedelta(hours=72.0)
+
+    def test_more_than_one_unit_given_raises(self):
+        with pytest.raises(ValueError):
+            SustainedPriceBreakout(
+                threshold_price=100.0, reference_price=90.0, hours=6.0, days=1.0, margin_pct=5.0
+            )

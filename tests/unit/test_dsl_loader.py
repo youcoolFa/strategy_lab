@@ -58,19 +58,24 @@ class TestLoadStrategyBasics:
         assert strategy.exit == ReturnToReferenceExit()
 
     def test_kill_switch_resolved_when_present(self, tmp_path):
+        # WEEKEND_YAML 的 weekly_window 跨度只有約 50 小時(見
+        # TestLoadStrategyErrors 對這個限制的專門測試),這裡故意給一個
+        # 明顯短於它的 hours,不能省略(省略會用預設的 72.0,反而會撞上
+        # §4.6.1 那個「kill_switch 視窗 >= time_window 跨度」的載入期檢查)。
         yaml_with_kill_switch = WEEKEND_YAML + """
 kill_switch:
   type: sustained_breakout
   params:
     threshold_price: 1010.0
     reference_price: 1000.0
+    hours: 24.0
     margin_pct: 3.0
 """
         path = write_yaml(tmp_path, yaml_with_kill_switch)
         strategy = load_strategy(path)
         assert isinstance(strategy.kill_switch, SustainedBreakoutKillSwitch)
         assert strategy.kill_switch == SustainedBreakoutKillSwitch(
-            threshold_price=1010.0, reference_price=1000.0, margin_pct=3.0
+            threshold_price=1010.0, reference_price=1000.0, hours=24.0, margin_pct=3.0
         )
 
 
@@ -87,3 +92,35 @@ class TestLoadStrategyErrors:
         path = write_yaml(tmp_path, yaml.dump(incomplete))
         with pytest.raises(ValidationError):
             load_strategy(path)
+
+    def test_kill_switch_window_not_shorter_than_time_window_span_raises_early(self, tmp_path):
+        """對應 docs/ARCHITECTURE.md §4.6.1 實際遇到的缺口:
+        weekly_window 預設跨度只有 50 小時,kill_switch 若設成
+        >= 50 小時就永遠不會觸發——應該在載入策略當下就報錯,不是等到
+        真的跑起來才發現它是個沒有作用的擺設。"""
+        yaml_with_too_long_kill_switch = WEEKEND_YAML + """
+kill_switch:
+  type: sustained_breakout
+  params:
+    threshold_price: 1010.0
+    reference_price: 1000.0
+    hours: 50.0
+    margin_pct: 3.0
+"""
+        path = write_yaml(tmp_path, yaml_with_too_long_kill_switch)
+        with pytest.raises(ValueError, match="kill_switch"):
+            load_strategy(path)
+
+    def test_kill_switch_window_shorter_than_time_window_span_loads_fine(self, tmp_path):
+        yaml_with_ok_kill_switch = WEEKEND_YAML + """
+kill_switch:
+  type: sustained_breakout
+  params:
+    threshold_price: 1010.0
+    reference_price: 1000.0
+    hours: 24.0
+    margin_pct: 3.0
+"""
+        path = write_yaml(tmp_path, yaml_with_ok_kill_switch)
+        strategy = load_strategy(path)
+        assert strategy.kill_switch is not None

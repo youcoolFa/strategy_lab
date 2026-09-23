@@ -34,3 +34,17 @@ class WeeklyWindow:
 
     def should_cleanup(self, now: datetime, window_end: datetime) -> bool:
         return now >= window_end - timedelta(minutes=self.cleanup_buffer_minutes)
+
+    def max_span(self) -> timedelta:
+        """假設策略確實在 start_weekday/start_time 當下啟動,回傳窗口的
+        跨度。`window_end()` 本身其實不看 start_weekday/start_time
+        (它只從呼叫當下的 `now` 找下一個 end_weekday/end_time),所以這個
+        跨度是「照文件說明的用法」算出來的預期值,不是程式碼結構上強制
+        的上限——用來在 kill_switch 的視窗長度跟 time_window 明顯不相容
+        時提早報錯(見 docs/ARCHITECTURE.md §4.6.1)。"""
+        start_h, start_m = map(int, self.start_time.split(":"))
+        monday = datetime(2024, 1, 1)  # 任選一個星期一當基準,只取相對天數差
+        start_dt = (monday + timedelta(days=(self.start_weekday - monday.weekday()) % 7)).replace(
+            hour=start_h, minute=start_m, second=0, microsecond=0
+        )
+        return self.window_end(start_dt) - start_dt

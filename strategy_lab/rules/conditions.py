@@ -109,11 +109,19 @@ class SustainedPriceBreakout:
     內部狀態(記錄每次觀察到的 (時間, 價格)),因為
     StrategyContext.price_history 本身沒有帶時間戳記,無法從外部反推
     每一筆的觀察時間——這個限制記錄在 docs/ARCHITECTURE.md。
+
+    `hours`/`minutes`/`days` 三者互斥,恰好給一個(不給則預設
+    `hours=72.0`),`__post_init__` 換算後統一正規化回 `self.hours`——
+    只是換算輸入單位的方便寫法,內部只有一種表示。刻意不支援
+    `months`/`years`:日曆月、年的長度不固定,直接支援會重新引入「日曆
+    邊界」那類問題(見 docs/ARCHITECTURE.md §4.6.1)。
     """
 
     threshold_price: float
     reference_price: float
-    hours: float = 72.0
+    hours: Optional[float] = None
+    minutes: Optional[float] = None
+    days: Optional[float] = None
     margin_pct: Optional[float] = None
     margin_fixed: Optional[float] = None
 
@@ -123,6 +131,22 @@ class SustainedPriceBreakout:
     def __post_init__(self) -> None:
         if (self.margin_pct is None) == (self.margin_fixed is None):
             raise ValueError("must set exactly one of margin_pct / margin_fixed")
+
+        given = [v for v in (self.hours, self.minutes, self.days) if v is not None]
+        if len(given) > 1:
+            raise ValueError("must set at most one of hours / minutes / days")
+        if self.minutes is not None:
+            self.hours = self.minutes / 60
+        elif self.days is not None:
+            self.hours = self.days * 24
+        elif self.hours is None:
+            self.hours = 72.0
+        # 正規化後 self.hours 永遠是解析完的小時數(不管原本用哪個單位
+        # 輸入),evaluate()/_observe() 之後完全不用管 minutes/days。
+
+    @property
+    def window_duration(self) -> timedelta:
+        return timedelta(hours=self.hours)
 
     def evaluate(self, ctx: StrategyContext) -> bool:
         self._observe(ctx)

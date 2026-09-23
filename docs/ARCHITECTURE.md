@@ -306,6 +306,65 @@ cutoff,把過期的觀察值剪掉。好處是不再有「日曆日邊界」造�
 通過(185/185 測試,含新增的 `mean_reversion_breakout_guard.yaml`
 DSL regression 測試與滾動視窗剪除邏輯的獨立測試)。
 
+#### 4.6.2 支援 `minutes`/`days` 當 `hours` 的替代輸入單位,以及載入期的相容性檢查
+
+4.6.1 解決了「hours 這個單位本身沒有 bug」的問題,但使用者接著問了
+更根本的問題:如果 YAML 裡想直接寫 `minutes`/`days`(甚至更長的
+`months`/`years`),要怎麼確保任何單位都不會重踩同一種 bug?這裡分兩層
+處理:
+
+**單位換算(方便輸入,不影響邏輯)**:`SustainedPriceBreakout`/
+`SustainedBreakoutKillSwitch` 新增 `minutes: Optional[float]`、
+`days: Optional[float]` 兩個欄位,跟 `hours` 互斥(恰好給一個,不給則
+預設 `hours=72.0`——跟既有的 `margin_pct`/`margin_fixed` 互斥模式一致)。
+`__post_init__` 換算後統一正規化寫回 `self.hours`,新增一個
+`window_duration -> timedelta` property 方便外部讀取解析後的結果。內部
+`evaluate()`/`_observe()` 完全不用改,因為 `self.hours` 之後一定是解析
+完的小時數,不管輸入時用的是哪個單位。**刻意不支援 `months`/`years`**:
+日曆月、年的長度不固定(28-31 天、閏年),直接支援就會把 4.6.1 剛解決的
+「日曆邊界」問題重新引進來;這個策略類型本身也是短線工具
+(`weekly_window` 整個窗口才 ~50 小時),真的需要月/年量級的 kill
+switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
+
+**載入期相容性檢查(真正防住這整類 bug 的部分)**:不管用哪個單位,
+`SustainedPriceBreakout` 換算出的「總時長」只要 `>=` 它所屬
+`TimeWindow` 的跨度,就一定永遠不會觸發(4.6.1 那個 bug 的通式)。與其
+靠人工檢查(這正是 `mean_reversion_breakout_guard.yaml` 一開始
+`days=3` 沒被抓到的原因),改成在 `dsl/loader.py` 載入策略的當下就自動
+驗證:
+
+- `WeeklyWindow`/`DailySession` 新增 `max_span() -> timedelta`,回傳
+  「假設策略確實在 `start_weekday`/`start_time` 當下啟動」時,到
+  `end_weekday`/`end_time` 的跨度。這個方法被加進 `TimeWindow` Protocol
+  (`interfaces.py`),兩個既有實作都需要提供。**要注意**:
+  `window_end()` 本身其實完全不看 `start_weekday`/`start_time`(它只從
+  呼叫當下的 `now` 找下一個 `end_weekday`/`end_time`)——`max_span()`
+  算出來的是「照文件說明的用法」預期會有的跨度,不是程式碼結構上強制
+  一定如此的上限;如果 `runner.start()` 在別的時間點被呼叫,實際觀察到
+  的窗口可能更長。這個落差本身也記錄在這裡,不是隱藏起來的假設。
+- `dsl/loader.py` 新增 `_validate_kill_switch_fits_time_window()`,在
+  `load_strategy()` 組出 `kill_switch`/`time_window` 之後、回傳
+  `ComposedStrategy` 之前呼叫:用 `getattr` 保守讀取
+  `kill_switch.window_duration`/`time_window.max_span`,兩者都存在才
+  比較;`window_duration >= max_span()` 就直接 `raise ValueError`,錯誤
+  訊息帶出兩個具體數值,不是空泛地說「設定錯誤」。用 `getattr` 而不是
+  強制所有 kill_switch/time_window 型別都要實作這個介面,因為目前只有
+  一種 kill_switch 型別有這個概念,不想為了這一個檢查逼未來的型別都要
+  背這個包袱。
+- 這個檢查只在 `load_strategy()`(YAML 進入點)生效,不在
+  `StrategyRunner.__init__` 裡——單元/整合測試裡有意用「roomy」的手動組
+  `time_window`(例如 `WeeklyWindow(end_weekday=5, ...)` 讓窗口撐到快
+  一週後)來測 kill switch 邏輯本身,這些不透過 YAML,也不代表真實策略
+  設定,不應該被這個檢查卡住。
+
+驗證:196/196 測試通過(新增 `test_plugins_time_window.py` 的
+`max_span()` 測試、`test_rules_conditions.py`/`test_plugins_kill_switch.py`
+的 `minutes`/`days`/互斥錯誤測試、`test_dsl_loader.py` 的載入期驗證
+測試),既有的 `test_kill_switch_resolved_when_present` 也在這個過程中
+被抓到踩了同一種 bug(用預設 `hours=72.0` 但沒指定 `time_window` 是否
+撐得住)而修正——這是新增的載入期檢查本身抓到的真實案例,不是特地寫來
+展示的。
+
 ### 4.7 `And`/`Or`/`Not` 原本沒有結構化的 `__eq__`(Phase 3 TDD 過程中發現並修正)
 
 `rules/composite.py` 的 `And`/`Or`/`Not` 原本是純手寫的 `__init__`,
@@ -339,6 +398,7 @@ DSL regression 測試與滾動視窗剪除邏輯的獨立測試)。
 | Live 遷移 Stage 3.3 | `LiveBroker` 新增 `dry_run` 安全開關(預設 `True`) | §6 更新 Stage 3.3 狀態;新增 §6.4 | 已完成 |
 | Live 遷移 Stage 3.4 | `live/config.py`(執行參數)+ `live/main.py`(真正的執行入口)+ `StrategyRunner.request_stop()`(第三種收攤觸發);新增 `.env.example`/`live_execution_config.example.json` 範本 | §1 補充 `request_stop()`;§6 更新 Stage 3.4 狀態;新增 §6.5 | 程式碼已完成,**實際連真實帳戶執行需要使用者自己填入 `.env` 真實憑證** |
 | `mean_reversion_breakout_guard` 策略 | 新增 `strategies/mean_reversion_breakout_guard.yaml`;發現並修正 `SustainedPriceBreakout`/`SustainedBreakoutKillSwitch` 的 `days`(日曆日)跟 `weekly_window` 窗口長度不相容的缺口,改為 `hours`(滾動時間視窗) | 新增 §4.6.1;更新 §4.6 用語 | 已完成 |
+| kill_switch 多單位 + 載入期相容性檢查 | `SustainedPriceBreakout`/`SustainedBreakoutKillSwitch` 新增 `minutes`/`days` 當 `hours` 的替代輸入單位(互斥,正規化回 `hours`);`WeeklyWindow`/`DailySession` 新增 `max_span()`(併入 `TimeWindow` Protocol);`dsl/loader.py` 新增載入期檢查,kill_switch 視窗 `>=` time_window 跨度就直接報錯 | §1 補充 Protocol 變更;新增 §4.6.2 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
