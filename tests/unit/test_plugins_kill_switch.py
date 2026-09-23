@@ -1,5 +1,5 @@
 """kill_switch plugin 只負責:在 __post_init__ 組出正確的 Condition。
-真正的觸發邏輯真值表測試在 tests/test_rules_conditions.py。"""
+真正的觸發邏輯真值表測試在 tests/unit/test_rules_conditions.py。"""
 
 from strategy_lab.plugins.kill_switch.sustained_breakout import SustainedBreakoutKillSwitch
 from strategy_lab.rules.conditions import SustainedPriceBreakout

@@ -1,7 +1,7 @@
 """Phase 2 起,exit plugin 只負責:(1) 在 __post_init__ 組出正確的
 Condition,(2) 計算 exit_price。真正的觸發邏輯真值表測試在
-tests/test_rules_conditions.py、組合邏輯測試在
-tests/test_rules_composite.py。"""
+tests/unit/test_rules_conditions.py、組合邏輯測試在
+tests/unit/test_rules_composite.py。"""
 
 from datetime import datetime, timezone
 
