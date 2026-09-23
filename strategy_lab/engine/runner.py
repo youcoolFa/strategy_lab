@@ -1,8 +1,12 @@
 """
 主迴圈(orchestrator loop),泛化自 sat_strategy/app/bot.py 的
 SatStrategyBot.run():idle → 下單進場 → 成交 → 下單出場 → 成交 →
-回到 idle,由 TimeWindow 把關開始/結束,對象是 PaperBroker,不是透過
-ccxt 呼叫真實交易所。
+回到 idle,由 TimeWindow 把關開始/結束。
+
+`broker` 欄位型別是 `interfaces.Broker` 這個 Protocol,不是寫死
+`PaperBroker`——這個檔案完全不知道、也不需要知道背後是模擬交易所還是
+真實交易所(見 `live/`),只透過 `Broker` 合約的 7 個方法互動。預設值
+仍然是 `PaperBroker()`,既有行為完全不變。
 
 比 bot.py 多做的一個泛化:bot.py 一旦進場成交,會「立刻」下出場單。
 這裡則是只有在 exit.rule.evaluate(ctx) 為真的時候才下出場單,所以像
@@ -29,8 +33,8 @@ from datetime import datetime, timedelta
 from enum import Enum, auto
 from typing import Iterator, List, Optional
 
-from strategy_lab.broker.paper_broker import Order, PaperBroker
-from strategy_lab.interfaces import EntrySignal, ExitSignal, KillSwitch, StrategyContext, TimeWindow
+from strategy_lab.broker.paper_broker import PaperBroker
+from strategy_lab.interfaces import Broker, EntrySignal, ExitSignal, KillSwitch, OrderLike, StrategyContext, TimeWindow
 
 
 class RunState(Enum):
@@ -54,14 +58,14 @@ class StrategyRunner:
     exit: ExitSignal
     time_window: TimeWindow
     order_qty: float
-    broker: PaperBroker = field(default_factory=PaperBroker)
+    broker: Broker = field(default_factory=PaperBroker)
     kill_switch: Optional[KillSwitch] = None
 
     state: RunState = field(default=RunState.IDLE, init=False)
     window_end: Optional[datetime] = field(default=None, init=False)
     origin_price: Optional[float] = field(default=None, init=False)
-    entry_order: Optional[Order] = field(default=None, init=False)
-    exit_order: Optional[Order] = field(default=None, init=False)
+    entry_order: Optional[OrderLike] = field(default=None, init=False)
+    exit_order: Optional[OrderLike] = field(default=None, init=False)
     active_entry_price: Optional[float] = field(default=None, init=False)
     price_history: List[float] = field(default_factory=list, init=False)
     trades: List[Trade] = field(default_factory=list, init=False)

@@ -20,6 +20,15 @@ KillSwitch 是第四種 plugin 類型:跟 TimeWindow 一樣是「什麼時候該
 分開的兩個獨立合約,不是把價格判斷硬塞進 TimeWindow 裡。跟
 EntrySignal/ExitSignal 不同的是,KillSwitch 觸發後不用計算任何價格,
 只需要告訴 runner「該收攤了」,所以合約裡只有 `rule`,沒有價格方法。
+
+Live 遷移 Stage 1 起,`Broker`/`OrderLike` 把 `engine/runner.py` 原本
+寫死的 `PaperBroker` 型別泛化成一個 Protocol——這一步刻意不改變任何
+現有行為:`PaperBroker` 現有的方法結構上已經滿足這個 Protocol,不需要
+改 `PaperBroker` 一行程式碼,純粹是把隱含的合約寫明。`tick(price)`
+留在合約裡,是因為 `runner.tick()` 對所有 broker 一律無條件呼叫這個
+方法——`PaperBroker` 用它來模擬成交,真實交易所的 broker(見
+`live/`)不需要靠外部餵價格才成交,交給它一個合法的 no-op 即可,不需
+要 runner.py 為了不同 broker 種類分支處理。
 """
 
 from __future__ import annotations
@@ -68,3 +77,26 @@ class TimeWindow(Protocol):
 @runtime_checkable
 class KillSwitch(Protocol):
     rule: "Condition"
+
+
+@runtime_checkable
+class OrderLike(Protocol):
+    """`Broker.place_*`/`fetch_order()` 回傳的最小形狀。不要求是同一個
+    具體類別——`PaperBroker` 的 `Order` dataclass 結構上已經滿足這個
+    Protocol(多出來的 `side`/`qty` 欄位不影響)。"""
+
+    id: str
+    status: str  # "open" | "closed" | "canceled"
+    price: float
+    filled_qty: float
+
+
+@runtime_checkable
+class Broker(Protocol):
+    def place_limit_buy(self, price: float, qty: float) -> "OrderLike": ...
+    def place_limit_sell(self, price: float, qty: float) -> "OrderLike": ...
+    def fetch_order(self, order_id: str) -> "OrderLike": ...
+    def cancel_order(self, order_id: str) -> None: ...
+    def position_qty(self) -> float: ...
+    def market_close(self, qty: float) -> None: ...
+    def tick(self, price: float) -> None: ...

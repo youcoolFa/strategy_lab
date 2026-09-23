@@ -17,7 +17,7 @@ time_window(排程時間窗)、kill_switch(市場行為觸發的終止條件,選
 ```mermaid
 flowchart TD
     subgraph Contract["合約層"]
-        I["interfaces.py<br/>StrategyContext<br/>EntrySignal / ExitSignal / TimeWindow"]
+        I["interfaces.py<br/>StrategyContext<br/>EntrySignal / ExitSignal / TimeWindow<br/>Broker / OrderLike"]
         R["registry.py<br/>dict 註冊表:(kind, name) → class"]
     end
 
@@ -59,6 +59,7 @@ flowchart TD
     X1 & X2 & X3 -. 實作 .-> I
     T1 & T2 -. 實作 .-> I
     K1 -. 實作 .-> I
+    B -. "實作 Broker(結構相符,零修改)" .-> I
     E1 & E2 & X1 & X2 & X3 & T1 & T2 & K1 -. "@register" .-> R
 
     RC -. 實作 .-> RB
@@ -301,7 +302,10 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 | Phase 4(Capstone) | 三個 YAML 策略熱切換驗證完成 | 新增一節記錄熱切換測試結果與計時演練結論 | 待進行 |
 | Live 遷移 Stage 1 | port `account_feed.py`/`market_feed.py` | 新增 §6 | 已完成 |
 | Live 遷移 Stage 2 | 新增 `live/bybit_client.py`(pybit 執行層,取代 ccxt) | §6 更新 Stage 2 狀態;新增 §6.2 | 已完成 |
-| Live 遷移 Stage 3 | `StrategyRunner` 泛化支援真實 broker,接進真實 API key | §6 更新 Stage 3 狀態;可能需要更新 §1 元件關係圖 | 待進行(需要真實 API key) |
+| Live 遷移 Stage 3.1 | 泛化 `Broker`/`OrderLike` Protocol,`StrategyRunner.broker` 不再寫死 `PaperBroker` 型別 | §1 元件關係圖新增 Broker Protocol;§6 更新 Stage 3.1 狀態 | 已完成 |
+| Live 遷移 Stage 3.2 | `LiveBroker` 包裝 `BybitClient`,滿足 `Broker` Protocol | §6 更新 Stage 3.2 狀態 | 待進行 |
+| Live 遷移 Stage 3.3 | `dry_run` 安全開關 | §6 更新 Stage 3.3 狀態 | 待進行 |
+| Live 遷移 Stage 3.4 | 真實執行入口 + 真實 API key | §6 更新 Stage 3.4 狀態 | 待進行(需要真實 API key) |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -329,9 +333,26 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
   `http_client` 參數注入真正的 `pybit.unified_trading.HTTP` 或測試用
   的假 client,unit/integration test 全部用假 client,不會打真正的
   網路請求。見 §6.2。
-- **Stage 3(待進行,需要真實 API key)**:把 `engine/runner.py` 的
-  `StrategyRunner` 泛化成可以接真實 broker(目前 `broker` 欄位寫死是
-  `PaperBroker` 型別),再組裝成完整可執行的真實策略。
+- **Stage 3**(把 `BybitClient` 接成真正可執行的真實策略),拆成四個
+  子步驟,每步都各自過 UT/IT 才進下一步:
+  - **3.1(已完成)**:`interfaces.py` 新增 `Broker`/`OrderLike`
+    Protocol,`StrategyRunner.broker` 的型別從寫死的 `PaperBroker`
+    改成這個 Protocol。刻意設計成零行為變更——`PaperBroker` 現有的
+    7 個方法結構上已經滿足這個 Protocol,不用改 `PaperBroker` 一行
+    程式碼,全部既有測試(131 個)原封不動繼續通過,這就是這一步
+    「泛化而不是重新設計」的驗收標準。`tick(price)` 留在合約裡:
+    `PaperBroker` 用它模擬成交,真實 broker(`LiveBroker`,Stage 3.2)
+    可以讓它是合法的 no-op,不需要 runner.py 為了不同 broker 種類
+    分支處理。見 [interfaces.py](../strategy_lab/interfaces.py)。
+  - **3.2(待進行)**:`LiveBroker` 包裝 `BybitClient`,滿足 `Broker`
+    Protocol——把 `place_limit_buy(price, qty)` 這種通用方法,翻譯成
+    `BybitClient.place_limit_order(symbol, "Buy", qty, price)` 這種
+    需要 symbol/side 的呼叫,並處理 qty/price 精度。
+  - **3.3(待進行)**:`dry_run` 安全開關——目前 `BybitClient` 完全沒有
+    這個機制,呼應 `sat_strategy/app/bot.py` 每個下單方法前的
+    `if self.config.dry_run: return ...`。
+  - **3.4(待進行,需要真實 API key)**:`.env` 載入真實憑證 + 真正的
+    執行入口(對應 `sat_strategy/app/bot.py` 的 `main()`)。
 
 ### 6.1 測試心得:fakeredis 的 `block` 參數不是真的阻塞
 
