@@ -37,11 +37,22 @@
 .venv/bin/pytest -v
 ```
 
+## 執行 YAML 策略(Phase 3)
+
+```bash
+/opt/anaconda3/bin/python3 -m demo.run_from_yaml --strategy strategies/weekend_mean_reversion.yaml
+/opt/anaconda3/bin/python3 -m demo.run_from_yaml --strategy strategies/ma_crossover_bracket.yaml
+```
+
+`strategies/*.yaml` 只需要 `{type, params}` 就能組出完整的策略——每個
+plugin 會自己從 `params` 組出觸發邏輯,不需要在 YAML 裡另外描述一棵
+Condition 樹。
+
 ## 進度
 
 - [x] Phase 1 —— Plugin 層
 - [x] Phase 2 —— Rule engine
-- [ ] Phase 3 —— DSL
+- [x] Phase 3 —— DSL
 - [ ] Phase 4 —— 總結演練(Capstone)
 
 把真正的 `sat_strategy/app/bot.py` 移植到這套架構上,是另外一個獨立的

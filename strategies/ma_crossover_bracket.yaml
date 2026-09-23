@@ -1,0 +1,23 @@
+# 對應 demo/demo_crossover_phase1.py 的手動組裝版本,參數完全一致。
+name: ma_crossover_bracket
+symbol: BTC/USDT
+order_qty: 1.0
+
+entry:
+  type: ma_crossover
+  params:
+    fast_window: 5
+    slow_window: 20
+
+exit:
+  type: bracket_tp_sl
+  params:
+    take_profit_pct: 1.0
+    stop_loss_pct: 0.5
+
+time_window:
+  type: daily_session
+  params:
+    start_time: "09:00"
+    end_time: "17:00"
+    cleanup_buffer_minutes: 2

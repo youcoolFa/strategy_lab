@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from strategy_lab.interfaces import StrategyContext
 from strategy_lab.rules.composite import And, Not, Or
+from strategy_lab.rules.conditions import PriceChangeFromEntry
 
 
 def make_ctx() -> StrategyContext:
@@ -56,3 +57,33 @@ class TestNestedTree:
         and_tree = And(AlwaysFalse(), AlwaysTrue())
         assert or_tree.evaluate(make_ctx()) is True
         assert and_tree.evaluate(make_ctx()) is False
+
+
+class TestStructuralEquality:
+    """And/Or/Not 兩個內容一樣的物件應該要 ==,不能退化成用記憶體位址比較
+    ——Phase 3 的 DSL regression test(比較 YAML 組出來的 rule 跟手動組
+    出來的版本)需要依賴這個行為。"""
+
+    def test_or_of_same_leaf_conditions_are_equal(self):
+        a = Or(PriceChangeFromEntry(1.0, "up"), PriceChangeFromEntry(0.5, "down"))
+        b = Or(PriceChangeFromEntry(1.0, "up"), PriceChangeFromEntry(0.5, "down"))
+        assert a == b
+
+    def test_or_with_different_thresholds_are_not_equal(self):
+        a = Or(PriceChangeFromEntry(1.0, "up"), PriceChangeFromEntry(0.5, "down"))
+        b = Or(PriceChangeFromEntry(2.0, "up"), PriceChangeFromEntry(0.5, "down"))
+        assert a != b
+
+    def test_and_of_same_leaf_conditions_are_equal(self):
+        assert And(PriceChangeFromEntry(1.0, "up")) == And(PriceChangeFromEntry(1.0, "up"))
+
+    def test_not_of_same_condition_are_equal(self):
+        assert Not(PriceChangeFromEntry(1.0, "up")) == Not(PriceChangeFromEntry(1.0, "up"))
+
+    def test_different_composite_types_are_not_equal(self):
+        assert And(PriceChangeFromEntry(1.0, "up")) != Or(PriceChangeFromEntry(1.0, "up"))
+
+    def test_nested_trees_compare_recursively(self):
+        a = And(Or(PriceChangeFromEntry(1.0, "up"), PriceChangeFromEntry(0.5, "down")), Not(PriceChangeFromEntry(2.0, "up")))
+        b = And(Or(PriceChangeFromEntry(1.0, "up"), PriceChangeFromEntry(0.5, "down")), Not(PriceChangeFromEntry(2.0, "up")))
+        assert a == b

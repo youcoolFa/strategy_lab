@@ -8,8 +8,8 @@ time_window(排程時間窗)、kill_switch(市場行為觸發的終止條件,選
 四類獨立模組,並透過統一的狀態機驅動執行。系統不連接任何真實交易所,
 僅對內建的模擬交易所(paper broker)與合成價格產生器運作。
 
-本文件對應目前(Phase 2:Rule Engine)完成後的架構狀態,涵蓋元件關係、
-核心狀態機、單次執行流程,以及目前已知的設計限制。
+本文件對應目前(Phase 3:DSL)完成後的架構狀態,涵蓋元件關係、核心
+狀態機、單次執行流程,以及目前已知的設計限制。
 
 ## 1. 元件關係圖
 
@@ -18,6 +18,11 @@ flowchart TD
     subgraph Contract["合約層"]
         I["interfaces.py<br/>StrategyContext<br/>EntrySignal / ExitSignal / TimeWindow"]
         R["registry.py<br/>dict 註冊表:(kind, name) → class"]
+    end
+
+    subgraph DSL["DSL 層(Phase 3)"]
+        DS["dsl/schema.py<br/>pydantic StrategyDefinition / PluginSpec"]
+        DL["dsl/loader.py<br/>load_strategy(path) → ComposedStrategy"]
     end
 
     subgraph Rules["Rule 層(Phase 2)"]
@@ -46,7 +51,8 @@ flowchart TD
         Run["engine/runner.py<br/>StrategyRunner(狀態機)"]
     end
 
-    Demo["demo/*.py(策略組裝入口)"]
+    Demo["demo/*.py、demo/run_from_yaml.py(策略組裝入口)"]
+    Yaml["strategies/*.yaml"]
 
     E1 & E2 -. 實作 .-> I
     X1 & X2 & X3 -. 實作 .-> I
@@ -62,6 +68,11 @@ flowchart TD
     X1 -->|"__post_init__ 組出 self.rule"| RC
     X2 & X3 -->|"__post_init__ 組出 self.rule"| RComp
     K1 -->|"__post_init__ 組出 self.rule<br/>(有狀態 Condition)"| RC
+
+    Yaml -->|"yaml.safe_load"| DL
+    DL -->|"StrategyDefinition(**raw)"| DS
+    DL -->|"registry.get(kind, type)"| R
+    DL -->|"class(**params)"| Demo
 
     Run -->|"rule.evaluate(ctx) / entry_price"| E1
     Run -->|"rule.evaluate(ctx) / exit_price"| X1
@@ -105,11 +116,25 @@ flowchart TD
   成立就呼叫同一個 `_cleanup()`——不管當下處於哪個狀態(包含
   `IN_POSITION` 這種還沒等到正常出場訊號的當下),都會立刻取消未成交
   單、強制平倉、轉入 `STOPPED`。
-- **`registry.py` 現況**:各 plugin 透過 `@register` 裝飾器完成登記,
-  但目前尚無任何執行路徑呼叫 `registry.get()` ——`demo/*.py` 是以直接
-  `import` 具體類別的方式組裝策略。此查找表是為未來的 DSL 載入器保留
-  的介面。Rule 層的 `Condition` primitives 目前未註冊進 `registry.py`,
-  屬於 Phase 3 待決事項。
+- **`registry.py` 現況**:各 plugin 透過 `@register` 裝飾器完成登記。
+  Phase 3 之前,`get()` 這一側是死碼——`demo/*.py` 全部以直接 `import`
+  具體類別的方式組裝策略;Phase 3 起,`dsl/loader.py` 是第一個真正呼叫
+  `registry.get(kind, type)` 的程式碼路徑,把 YAML 裡的字串轉成實際的
+  plugin class。Rule 層的 `Condition` primitives(`PriceBelowReference`
+  等)仍未註冊進 `registry.py`——目前的 YAML 形狀只需要 `{type, params}`
+  就能組出完整的 plugin(見下方 DSL 層說明),不需要在 YAML 裡獨立描述
+  一棵 Condition 樹,因此這件事還沒有用到的場景。
+- **DSL 層(Phase 3 新增)**:`dsl/schema.py` 用 pydantic(v1)定義
+  `StrategyDefinition`/`PluginSpec` 這兩個 schema,只負責「這個
+  YAML/dict 合不合法」,完全不 import `registry`,也不知道有哪些
+  plugin 真的存在。`dsl/loader.py` 的 `load_strategy(path)` 是唯一把
+  三件事串起來的地方:讀檔 → `StrategyDefinition(**raw)` 驗證形狀 →
+  對每個區塊呼叫 `registry.get(kind, spec.type)(**spec.params)`。刻意
+  只支援 `{type, params}` 這個最簡單的形狀——每個 plugin 已經會在自己
+  的 `__post_init__` 用 `params` 組出 `self.rule`,loader 不需要另外
+  解析一棵獨立的 YAML Condition 樹;YAML 直接組合現有 Condition primitives
+  (不透過寫新 plugin)這個更進階的能力,目前刻意不做,留待有實際需求
+  再加。
 
 ## 2. `engine/runner.py` 狀態機
 
@@ -189,22 +214,23 @@ stateDiagram-v2
 一開始」)。導入新的週期類型時,應優先確認現有的日期查找邏輯是否可以
 沿用,或需要另行設計。
 
-### 4.3 Registry 死碼路徑
+### 4.3 Registry 死碼路徑(Phase 3 已解決)
 
-`registry.py` 提供 `register()`/`get()`/`list_plugins()` 三個函式,但
-目前僅 `register()` 這一側在系統啟動時被實際執行(透過各
-`plugins/<kind>/__init__.py` 匯入對應模組觸發 `@register` 裝飾器);
-`get()` 尚未被任何執行路徑呼叫。
+Phase 1、2 期間,`registry.py` 只有 `register()` 這一側在運作
+(透過各 `plugins/<kind>/__init__.py` 匯入對應模組觸發 `@register`
+裝飾器);`get()` 沒有任何程式碼路徑呼叫。這曾經造成一個靜默失效:
+`max_hold_duration.py` 建立時未被加入 `plugins/exit/__init__.py` 的
+匯入清單,直接透過類別匯入使用時不受影響,但透過 registry 查詢時會找
+不到對應項目——而且因為當時沒有任何路徑呼叫 `get()`,這個缺漏不會被
+任何測試或執行流程偵測到。
 
-此現況隱含一個風險:若某個 plugin 檔案未被其所屬的
-`plugins/<kind>/__init__.py` 匯入,則該 plugin 的 `@register` 裝飾器
-不會執行,`registry.get()` 查詢時會找不到該 plugin ——但由於目前沒有
-任何程式碼路徑呼叫 `get()`,這類缺漏不會被任何測試或執行流程偵測到,
-屬於靜默失效。`max_hold_duration.py` 曾發生過此問題:該檔案建立時未
-被加入 `plugins/exit/__init__.py` 的匯入清單,直接透過類別匯入使用時
-不受影響,但透過 registry 查詢時會找不到對應項目。此問題已於現行版本
-修正,但此類缺漏在新增 plugin 時仍可能重複發生,需仰賴 Phase 3 導入
-DSL 載入器後、`get()` 路徑被實際使用時才會由錯誤訊息主動暴露。
+**Phase 3 起,`dsl/loader.py` 的 `load_strategy()` 是第一個真正呼叫
+`registry.get()` 的程式碼路徑**——YAML 裡的 `type: xxx` 字串,現在會
+真的透過 `get()` 去查表。如果之後再發生「plugin 檔案忘記加進
+`__init__.py` 匯入清單」這種缺漏,`tests/unit/test_dsl_loader.py` 或
+`tests/unit/test_dsl_strategies_regression.py` 會直接失敗(`registry.UnknownPlugin`),
+不會再靜默過關——這個限制到這裡才算真正解除,不是「文件上說已解決」
+而已。
 
 ### 4.4 PaperBroker 的簡化設計
 
@@ -246,6 +272,22 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 `Condition` 合約本身(`evaluate(ctx) -> bool`)並沒有禁止這件事——只是
 剛好在這個案例之前,沒有 primitive 需要用到而已。
 
+### 4.7 `And`/`Or`/`Not` 原本沒有結構化的 `__eq__`(Phase 3 TDD 過程中發現並修正)
+
+`rules/composite.py` 的 `And`/`Or`/`Not` 原本是純手寫的 `__init__`,
+沒有 `@dataclass`,也沒有手寫 `__eq__`——兩個內容一模一樣的 `Or` 物件,
+`==` 比較會退化成用記憶體位址比較(永遠是 `False`,除非是同一個物件)。
+`rules/conditions.py` 裡的 leaf condition(`PriceBelowReference` 等)
+因為都是 `@dataclass`,一直都有這個行為,只是沒人踩到——直到 Phase 3
+寫 DSL 的 regression test(比較 YAML 組出來的 `BracketTPSLExit.rule`
+跟手動組裝的版本是否 `==`)才第一次真的需要比較一棵**含 `Or` 的**
+條件樹,測試因此失敗,才發現這個缺口。
+
+修法:幫 `And`/`Or`/`Not` 手寫 `__eq__`(而不是改成 `@dataclass`,因為
+建構子吃的是 `*conditions` 可變參數,`@dataclass` 沒辦法直接表達這種
+形狀)。這是 TDD 流程本身抓到的真實缺口的例子——不是先規劃好才修的,
+是寫一個原本只是想驗證別的東西的測試時,意外暴露出來的。
+
 ## 5. 文件維護提醒
 
 每個 Phase 完成後,應檢視並更新以下對應章節:
@@ -254,5 +296,5 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 |---|---|---|---|
 | Phase 2(Rule Engine) | `plugins/` 的 `should_enter`/`should_exit` 改為宣告 `Condition` 樹 | §1 元件關係圖新增 `rules/` 子圖;§2 狀態圖標籤;§3 資料流追蹤改為 `plugin.rule.evaluate(ctx)`;新增 §4.5 | 已完成 |
 | Phase 2 擴充(KillSwitch) | 新增第四種 plugin 類型,用市場行為(而非排程時間)終止整個策略迴圈 | §1 新增 `kill_switch/` 節點;§2 狀態圖收攤觸發條件;新增 §4.6 | 已完成 |
-| Phase 3(DSL) | `registry.get()` 開始被 `dsl/loader.py` 實際呼叫 | §1 補充 `dsl/` 元件與資料流;§4.3 移除或修正「死碼路徑」描述 | 待進行 |
+| Phase 3(DSL) | `registry.get()` 開始被 `dsl/loader.py` 實際呼叫;新增 `strategies/*.yaml`、`demo/run_from_yaml.py`;順帶修正 `rules/composite.py` 的 `__eq__` 缺口 | §1 補充 `dsl/` 元件與資料流;§4.3 更新為「已解決」;新增 §4.7 | 已完成 |
 | Phase 4(Capstone) | 三個 YAML 策略熱切換驗證完成 | 新增一節記錄熱切換測試結果與計時演練結論 | 待進行 |
