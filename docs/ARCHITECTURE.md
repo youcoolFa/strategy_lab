@@ -303,7 +303,7 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
 | Live 遷移 Stage 1 | port `account_feed.py`/`market_feed.py` | 新增 §6 | 已完成 |
 | Live 遷移 Stage 2 | 新增 `live/bybit_client.py`(pybit 執行層,取代 ccxt) | §6 更新 Stage 2 狀態;新增 §6.2 | 已完成 |
 | Live 遷移 Stage 3.1 | 泛化 `Broker`/`OrderLike` Protocol,`StrategyRunner.broker` 不再寫死 `PaperBroker` 型別 | §1 元件關係圖新增 Broker Protocol;§6 更新 Stage 3.1 狀態 | 已完成 |
-| Live 遷移 Stage 3.2 | `LiveBroker` 包裝 `BybitClient`,滿足 `Broker` Protocol | §6 更新 Stage 3.2 狀態 | 待進行 |
+| Live 遷移 Stage 3.2 | `LiveBroker` 包裝 `BybitClient`,滿足 `Broker` Protocol;新增 `OrderResult.price` 欄位;修正共用假伺服器不模擬市價單立即成交的缺口 | §6 更新 Stage 3.2 狀態;新增 §6.3 | 已完成 |
 | Live 遷移 Stage 3.3 | `dry_run` 安全開關 | §6 更新 Stage 3.3 狀態 | 待進行 |
 | Live 遷移 Stage 3.4 | 真實執行入口 + 真實 API key | §6 更新 Stage 3.4 狀態 | 待進行(需要真實 API key) |
 
@@ -344,10 +344,15 @@ Phase 1 的 `DeviationFromReferenceEntry`/`ReturnToReferenceExit` 採用
     `PaperBroker` 用它模擬成交,真實 broker(`LiveBroker`,Stage 3.2)
     可以讓它是合法的 no-op,不需要 runner.py 為了不同 broker 種類
     分支處理。見 [interfaces.py](../strategy_lab/interfaces.py)。
-  - **3.2(待進行)**:`LiveBroker` 包裝 `BybitClient`,滿足 `Broker`
-    Protocol——把 `place_limit_buy(price, qty)` 這種通用方法,翻譯成
-    `BybitClient.place_limit_order(symbol, "Buy", qty, price)` 這種
-    需要 symbol/side 的呼叫,並處理 qty/price 精度。
+  - **3.2(已完成)**:`live/broker.py` 的 `LiveBroker` 包裝
+    `BybitClient`,滿足 `Broker` Protocol——把 `place_limit_buy(price, qty)`
+    這種通用方法,翻譯成 `BybitClient.place_limit_order(symbol, "Buy",
+    qty, price)` 這種需要 symbol/side 的呼叫;`symbol` 存在 `LiveBroker`
+    自己身上(建構時決定),不是每次呼叫都要傳。`place_limit_sell`/
+    `market_close` 的 `reduce_only` 寫死 `True`——整個系統只做多
+    (entry=買、exit=賣),不能因為呼叫端忘記傳而意外開出新倉。
+    `tick(price)` 是刻意的 no-op。qty/price 精度目前沒有另外處理
+    (不是這一步的範圍,見 §6.3 的討論)。見 §6.3。
   - **3.3(待進行)**:`dry_run` 安全開關——目前 `BybitClient` 完全沒有
     這個機制,呼應 `sat_strategy/app/bot.py` 每個下單方法前的
     `if self.config.dry_run: return ...`。
@@ -409,3 +414,49 @@ client(`FakeHTTP`),每個方法各自獨立驗證單一次呼叫的參數/回傳
 列表,`BybitClient.get_order_status()` 內部自己做「先查 open,空的話
 查 history」的邏輯,把這個查詢順序的細節封裝起來,不讓呼叫端知道
 底層是兩個分開的 API。
+
+### 6.3 `live/broker.py`:接上 Step 1 才發現的真實缺口,以及一個假伺服器本身的 bug
+
+**`OrderResult` 原本沒有 `price` 欄位。** Stage 2 完成當下沒發現這個
+問題,因為 Stage 2 自己的測試從來沒有需要「把 `OrderResult` 轉成滿足
+`OrderLike` Protocol 的物件」——直到 Step 2 寫 `LiveBroker`,要把
+`BybitClient.OrderResult` 翻譯成 `interfaces.OrderLike`(需要
+`.price`)時,才發現這個缺口。補法:`OrderResult` 新增 `price: float`
+欄位;`place_limit_order()` 直接回傳呼叫端要求的限價;
+`get_order_status()` 優先用 `avgPrice`(實際成交均價,算損益該用的
+數字),`avgPrice` 是 `"0"`(訂單根本沒成交就被取消的情況)才退回用
+`price`(掛單當初的限價)。
+
+**命名不對齊,用一個小的翻譯物件解決,不改 `BybitClient` 的既有命名。**
+`OrderLike` 要求 `.id`,但 `BybitClient.OrderResult` 用的是
+`.order_id`(對應 Bybit API 自己的欄位名 `orderId`,對 `BybitClient`
+自己的使用情境更清楚)。沒有為了遷就 `OrderLike` 去改 `OrderResult`
+的命名(那樣反而讓 `BybitClient` 自己的意圖變模糊),而是讓
+`LiveBroker` 內部用一個小的 `LiveOrder` dataclass 做翻譯——跟
+`broker/paper_broker.py` 的 `Order` 是同一個角色,各自的具體型別不用
+相同,只要結構上滿足 `OrderLike` 就好(Python 的 Protocol 是結構化
+型別,不需要共用基底類別)。
+
+**capstone integration test 抓到一個假伺服器本身的 bug,不是
+`LiveBroker` 的 bug。** 寫
+`tests/integration/test_live_broker_integration.py` 的 kill switch
+情境時,`runner._cleanup()` 呼叫 `LiveBroker.market_close()` 之後,
+`position_qty()` 應該要變成 0,但測試回報還是原本的部位量。追下去發現
+問題出在 `tests/integration/_stateful_fake_bybit.py` 的
+`StatefulFakeBybitServer.place_order()`:不管市價單還是限價單,一律
+建立成 `"New"`(未成交),但市價單在真實交易所是**立即成交**的,不需要
+像限價單那樣等外部呼叫 `fill_order()` 才會變成交。修法是讓
+`place_order()` 檢查 `orderType == "Market"`,是的話立刻自動呼叫
+`fill_order()`——這連帶讓 Stage 2 一個舊的 integration test
+(`test_market_order_for_cleanup_closes_remaining_position`)要跟著
+調整:那個測試原本手動呼叫 `fill_order()` 模擬市價單成交,現在市價單
+會自動成交,變成重複扣了兩次部位,必須把那行手動呼叫刪掉。這是
+capstone 測試(把多個元件真的接在一起跑一次完整循環)才抓得到的問題
+——各自獨立的 unit test 跟第一版 integration test 都測不到,因為它們
+從來沒有真的走過「用市價單平倉」這條路徑。
+
+**qty/price 精度處理,目前刻意沒做。** Bybit 每個交易對有自己的最小
+下單量、價格步進,真實下單若沒對齊會被拒單。這一步沒有加(不是這個
+Step 的範圍),留到真的要接真實帳戶、真實 symbol 時再處理——可以是
+`LiveBroker` 建構時傳入固定的精度設定,或呼叫 Bybit 的
+`get_instruments_info` 動態查詢,兩者取捨留到那時候再決定。

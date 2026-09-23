@@ -5,69 +5,11 @@ BybitClient 的多個方法接在一起、跨多次呼叫時行為是否正確�
 「下單後查詢是 open,交易所端成交後再查詢要變成 closed」這種真實使用
 情境下的狀態轉移。"""
 
-import itertools
-
 import pytest
-from pybit.exceptions import InvalidRequestError
+
+from _stateful_fake_bybit import StatefulFakeBybitServer
 
 from strategy_lab.live.bybit_client import BybitClient
-
-
-class StatefulFakeBybitServer:
-    """簡化版的假 Bybit V5 伺服器:記住每張單目前的狀態,提供
-    「外部把某張單改成 Filled/Cancelled」的方法,模擬交易所端的狀態
-    變化跟 BybitClient 的輪詢是非同步發生的。"""
-
-    def __init__(self):
-        self._orders: dict = {}
-        self._id_counter = itertools.count(1)
-        self._position_size = 0.0
-
-    def fill_order(self, order_id: str, filled_qty: float) -> None:
-        self._orders[order_id]["orderStatus"] = "Filled"
-        self._orders[order_id]["cumExecQty"] = str(filled_qty)
-        side = self._orders[order_id]["side"]
-        self._position_size += filled_qty if side == "Buy" else -filled_qty
-
-    def cancel_order_externally(self, order_id: str) -> None:
-        self._orders[order_id]["orderStatus"] = "Cancelled"
-
-    # ------------------------------------------------------------------
-    # pybit.unified_trading.HTTP 介面(只做 BybitClient 用得到的部分)
-    # ------------------------------------------------------------------
-    def place_order(self, **kwargs):
-        order_id = str(next(self._id_counter))
-        self._orders[order_id] = {
-            "orderId": order_id,
-            "orderStatus": "New",
-            "cumExecQty": "0",
-            "side": kwargs["side"],
-        }
-        return {"result": {"orderId": order_id}}
-
-    def get_open_orders(self, **kwargs):
-        order = self._orders.get(kwargs["orderId"])
-        if order and order["orderStatus"] in ("New", "PartiallyFilled"):
-            return {"result": {"list": [dict(order)]}}
-        return {"result": {"list": []}}
-
-    def get_order_history(self, **kwargs):
-        order = self._orders.get(kwargs["orderId"])
-        if order and order["orderStatus"] in ("Filled", "Cancelled"):
-            return {"result": {"list": [dict(order)]}}
-        return {"result": {"list": []}}
-
-    def cancel_order(self, **kwargs):
-        order = self._orders.get(kwargs["orderId"])
-        if order is None or order["orderStatus"] not in ("New", "PartiallyFilled"):
-            raise InvalidRequestError(
-                request="cancel_order", message="Order does not exist", status_code=110001, time="t", resp_headers=None
-            )
-        order["orderStatus"] = "Cancelled"
-        return {"result": {}}
-
-    def get_positions(self, **kwargs):
-        return {"result": {"list": [{"size": str(self._position_size)}]}}
 
 
 @pytest.fixture
@@ -123,7 +65,8 @@ class TestFullOrderLifecycle:
         assert client.get_position_qty("BTCUSDT") == 0.02
 
         remaining = client.get_position_qty("BTCUSDT")
-        market_exit = client.place_market_order("BTCUSDT", "Sell", remaining, reduce_only=True)
-        server.fill_order(market_exit.order_id, filled_qty=remaining)
+        client.place_market_order("BTCUSDT", "Sell", remaining, reduce_only=True)
+        # 市價單在(假)交易所是立即成交的,不像限價單需要另外呼叫
+        # fill_order() 模擬撮合。
 
         assert client.get_position_qty("BTCUSDT") == 0.0

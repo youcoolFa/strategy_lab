@@ -50,6 +50,7 @@ class BybitAPIError(Exception):
 class OrderResult:
     order_id: str
     status: str  # "open" | "closed" | "canceled"
+    price: float = 0.0
     filled_qty: float = 0.0
 
 
@@ -97,7 +98,7 @@ class BybitClient:
             reduceOnly=reduce_only,
             timeInForce="GTC",
         )
-        return OrderResult(order_id=resp["result"]["orderId"], status="open")
+        return OrderResult(order_id=resp["result"]["orderId"], status="open", price=price)
 
     def place_market_order(self, symbol: str, side: str, qty: float, reduce_only: bool = False) -> OrderResult:
         resp = self._call_with_retry(
@@ -116,7 +117,12 @@ class BybitClient:
         open_list = open_resp["result"]["list"]
         if open_list:
             order = open_list[0]
-            return OrderResult(order_id=order["orderId"], status="open", filled_qty=float(order["cumExecQty"]))
+            return OrderResult(
+                order_id=order["orderId"],
+                status="open",
+                price=float(order.get("price") or 0.0),
+                filled_qty=float(order["cumExecQty"]),
+            )
 
         history_resp = self._call_with_retry(
             self._http.get_order_history, category=CATEGORY, symbol=symbol, orderId=order_id
@@ -127,7 +133,11 @@ class BybitClient:
 
         order = history_list[0]
         status = "closed" if order["orderStatus"] == "Filled" else "canceled"
-        return OrderResult(order_id=order["orderId"], status=status, filled_qty=float(order["cumExecQty"]))
+        # 優先用 avgPrice(實際成交均價),不是 price(掛單當初的限價)——
+        # 損益該用真正成交的價格算。avgPrice 是 "0" 的情況(例如訂單根本
+        # 沒成交就被取消)才退回用 price。
+        price = float(order.get("avgPrice") or 0.0) or float(order.get("price") or 0.0)
+        return OrderResult(order_id=order["orderId"], status=status, price=price, filled_qty=float(order["cumExecQty"]))
 
     def cancel_order(self, symbol: str, order_id: str) -> None:
         try:

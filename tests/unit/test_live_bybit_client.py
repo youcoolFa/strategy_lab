@@ -83,7 +83,7 @@ class TestPlaceLimitOrder:
 
         result = client.place_limit_order("BTCUSDT", "Buy", 0.01, 60000.0)
 
-        assert result == OrderResult(order_id="order-1", status="open")
+        assert result == OrderResult(order_id="order-1", status="open", price=60000.0)
         assert http.calls == [
             (
                 "place_order",
@@ -118,7 +118,7 @@ class TestPlaceMarketOrder:
 
         result = client.place_market_order("BTCUSDT", "Sell", 0.01, reduce_only=True)
 
-        assert result == OrderResult(order_id="order-3", status="open")
+        assert result == OrderResult(order_id="order-3", status="open", price=0.0)
         assert http.calls == [
             (
                 "place_order",
@@ -138,23 +138,47 @@ class TestGetOrderStatus:
     def test_returns_open_when_found_in_open_orders(self):
         http = FakeHTTP()
         http.open_orders_response = {
-            "result": {"list": [{"orderId": "o1", "cumExecQty": "0"}]}
+            "result": {"list": [{"orderId": "o1", "price": "60000.0", "cumExecQty": "0"}]}
         }
         client = make_client(http)
 
         result = client.get_order_status("BTCUSDT", "o1")
-        assert result == OrderResult(order_id="o1", status="open", filled_qty=0.0)
+        assert result == OrderResult(order_id="o1", status="open", price=60000.0, filled_qty=0.0)
 
     def test_falls_back_to_history_when_not_in_open_orders(self):
         http = FakeHTTP()
         http.open_orders_response = {"result": {"list": []}}
         http.order_history_response = {
-            "result": {"list": [{"orderId": "o1", "orderStatus": "Filled", "cumExecQty": "0.01"}]}
+            "result": {
+                "list": [
+                    {"orderId": "o1", "orderStatus": "Filled", "price": "60000.0", "avgPrice": "59998.5", "cumExecQty": "0.01"}
+                ]
+            }
         }
         client = make_client(http)
 
         result = client.get_order_status("BTCUSDT", "o1")
-        assert result == OrderResult(order_id="o1", status="closed", filled_qty=0.01)
+        # 用 avgPrice(實際成交均價),不是 price(掛單當初的限價)——兩者
+        # 通常很接近,但成交均價才是計算損益該用的數字。
+        assert result == OrderResult(order_id="o1", status="closed", price=59998.5, filled_qty=0.01)
+
+    def test_falls_back_to_price_when_avg_price_is_zero(self):
+        """avgPrice 是 "0"(字串)的情況——Bybit 對某些已終結但非成交的
+        狀態(例如 Cancelled)可能回傳 avgPrice="0",這時候要退回用
+        price,不能把 0 當成真的成交價。"""
+        http = FakeHTTP()
+        http.open_orders_response = {"result": {"list": []}}
+        http.order_history_response = {
+            "result": {
+                "list": [
+                    {"orderId": "o1", "orderStatus": "Cancelled", "price": "60000.0", "avgPrice": "0", "cumExecQty": "0"}
+                ]
+            }
+        }
+        client = make_client(http)
+
+        result = client.get_order_status("BTCUSDT", "o1")
+        assert result.price == 60000.0
 
     def test_cancelled_order_maps_to_canceled_status(self):
         http = FakeHTTP()
