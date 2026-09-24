@@ -105,7 +105,15 @@ flowchart TD
   合約(`evaluate(ctx) -> bool`);`rules/conditions.py` 是實際判斷市場
   事實的具體條件;`rules/composite.py` 的 `And`/`Or`/`Not` 只依賴
   `Condition` 合約,不知道被組合的是哪一種具體條件,因此可以任意疊代
-  巢狀。此層不依賴 Plugin 層或 `engine/runner.py`。
+  巢狀。此層不依賴 Plugin 層或 `engine/runner.py`。想看 Rule 層三個
+  module(`base.py`/`conditions.py`/`composite.py`)跟每一個實際使用
+  它們的 plugin 之間逐一的對應關係,見
+  [docs/rule_layer_plugin_relationship.svg](rule_layer_plugin_relationship.svg)
+  ——同時標出了哪些 condition/composite 目前沒有任何 plugin 用到
+  (`And`/`Not`)、哪個 condition 是唯一有狀態的(`SustainedPriceBreakout`)、
+  哪個 plugin 是唯一透過 composite.py 組合(而非直接用單一 leaf
+  condition)的(`BracketTPSLExit`),以及 `time_window/` 完全不參與
+  Rule 層這件事。
 - **Plugin 層**:每個檔案是一個獨立、可單元測試的策略邏輯單元,彼此不
   互相依賴,也不依賴 `engine/runner.py`。自 Phase 2 起,只負責兩件事:
   在 `__post_init__` 組出一棵 `Condition` 樹存進 `self.rule`,以及計算

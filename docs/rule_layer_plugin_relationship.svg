@@ -1,0 +1,148 @@
+<svg viewBox="0 0 1500 1020" xmlns="http://www.w3.org/2000/svg" font-family="'PingFang TC','Microsoft JhengHei','Noto Sans CJK TC',sans-serif">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#455a64" />
+    </marker>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9575cd" />
+    </marker>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#00897b" />
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1500" height="1020" fill="#ffffff" />
+  <text x="30" y="30" font-size="17" font-weight="700" fill="#263238">Rule 層每個 module 跟 plugin 之間的關係（未放入 project，僅供說明）</text>
+
+  <!-- base.py -->
+  <rect x="600" y="40" width="300" height="55" rx="8" fill="#ffffff" stroke="#5e35b1" stroke-width="2" />
+  <text x="750" y="60" font-size="12.5" font-weight="700" text-anchor="middle" fill="#4527a0">rules/base.py</text>
+  <text x="750" y="77" font-size="10.5" text-anchor="middle" fill="#5e35b1">Condition Protocol：evaluate(ctx) -&gt; bool</text>
+
+  <!-- TimeWindow note box -->
+  <rect x="1100" y="40" width="360" height="100" rx="8" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5" stroke-dasharray="4,3" />
+  <text x="1280" y="62" font-size="11.5" font-weight="700" text-anchor="middle" fill="#616161">time_window/weekly_window.py</text>
+  <text x="1280" y="78" font-size="11.5" font-weight="700" text-anchor="middle" fill="#616161">time_window/daily_session.py</text>
+  <text x="1280" y="96" font-size="10" text-anchor="middle" fill="#757575">不參與 Rule 層！沒有 self.rule，</text>
+  <text x="1280" y="111" font-size="10" text-anchor="middle" fill="#757575">直接用 window_end()/should_cleanup()</text>
+  <text x="1280" y="126" font-size="10" text-anchor="middle" fill="#757575">兩個方法，不透過 Condition 判斷</text>
+
+  <!-- conditions band -->
+  <rect x="40" y="150" width="680" height="430" rx="10" fill="#eaf2fd" />
+  <text x="60" y="172" font-size="13" font-weight="700" fill="#1e88e5">rules/conditions.py（leaf condition，6 個）</text>
+
+  <rect x="70" y="190" width="300" height="60" rx="8" fill="#ffffff" stroke="#1e88e5" stroke-width="1.5" />
+  <text x="220" y="213" font-size="12" font-weight="700" text-anchor="middle" fill="#1565c0">PriceBelowReference</text>
+  <text x="220" y="229" font-size="10" text-anchor="middle" fill="#1e88e5">(deviation_pct)</text>
+
+  <rect x="390" y="190" width="300" height="60" rx="8" fill="#ffffff" stroke="#1e88e5" stroke-width="1.5" />
+  <text x="540" y="213" font-size="12" font-weight="700" text-anchor="middle" fill="#1565c0">PriceAtOrAboveReference</text>
+  <text x="540" y="229" font-size="10" text-anchor="middle" fill="#1e88e5">()</text>
+
+  <rect x="70" y="270" width="300" height="60" rx="8" fill="#ffffff" stroke="#1e88e5" stroke-width="1.5" />
+  <text x="220" y="293" font-size="12" font-weight="700" text-anchor="middle" fill="#1565c0">MovingAverageCross</text>
+  <text x="220" y="309" font-size="10" text-anchor="middle" fill="#1e88e5">(fast_window, slow_window)</text>
+
+  <rect x="390" y="270" width="300" height="60" rx="8" fill="#ffffff" stroke="#1e88e5" stroke-width="1.5" />
+  <text x="540" y="293" font-size="12" font-weight="700" text-anchor="middle" fill="#1565c0">PriceChangeFromEntry</text>
+  <text x="540" y="309" font-size="10" text-anchor="middle" fill="#1e88e5">(threshold_pct, direction)</text>
+
+  <rect x="70" y="350" width="300" height="60" rx="8" fill="#ffffff" stroke="#1e88e5" stroke-width="1.5" />
+  <text x="220" y="373" font-size="12" font-weight="700" text-anchor="middle" fill="#1565c0">MaxDurationElapsed</text>
+  <text x="220" y="389" font-size="10" text-anchor="middle" fill="#1e88e5">(max_minutes)</text>
+
+  <rect x="390" y="350" width="300" height="60" rx="8" fill="#fff8e1" stroke="#f9a825" stroke-width="2" />
+  <text x="540" y="373" font-size="12" font-weight="700" text-anchor="middle" fill="#e65100">SustainedPriceBreakout ⚠</text>
+  <text x="540" y="389" font-size="10" text-anchor="middle" fill="#ef6c00">(threshold/reference/hours/margin) － 唯一有狀態的 condition</text>
+
+  <text x="60" y="560" font-size="10" fill="#5c6bc0">其餘 5 個都是無狀態純函式：同一組 ctx 呼叫幾次結果都一樣。</text>
+  <text x="60" y="576" font-size="10" fill="#ef6c00">SustainedPriceBreakout 會在 evaluate() 呼叫之間累積內部歷史，結果會隨呼叫次數改變。</text>
+
+  <!-- composite band -->
+  <rect x="760" y="150" width="340" height="430" rx="10" fill="#e0f2f1" />
+  <text x="775" y="172" font-size="13" font-weight="700" fill="#00897b">rules/composite.py（組合子，3 個）</text>
+
+  <rect x="790" y="190" width="280" height="50" rx="8" fill="#fafafa" stroke="#bdbdbd" stroke-width="1.5" stroke-dasharray="4,3" />
+  <text x="930" y="220" font-size="12" text-anchor="middle" fill="#9e9e9e">And（目前沒有 plugin 使用）</text>
+
+  <rect x="790" y="270" width="280" height="60" rx="8" fill="#ffffff" stroke="#00897b" stroke-width="2" />
+  <text x="930" y="292" font-size="12" font-weight="700" text-anchor="middle" fill="#00695c">Or</text>
+  <text x="930" y="308" font-size="10" text-anchor="middle" fill="#00897b">被 BracketTPSLExit 使用中</text>
+
+  <rect x="790" y="370" width="280" height="50" rx="8" fill="#fafafa" stroke="#bdbdbd" stroke-width="1.5" stroke-dasharray="4,3" />
+  <text x="930" y="400" font-size="12" text-anchor="middle" fill="#9e9e9e">Not（目前沒有 plugin 使用）</text>
+
+  <text x="775" y="450" font-size="10" fill="#00897b">And/Or/Not 只依賴 Condition Protocol，不知道被組合的</text>
+  <text x="775" y="465" font-size="10" fill="#00897b">是哪一種具體條件，可以任意巢狀（Or 裡面還能再放 And）。</text>
+
+  <!-- Or -> children arrows -->
+  <path d="M790,288 L690,288" stroke="#00897b" stroke-width="1.5" marker-end="url(#a3)" />
+  <text x="600" y="283" font-size="9" fill="#00897b">children[0]：threshold=take_profit_pct, direction="up"</text>
+  <path d="M790,312 L690,312" stroke="#00897b" stroke-width="1.5" marker-end="url(#a3)" />
+  <text x="600" y="327" font-size="9" fill="#00897b">children[1]：threshold=stop_loss_pct, direction="down"</text>
+
+  <!-- implements arrows (grouped) -->
+  <path d="M400,150 L400,110 L650,110 L650,95" stroke="#9575cd" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#a2)" />
+  <text x="410" y="125" font-size="9.5" fill="#7e57c2">實作（6 個 leaf condition 共用）</text>
+  <path d="M930,150 L930,110 L850,110 L850,95" stroke="#9575cd" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#a2)" />
+  <text x="865" y="130" font-size="9.5" fill="#7e57c2">實作（And/Or/Not 共用）</text>
+
+  <!-- Entry cluster -->
+  <rect x="40" y="640" width="460" height="170" rx="10" fill="#eaf7ea" />
+  <text x="60" y="660" font-size="12.5" font-weight="700" fill="#2e7d32">entry/</text>
+
+  <rect x="70" y="670" width="400" height="55" rx="8" fill="#ffffff" stroke="#43a047" stroke-width="1.5" />
+  <text x="270" y="692" font-size="11.5" font-weight="700" text-anchor="middle" fill="#2e7d32">DeviationFromReferenceEntry</text>
+  <text x="270" y="708" font-size="10" text-anchor="middle" fill="#388e3c">self.rule = PriceBelowReference(deviation_pct)</text>
+
+  <rect x="70" y="740" width="400" height="55" rx="8" fill="#ffffff" stroke="#43a047" stroke-width="1.5" />
+  <text x="270" y="762" font-size="11.5" font-weight="700" text-anchor="middle" fill="#2e7d32">MACrossoverEntry</text>
+  <text x="270" y="778" font-size="10" text-anchor="middle" fill="#388e3c">self.rule = MovingAverageCross(fast, slow)</text>
+
+  <!-- Exit cluster -->
+  <rect x="530" y="640" width="460" height="230" rx="10" fill="#eaf7ea" />
+  <text x="550" y="660" font-size="12.5" font-weight="700" fill="#2e7d32">exit/</text>
+
+  <rect x="560" y="670" width="400" height="50" rx="8" fill="#ffffff" stroke="#43a047" stroke-width="1.5" />
+  <text x="760" y="691" font-size="11.5" font-weight="700" text-anchor="middle" fill="#2e7d32">ReturnToReferenceExit</text>
+  <text x="760" y="706" font-size="10" text-anchor="middle" fill="#388e3c">self.rule = PriceAtOrAboveReference()</text>
+
+  <rect x="560" y="730" width="400" height="50" rx="8" fill="#ffffff" stroke="#43a047" stroke-width="1.5" />
+  <text x="760" y="751" font-size="11.5" font-weight="700" text-anchor="middle" fill="#2e7d32">MaxHoldDurationExit</text>
+  <text x="760" y="766" font-size="10" text-anchor="middle" fill="#388e3c">self.rule = MaxDurationElapsed(max_minutes)</text>
+
+  <rect x="560" y="790" width="400" height="50" rx="8" fill="#ffffff" stroke="#43a047" stroke-width="1.5" />
+  <text x="760" y="811" font-size="11.5" font-weight="700" text-anchor="middle" fill="#2e7d32">BracketTPSLExit</text>
+  <text x="760" y="826" font-size="10" text-anchor="middle" fill="#388e3c">self.rule = Or(...,...)　※ 唯一用到 composite.py 的 plugin</text>
+
+  <!-- KillSwitch cluster -->
+  <rect x="1020" y="640" width="440" height="110" rx="10" fill="#eaf7ea" />
+  <text x="1040" y="660" font-size="12.5" font-weight="700" fill="#2e7d32">kill_switch/</text>
+
+  <rect x="1050" y="670" width="380" height="55" rx="8" fill="#ffffff" stroke="#43a047" stroke-width="1.5" />
+  <text x="1240" y="692" font-size="11.5" font-weight="700" text-anchor="middle" fill="#2e7d32">SustainedBreakoutKillSwitch</text>
+  <text x="1240" y="708" font-size="10" text-anchor="middle" fill="#388e3c">self.rule = SustainedPriceBreakout(...)</text>
+
+  <!-- plugin -> condition arrows -->
+  <g stroke="#455a64" stroke-width="1.5" fill="none">
+    <path d="M270,670 L270,610 L220,610 L220,250" marker-end="url(#a1)" />
+    <path d="M470,767 L500,767 L500,610 L220,610 L220,330" marker-end="url(#a1)" />
+    <path d="M760,670 L760,610 L540,610 L540,250" marker-end="url(#a1)" />
+    <path d="M960,755 L1000,755 L1000,610 L220,610 L220,410" marker-end="url(#a1)" />
+    <path d="M560,815 L510,815 L510,610 L930,610 L930,330" marker-end="url(#a1)" />
+    <path d="M1240,670 L1240,610 L540,610 L540,410" marker-end="url(#a1)" />
+  </g>
+
+  <!-- legend -->
+  <g font-size="11" fill="#455a64">
+    <line x1="40" y1="950" x2="80" y2="950" stroke="#455a64" stroke-width="1.5" marker-end="url(#a1)" />
+    <text x="90" y="954">plugin.__post_init__ 建構 self.rule</text>
+
+    <line x1="330" y1="950" x2="370" y2="950" stroke="#9575cd" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#a2)" />
+    <text x="380" y="954">實作 Condition Protocol</text>
+
+    <line x1="580" y1="950" x2="620" y2="950" stroke="#00897b" stroke-width="1.5" marker-end="url(#a3)" />
+    <text x="630" y="954">composite 的 children(建構參數)</text>
+  </g>
+  <text x="40" y="985" font-size="10.5" fill="#90a4ae">6 個 plugin 各自只建一種 rule；BracketTPSLExit 是唯一透過 composite.py 組合、而非直接用單一 leaf condition 的例子。</text>
+</svg>
