@@ -403,9 +403,12 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
 進度總覽見獨立的工程路線圖:
-[docs/live_migration_roadmap.mmd](live_migration_roadmap.mmd)(綠=已完成、
-黃=程式碼完成但還沒真的碰過真實帳戶、橘=卡在等真實憑證、灰=還沒開始)。
-下面文字版逐一展開每個 Stage 的細節。
+[docs/live_migration_roadmap.svg](live_migration_roadmap.svg)(直接看畫面,
+綠=已完成、黃=程式碼完成但還沒真的碰過真實帳戶、橘=卡在等真實憑證、
+灰=還沒開始),或它的可編輯來源
+[docs/live_migration_roadmap.mmd](live_migration_roadmap.mmd)(Mermaid 純
+文字版,改進度時先改這份,再手動同步 `.svg`)。下面文字版逐一展開每個
+Stage 的細節。
 
 **這是唯一會連真實服務、需要真實憑證的部分。** 跟本文件前五節描述的
 「教學沙盒」核心(`broker/`、`plugins/`、`engine/`)刻意分開成獨立套件
