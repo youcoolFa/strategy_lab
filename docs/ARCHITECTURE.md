@@ -113,7 +113,11 @@ flowchart TD
   (`And`/`Not`)、哪個 condition 是唯一有狀態的(`SustainedPriceBreakout`)、
   哪個 plugin 是唯一透過 composite.py 組合(而非直接用單一 leaf
   condition)的(`BracketTPSLExit`),以及 `time_window/` 完全不參與
-  Rule 層這件事。
+  Rule 層這件事。上面這張圖是「靜態結構」——想看 rule 物件在**時間軸**
+  上實際怎麼被 runner 呼叫(建構期 vs 每個 tick 都重跑一次的執行期、
+  `self.rule` 為什麼會被同一個物件反覆呼叫 `evaluate()`),見
+  [docs/rule_runner_sequence.svg](rule_runner_sequence.svg)(以
+  `DeviationFromReferenceEntry` 為例的時序圖)。
 - **Plugin 層**:每個檔案是一個獨立、可單元測試的策略邏輯單元,彼此不
   互相依賴,也不依賴 `engine/runner.py`。自 Phase 2 起,只負責兩件事:
   在 `__post_init__` 組出一棵 `Condition` 樹存進 `self.rule`,以及計算
