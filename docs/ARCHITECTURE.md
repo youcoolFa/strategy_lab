@@ -14,6 +14,11 @@ time_window(排程時間窗)、kill_switch(市場行為觸發的終止條件,選
 
 ## 1. 元件關係圖
 
+想仔細看 module 與 module 之間關係的,也可以直接看
+[docs/module_relationship_diagram.svg](module_relationship_diagram.svg)
+(同一份圖,畫成有分層底色、箭頭樣式區分「實作/呼叫/registry 查找/組裝」
+四種關係的版本,比下面這張 Mermaid 更適合仔細追一條條依賴線)。
+
 ```mermaid
 flowchart TD
     subgraph Contract["合約層"]
