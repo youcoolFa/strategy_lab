@@ -416,6 +416,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | Live 遷移 Stage 3.4 | `live/config.py`(執行參數)+ `live/main.py`(真正的執行入口)+ `StrategyRunner.request_stop()`(第三種收攤觸發);新增 `.env.example`/`live_execution_config.example.json` 範本 | §1 補充 `request_stop()`;§6 更新 Stage 3.4 狀態;新增 §6.5 | 程式碼已完成,**實際連真實帳戶執行需要使用者自己填入 `.env` 真實憑證** |
 | `mean_reversion_breakout_guard` 策略 | 新增 `strategies/mean_reversion_breakout_guard.yaml`;發現並修正 `SustainedPriceBreakout`/`SustainedBreakoutKillSwitch` 的 `days`(日曆日)跟 `weekly_window` 窗口長度不相容的缺口,改為 `hours`(滾動時間視窗) | 新增 §4.6.1;更新 §4.6 用語 | 已完成 |
 | kill_switch 多單位 + 載入期相容性檢查 | `SustainedPriceBreakout`/`SustainedBreakoutKillSwitch` 新增 `minutes`/`days` 當 `hours` 的替代輸入單位(互斥,正規化回 `hours`);`WeeklyWindow`/`DailySession` 新增 `max_span()`(併入 `TimeWindow` Protocol);`dsl/loader.py` 新增載入期檢查,kill_switch 視窗 `>=` time_window 跨度就直接報錯 | §1 補充 Protocol 變更;新增 §4.6.2 | 已完成 |
+| 互動式選策略 | 新增 `dsl/discovery.py`(`list_strategy_files()`/`prompt_strategy_choice()`,`input_fn`/`print_fn` 依賴注入);`demo/run_from_yaml.py` 的 `--strategy` 改為選填,不給就跳出互動選單;新增獨立小工具 `live/select_strategy.py`,選完把 `strategy_path` 寫回 `live_execution_config.json`(不動其他欄位)——刻意不放進 `live/main.py`,因為 `main()` 必須能無人值守啟動,`input()` 會讓它卡死在沒有人回應的輸入 | §6 新增 §6.6 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -653,3 +654,31 @@ dataclass 裡;`strategy_lab` 因為 Phase 3 已經有 DSL 把「策略是什麼�
 跟 `get_current_price`,讓迴圈在測試裡幾毫秒內跑完一次完整循環——跟
 這整個專案一路下來的依賴注入取捨完全一致(`SyntheticFeed`、
 `http_client`、`redis_url` 都是同一個模式)。
+
+### 6.6 互動式選策略:`dsl/discovery.py` + `live/select_strategy.py`,以及一個刻意不做的地方
+
+**動機**:`strategies/*.yaml` 一多,每次都要手動打完整路徑(或去改
+`live_execution_config.json`)很煩。想要的體驗是:跑起來就列出編號選單,
+輸入數字選一個。
+
+**`dsl/discovery.py`**:`list_strategy_files(dir)`(掃描排序)+
+`prompt_strategy_choice(files, input_fn=input, print_fn=print)`(印選單、
+讀輸入、輸入不是數字或超出範圍就重問,不會崩潰或悄悄選錯)。`input_fn`/
+`print_fn` 用依賴注入,測試時換成假函式,不用真的等鍵盤輸入——跟
+`now_fn`/`http_client` 那套可測試性做法一致。這個模組放在 `dsl/` 不是
+`live/`,因為 `demo/run_from_yaml.py`(沙盒)也要用同一套邏輯,不想讓
+沙盒去依賴 `live/` 這個套件。
+
+**`demo/run_from_yaml.py`**:`--strategy` 從必填改成選填,不給就呼叫
+`list_strategy_files()` + `prompt_strategy_choice()`。
+
+**`live/select_strategy.py`是獨立的新檔案,刻意不是 `live/main.py` 的
+一部分。** 理由是 `main()` 的定位是要能被 launchd/systemd 這類排程器
+無人值守叫起來——一旦裡面有任何 `input()`,排程器啟動它時沒有人在終端
+機前輸入,程式會直接卡死在那一行等一個永遠不會來的輸入(或視情況直接
+`EOFError`)。所以「互動選策略」被獨立成一個只做一件事、選完就結束的
+小工具:列出策略 → 讀輸入 → 把選擇寫進 `live_execution_config.json` 的
+`strategy_path` 欄位(`update_strategy_path_in_config()`,只改這一個
+欄位,其餘 `dry_run`/`testnet` 等既有設定原封不動)→ 結束。之後
+`main()` 開機時一如既往只讀 JSON,不需要任何人守著。這是刻意的分工,不
+是漏做了「把選單整合進 main()」這一步。
