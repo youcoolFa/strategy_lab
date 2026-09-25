@@ -7,7 +7,7 @@ __pycache__/
 
 # 真實憑證與真實執行設定——絕對不進 git,只留範本(*.example)。
 .env
-live_execution_config.json
+live_execution_config.yaml
 
 # 說明用的工程圖(architecture 討論過程中畫的 SVG)——不上傳,只留在本機。
 docs/*.svg

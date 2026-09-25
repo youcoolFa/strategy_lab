@@ -1,0 +1,16 @@
+# live_execution_config.yaml 的安全範本。
+# 真正要用的檔案(live_execution_config.yaml)不進 git,自己複製這份範本:
+#   cp live_execution_config.example.yaml live_execution_config.yaml
+# 再依實際部署需求修改——尤其 dry_run/testnet 這兩項,改成 false 之前
+# 務必先確認整條流程真的沒問題。
+
+strategy_path: strategies/weekend_mean_reversion.yaml  # 要跑哪個策略;也可以用 live/select_strategy.py 互動選擇
+symbol_override: null  # 不設就從策略 YAML 的 symbol 轉換成 Bybit 格式(如 "BTCUSDT")
+
+dry_run: true   # 先觀察 log,不真的下單;確認邏輯沒問題後才考慮改 false
+testnet: true   # 先用 Bybit 測試網;確認沒問題後才考慮改 false 接正式環境
+poll_interval_seconds: 5
+max_api_retries: 5
+retry_backoff_cap_seconds: 30.0
+
+use_live_ticker_feed: false  # 要跟 Fa_Successful_trade 接的網路(mainnet/testnet)一致才能開

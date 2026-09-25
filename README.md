@@ -60,9 +60,9 @@ Condition 樹。
    進 git):
    ```bash
    cp .env.example .env                                          # 填入 BYBIT_API_KEY / BYBIT_API_SECRET / REDIS_URL
-   cp live_execution_config.example.json live_execution_config.json
+   cp live_execution_config.example.yaml live_execution_config.yaml
    ```
-2. **先確認 `live_execution_config.json` 裡 `dry_run: true`、
+2. **先確認 `live_execution_config.yaml` 裡 `dry_run: true`、
    `testnet: true`**(範本預設值,先不要改),用這個安全設定跑一次,
    確認整個流程(讀 YAML 策略、連 Bybit 測試網查價、log 輸出)正常。
 3. 確認沒問題之後,才把 `dry_run`/`testnet` 改成 `false`——這是你自己

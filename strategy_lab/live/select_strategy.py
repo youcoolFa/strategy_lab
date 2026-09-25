@@ -2,7 +2,7 @@
 live/select_strategy.py
 
 互動式小工具:列出 strategies/*.yaml,讓使用者選一個,把選擇寫進
-live_execution_config.json 的 strategy_path 欄位——只改這一個欄位,其餘
+live_execution_config.yaml 的 strategy_path 欄位——只改這一個欄位,其餘
 既有設定(dry_run/testnet 等)維持不變。
 
 刻意不是 live/main.py 的一部分:live/main.py 必須能無人值守啟動(被
@@ -16,15 +16,16 @@ live/main.py 的無人值守定位是兩件事,分開成兩個檔案。
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+import yaml
 
 from strategy_lab.dsl.discovery import list_strategy_files, prompt_strategy_choice
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STRATEGIES_DIR = PROJECT_ROOT / "strategies"
-CONFIG_PATH = PROJECT_ROOT / "live_execution_config.json"
-EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "live_execution_config.example.json"
+CONFIG_PATH = PROJECT_ROOT / "live_execution_config.yaml"
+EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "live_execution_config.example.yaml"
 
 
 def update_strategy_path_in_config(config_path: Path, example_path: Path, new_strategy_path: str) -> None:
@@ -33,13 +34,12 @@ def update_strategy_path_in_config(config_path: Path, example_path: Path, new_st
     (dry_run/testnet 等)有安全預設值,不會漏欄位。"""
     source = config_path if config_path.exists() else example_path
     with open(source, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        data = yaml.safe_load(f) or {}
 
     data["strategy_path"] = new_strategy_path
 
     with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+        yaml.dump(data, f, allow_unicode=True, sort_keys=False)
 
 
 def main() -> None:

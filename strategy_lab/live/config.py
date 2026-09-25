@@ -2,7 +2,7 @@
 live/config.py
 
 對應 sat_strategy/app/config.py 的 StrategyConfig/load_config() 同一種
-設計:dataclass 預設值本身要是安全的,JSON 設定檔 + 環境變數才能覆蓋成
+設計:dataclass 預設值本身要是安全的,YAML 設定檔 + 環境變數才能覆蓋成
 真的要上線的樣子。`dry_run`/`testnet`/`use_live_ticker_feed` 的預設值
 逐項對照 sat_strategy 自己的預設值,不是隨意選的。
 
@@ -13,23 +13,27 @@ live/config.py
 StrategyConfig 裡不一樣——Phase 3 的 DSL 已經把「策略是什麼」跟
 「怎麼跑」分開了,這裡沒有必要走回頭路。
 
+原本用 JSON,改成 YAML 是因為:①這個 repo 其他地方(策略定義)本來就
+已經在用 PyYAML,不需要為了這一份小小的執行設定額外維護兩套語法;
+②YAML 可以加註解解釋每個欄位的意思,JSON 完全不行。
+
 實際要上線的設定值(dry_run=false、testnet=false 這種),故意不由這個
 程式庫自己建立/提交進 git——那是使用者自己在部署時明確建立
-live_execution_config.json 的動作,不是「寫程式碼」這件事本身該包含
+live_execution_config.yaml 的動作,不是「寫程式碼」這件事本身該包含
 的一步。
 """
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+import yaml
 from loguru import logger
 
-_DEFAULT_CONFIG_JSON_PATH = Path(__file__).resolve().parents[2] / "live_execution_config.json"
+_DEFAULT_CONFIG_YAML_PATH = Path(__file__).resolve().parents[2] / "live_execution_config.yaml"
 
 
 @dataclass
@@ -58,11 +62,11 @@ def load_execution_config(config_path: Optional[Path] = None) -> ExecutionConfig
     """先用 ExecutionConfig 的安全預設值,若設定檔存在就覆蓋,環境變數
     最後覆蓋一次(方便在 shell 腳本裡臨時切換,不用改設定檔)。"""
     config = ExecutionConfig()
-    path = config_path or _DEFAULT_CONFIG_JSON_PATH
+    path = config_path or _DEFAULT_CONFIG_YAML_PATH
 
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
-            overrides = json.load(f)
+            overrides = yaml.safe_load(f) or {}  # 空檔案/全是註解時 safe_load 回傳 None
         unknown_keys = set(overrides) - set(config.to_dict())
         if unknown_keys:
             logger.warning(f"{path} 裡有不認得的欄位,已忽略: {unknown_keys}")

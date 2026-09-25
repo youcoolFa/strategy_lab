@@ -413,10 +413,10 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | Live 遷移 Stage 3.1 | 泛化 `Broker`/`OrderLike` Protocol,`StrategyRunner.broker` 不再寫死 `PaperBroker` 型別 | §1 元件關係圖新增 Broker Protocol;§6 更新 Stage 3.1 狀態 | 已完成 |
 | Live 遷移 Stage 3.2 | `LiveBroker` 包裝 `BybitClient`,滿足 `Broker` Protocol;新增 `OrderResult.price` 欄位;修正共用假伺服器不模擬市價單立即成交的缺口 | §6 更新 Stage 3.2 狀態;新增 §6.3 | 已完成 |
 | Live 遷移 Stage 3.3 | `LiveBroker` 新增 `dry_run` 安全開關(預設 `True`) | §6 更新 Stage 3.3 狀態;新增 §6.4 | 已完成 |
-| Live 遷移 Stage 3.4 | `live/config.py`(執行參數)+ `live/main.py`(真正的執行入口)+ `StrategyRunner.request_stop()`(第三種收攤觸發);新增 `.env.example`/`live_execution_config.example.json` 範本 | §1 補充 `request_stop()`;§6 更新 Stage 3.4 狀態;新增 §6.5 | 程式碼已完成,**實際連真實帳戶執行需要使用者自己填入 `.env` 真實憑證** |
+| Live 遷移 Stage 3.4 | `live/config.py`(執行參數)+ `live/main.py`(真正的執行入口)+ `StrategyRunner.request_stop()`(第三種收攤觸發);新增 `.env.example`/`live_execution_config.example.yaml` 範本 | §1 補充 `request_stop()`;§6 更新 Stage 3.4 狀態;新增 §6.5 | 程式碼已完成,**實際連真實帳戶執行需要使用者自己填入 `.env` 真實憑證** |
 | `mean_reversion_breakout_guard` 策略 | 新增 `strategies/mean_reversion_breakout_guard.yaml`;發現並修正 `SustainedPriceBreakout`/`SustainedBreakoutKillSwitch` 的 `days`(日曆日)跟 `weekly_window` 窗口長度不相容的缺口,改為 `hours`(滾動時間視窗) | 新增 §4.6.1;更新 §4.6 用語 | 已完成 |
 | kill_switch 多單位 + 載入期相容性檢查 | `SustainedPriceBreakout`/`SustainedBreakoutKillSwitch` 新增 `minutes`/`days` 當 `hours` 的替代輸入單位(互斥,正規化回 `hours`);`WeeklyWindow`/`DailySession` 新增 `max_span()`(併入 `TimeWindow` Protocol);`dsl/loader.py` 新增載入期檢查,kill_switch 視窗 `>=` time_window 跨度就直接報錯 | §1 補充 Protocol 變更;新增 §4.6.2 | 已完成 |
-| 互動式選策略 | 新增 `dsl/discovery.py`(`list_strategy_files()`/`prompt_strategy_choice()`,`input_fn`/`print_fn` 依賴注入);`demo/run_from_yaml.py` 的 `--strategy` 改為選填,不給就跳出互動選單;新增獨立小工具 `live/select_strategy.py`,選完把 `strategy_path` 寫回 `live_execution_config.json`(不動其他欄位)——刻意不放進 `live/main.py`,因為 `main()` 必須能無人值守啟動,`input()` 會讓它卡死在沒有人回應的輸入 | §6 新增 §6.6 | 已完成 |
+| 互動式選策略 | 新增 `dsl/discovery.py`(`list_strategy_files()`/`prompt_strategy_choice()`,`input_fn`/`print_fn` 依賴注入);`demo/run_from_yaml.py` 的 `--strategy` 改為選填,不給就跳出互動選單;新增獨立小工具 `live/select_strategy.py`,選完把 `strategy_path` 寫回 `live_execution_config.yaml`(不動其他欄位)——刻意不放進 `live/main.py`,因為 `main()` 必須能無人值守啟動,`input()` 會讓它卡死在沒有人回應的輸入 | §6 新增 §6.6 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -629,12 +629,21 @@ dataclass 裡;`strategy_lab` 因為 Phase 3 已經有 DSL 把「策略是什麼�
 不重複定義。`dry_run`/`testnet`/`use_live_ticker_feed` 的預設值逐項
 對照 `sat_strategy/app/config.py` 自己的預設值,不是隨意選的。
 
-**真的要上線的設定值,不是這個程式庫自己建立的。** `live_execution_config.json`
+**真的要上線的設定值,不是這個程式庫自己建立的。** `live_execution_config.yaml`
 (`dry_run: false`、`testnet: false` 這種)故意沒有被這次工作建立或
-提交進 git——只有一個安全範本 `live_execution_config.example.json`
+提交進 git——只有一個安全範本 `live_execution_config.example.yaml`
 (`dry_run: true`)。要不要把某個部署的設定改成正式上線,是使用者自己
 複製範本、改值的動作,不是寫程式碼這件事本身該包含的一步。`.env`
 同理,只留 `.env.example`,兩個檔案都已經加進 `.gitignore`。
+
+**這份執行設定原本是 JSON,後來改成 YAML**(§6.6 新增互動選策略工具
+的同一輪工作一併做的)。原因:①`strategies/*.yaml` 本來就已經在用
+PyYAML,執行設定另外維護一套 JSON 語法沒有必要;②YAML 可以加註解
+解釋每個欄位的意思,`live_execution_config.example.yaml` 現在每個欄位
+旁邊都有一行說明,JSON 完全做不到這件事。`load_execution_config()`
+內部只是把 `json.load()` 換成 `yaml.safe_load()`,其餘邏輯(先套用
+`ExecutionConfig` 的安全預設值、檔案存在才覆蓋、環境變數最後覆蓋一次)
+完全不變。
 
 **`request_stop()`:寫 `main.py` 的即時迴圈時,發現 `StrategyRunner`
 少了一種「該不該收攤」的觸發方式。** `time_window`(排程時間)、
@@ -658,7 +667,7 @@ dataclass 裡;`strategy_lab` 因為 Phase 3 已經有 DSL 把「策略是什麼�
 ### 6.6 互動式選策略:`dsl/discovery.py` + `live/select_strategy.py`,以及一個刻意不做的地方
 
 **動機**:`strategies/*.yaml` 一多,每次都要手動打完整路徑(或去改
-`live_execution_config.json`)很煩。想要的體驗是:跑起來就列出編號選單,
+`live_execution_config.yaml`)很煩。想要的體驗是:跑起來就列出編號選單,
 輸入數字選一個。
 
 **`dsl/discovery.py`**:`list_strategy_files(dir)`(掃描排序)+
@@ -677,7 +686,7 @@ dataclass 裡;`strategy_lab` 因為 Phase 3 已經有 DSL 把「策略是什麼�
 無人值守叫起來——一旦裡面有任何 `input()`,排程器啟動它時沒有人在終端
 機前輸入,程式會直接卡死在那一行等一個永遠不會來的輸入(或視情況直接
 `EOFError`)。所以「互動選策略」被獨立成一個只做一件事、選完就結束的
-小工具:列出策略 → 讀輸入 → 把選擇寫進 `live_execution_config.json` 的
+小工具:列出策略 → 讀輸入 → 把選擇寫進 `live_execution_config.yaml` 的
 `strategy_path` 欄位(`update_strategy_path_in_config()`,只改這一個
 欄位,其餘 `dry_run`/`testnet` 等既有設定原封不動)→ 結束。之後
 `main()` 開機時一如既往只讀 JSON,不需要任何人守著。這是刻意的分工,不
