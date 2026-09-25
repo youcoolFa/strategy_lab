@@ -5,7 +5,11 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
+from strategy_lab.dsl.order_config import PositionSizing
 from strategy_lab.engine.runner import RunState
+from strategy_lab.live.bybit_client import BybitClient
 from strategy_lab.live.config import ExecutionConfig
 from strategy_lab.live.main import build_runner_and_symbol, get_current_price, run_forever, to_bybit_symbol
 
@@ -34,7 +38,7 @@ class TestBuildRunnerAndSymbol:
         assert symbol == "BTCUSDT"
         assert runner.broker.symbol == "BTCUSDT"
         assert runner.broker.dry_run is True
-        assert runner.order_qty == 1.0
+        assert runner.order_qty == 1.0  # 預設 position_sizing 是 fixed_qty, value=1.0
 
     def test_symbol_override_takes_precedence_over_yaml(self, monkeypatch):
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
@@ -57,6 +61,55 @@ class TestBuildRunnerAndSymbol:
         runner, symbol = build_runner_and_symbol(config)
 
         assert runner.broker.dry_run is False
+
+
+class TestBuildRunnerAndSymbolPositionSizing:
+    def test_fixed_qty_mode_does_not_call_get_last_price(self, monkeypatch):
+        """fixed_qty 不需要知道價格,建構 runner 不該多打一次網路請求
+        ——跟 test_dry_run_false_still_builds_without_real_network_call
+        同一個原則,這裡從 position_sizing 的角度再驗證一次。"""
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+
+        def fail_if_called(self, symbol):
+            raise AssertionError("fixed_qty 模式不應該呼叫 get_last_price()")
+
+        monkeypatch.setattr(BybitClient, "get_last_price", fail_if_called)
+        config = ExecutionConfig(
+            strategy_path="strategies/weekend_mean_reversion.yaml",
+            position_sizing=PositionSizing(mode="fixed_qty", value=0.02),
+        )
+
+        runner, _ = build_runner_and_symbol(config)
+
+        assert runner.order_qty == 0.02
+
+    def test_fixed_quote_amount_mode_uses_current_price(self, monkeypatch):
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        monkeypatch.setattr(BybitClient, "get_last_price", lambda self, symbol: 50000.0)
+        config = ExecutionConfig(
+            strategy_path="strategies/weekend_mean_reversion.yaml",
+            position_sizing=PositionSizing(mode="fixed_quote_amount", value=500.0),
+        )
+
+        runner, _ = build_runner_and_symbol(config)
+
+        assert runner.order_qty == pytest.approx(0.01)  # 500 / 50000
+
+    def test_account_percentage_without_account_value_raises_clear_error(self, monkeypatch):
+        """live 端目前沒有查真實帳戶餘額的方法——沒給 account_value 就
+        raise,不會靜默算出一個危險或錯誤的數字。"""
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        monkeypatch.setattr(BybitClient, "get_last_price", lambda self, symbol: 50000.0)
+        config = ExecutionConfig(
+            strategy_path="strategies/weekend_mean_reversion.yaml",
+            position_sizing=PositionSizing(mode="account_percentage", value=2.0),
+        )
+
+        with pytest.raises(ValueError, match="account_value"):
+            build_runner_and_symbol(config)
 
 
 class FakeLiveBroker:

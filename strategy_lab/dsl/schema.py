@@ -25,7 +25,6 @@ class PluginSpec(BaseModel):
 class StrategyDefinition(BaseModel):
     name: str
     symbol: str
-    order_qty: float
     entry: PluginSpec
     exit: PluginSpec
     time_window: PluginSpec

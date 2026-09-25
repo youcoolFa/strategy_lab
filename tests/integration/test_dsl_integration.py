@@ -19,7 +19,7 @@ class TestWeekendStrategyFromYaml:
             entry=strategy.entry,
             exit=strategy.exit,
             time_window=strategy.time_window,
-            order_qty=strategy.order_qty,
+            order_qty=1.0,  # qty 不再是策略定義的一部分,見 dsl/order_config.py
         )
 
         now = datetime(2026, 8, 1, 4, 0, tzinfo=timezone.utc)
@@ -57,7 +57,7 @@ class TestMACrossoverStrategyFromYaml:
             entry=strategy.entry,
             exit=strategy.exit,
             time_window=strategy.time_window,
-            order_qty=strategy.order_qty,
+            order_qty=1.0,  # qty 不再是策略定義的一部分,見 dsl/order_config.py
         )
 
         now = datetime(2026, 8, 3, 9, 0, tzinfo=timezone.utc)

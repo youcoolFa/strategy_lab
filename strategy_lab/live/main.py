@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from strategy_lab.dsl.loader import load_strategy
+from strategy_lab.dsl.order_config import OrderConfig, compute_qty
 from strategy_lab.engine.runner import RunState, StrategyRunner
 from strategy_lab.live.broker import LiveBroker
 from strategy_lab.live.bybit_client import BybitClient
@@ -47,6 +48,23 @@ def to_bybit_symbol(yaml_symbol: str) -> str:
     return yaml_symbol.split(":")[0].replace("/", "")
 
 
+def _resolve_order_qty(config: ExecutionConfig, bybit_client: BybitClient, symbol: str) -> float:
+    """把 config.position_sizing 換算成真正的下單數量。`fixed_qty` 不用
+    知道價格,直接回傳,不會多打一次網路請求——這是
+    test_dry_run_false_still_builds_without_real_network_call 在測的
+    行為:預設設定下,建構 runner 這件事本身不該發任何真實請求。"""
+    order_config = OrderConfig(
+        symbol=symbol,
+        order_type=config.order_type,
+        position_sizing=config.position_sizing,
+        account_value=config.account_value,
+    )
+    if config.position_sizing.mode == "fixed_qty":
+        return compute_qty(order_config, current_price=0.0)
+    current_price = bybit_client.get_last_price(symbol)
+    return compute_qty(order_config, current_price=current_price)
+
+
 def build_runner_and_symbol(config: ExecutionConfig) -> Tuple[StrategyRunner, str]:
     strategy = load_strategy(config.strategy_path)
     symbol = config.symbol_override or to_bybit_symbol(strategy.symbol)
@@ -57,12 +75,13 @@ def build_runner_and_symbol(config: ExecutionConfig) -> Tuple[StrategyRunner, st
         retry_backoff_cap_seconds=config.retry_backoff_cap_seconds,
     )
     live_broker = LiveBroker(client=bybit_client, symbol=symbol, dry_run=config.dry_run)
+    order_qty = _resolve_order_qty(config, bybit_client, symbol)
 
     runner = StrategyRunner(
         entry=strategy.entry,
         exit=strategy.exit,
         time_window=strategy.time_window,
-        order_qty=strategy.order_qty,
+        order_qty=order_qty,
         broker=live_broker,
         kill_switch=strategy.kill_switch,
     )

@@ -16,7 +16,6 @@ from strategy_lab.registry import UnknownPlugin
 WEEKEND_YAML = """
 name: weekend_mean_reversion
 symbol: BTC/USDT
-order_qty: 1.0
 entry:
   type: deviation_from_reference
   params:
@@ -45,7 +44,6 @@ class TestLoadStrategyBasics:
 
         assert strategy.name == "weekend_mean_reversion"
         assert strategy.symbol == "BTC/USDT"
-        assert strategy.order_qty == 1.0
         assert isinstance(strategy.entry, DeviationFromReferenceEntry)
         assert isinstance(strategy.exit, ReturnToReferenceExit)
         assert isinstance(strategy.time_window, WeeklyWindow)

@@ -11,6 +11,7 @@ sat_strategy 自己的預設值),YAML 設定檔 + 環境變數才能覆蓋成真
 
 import yaml
 
+from strategy_lab.dsl.order_config import PositionSizing
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
 
 
@@ -26,6 +27,18 @@ class TestExecutionConfigDefaults:
         # 目前接的網路(mainnet/testnet)不一定跟這裡的設定一致,預設
         # 關閉,避免用錯網路的即時價格誤導策略判斷。
         assert ExecutionConfig().use_live_ticker_feed is False
+
+    def test_order_type_defaults_to_limit(self):
+        assert ExecutionConfig().order_type == "limit"
+
+    def test_position_sizing_defaults_to_fixed_qty_one(self):
+        # 對齊舊版 strategies/*.yaml 拿掉之前的 order_qty: 1.0,行為不變。
+        assert ExecutionConfig().position_sizing == PositionSizing(mode="fixed_qty", value=1.0)
+
+    def test_account_value_defaults_to_none(self):
+        # BybitClient 目前沒有查真實餘額的方法,account_percentage 模式
+        # 暫時沒有東西可以自動填,見 dsl/order_config.py。
+        assert ExecutionConfig().account_value is None
 
     def test_strategy_path_defaults_to_weekend_mean_reversion(self):
         assert ExecutionConfig().strategy_path == "strategies/weekend_mean_reversion.yaml"
@@ -47,6 +60,26 @@ class TestLoadExecutionConfigFromYaml:
         assert config.dry_run is False
         assert config.testnet is False
         assert config.strategy_path == "strategies/ma_crossover_bracket.yaml"
+
+    def test_nested_position_sizing_override_is_parsed_into_dataclass(self, tmp_path):
+        """position_sizing 在 YAML 裡是巢狀 dict,不能直接 setattr——要轉成
+        PositionSizing 物件,不然後面 compute_qty() 會因為型別不對而出錯。"""
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            yaml.dump(
+                {
+                    "position_sizing": {"mode": "account_percentage", "value": 2.0},
+                    "account_value": 10000.0,
+                    "order_type": "market",
+                }
+            )
+        )
+
+        config = load_execution_config(config_path=path)
+
+        assert config.position_sizing == PositionSizing(mode="account_percentage", value=2.0)
+        assert config.account_value == 10000.0
+        assert config.order_type == "market"
 
     def test_fields_not_in_yaml_keep_their_default(self, tmp_path):
         path = tmp_path / "config.yaml"

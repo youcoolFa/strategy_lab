@@ -1,0 +1,14 @@
+# demo/run_from_yaml.py 用的假下單設定——account_value 是假設值,純粹
+# 讓 position_sizing 有東西可以算,不對應任何真實帳戶或真實金錢。
+# PaperBroker 本身不追蹤帳戶餘額,這份資料只在 run_from_yaml.py 裡被讀進來
+# 算出一個 qty 數字,傳給 StrategyRunner(order_qty=...),PaperBroker
+# 對這個數字從哪來完全無感。
+
+symbol: null  # 不設就用策略 YAML 自己的 symbol
+order_type: limit
+
+position_sizing:
+  mode: account_percentage
+  value: 2.0  # 假設帳戶權益的 2%
+
+account_value: 10000.0  # 假設值,不是真錢

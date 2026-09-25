@@ -31,9 +31,11 @@ from strategy_lab.registry import get as registry_get
 
 @dataclass
 class ComposedStrategy:
+    """不含 order_qty——「下多大」是 dsl/order_config.py 的職責,不是策略
+    定義的一部分,見 docs/ARCHITECTURE.md §6.7。"""
+
     name: str
     symbol: str
-    order_qty: float
     entry: EntrySignal
     exit: ExitSignal
     time_window: TimeWindow
@@ -55,7 +57,6 @@ def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
     return ComposedStrategy(
         name=definition.name,
         symbol=definition.symbol,
-        order_qty=definition.order_qty,
         entry=registry_get("entry", definition.entry.type)(**definition.entry.params),
         exit=registry_get("exit", definition.exit.type)(**definition.exit.params),
         time_window=time_window,

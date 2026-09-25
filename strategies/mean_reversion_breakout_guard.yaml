@@ -11,9 +11,11 @@
 # 04:00 到週一 06:00),kill switch 的「連續小時數」一定要明顯短於這個
 # 窗口長度,不然永遠沒有機會真的觸發(這個限制記錄在
 # docs/ARCHITECTURE.md)。
+# 下單數量(qty)不在這裡設定——那是「怎麼下單」的資料,由
+# demo/sandbox_order.yaml(沙盒)或 live_execution_config.yaml(真實執行)
+# 的 position_sizing 決定,見 dsl/order_config.py。
 name: mean_reversion_breakout_guard
 symbol: BTC/USDT
-order_qty: 1.0
 
 entry:
   type: deviation_from_reference

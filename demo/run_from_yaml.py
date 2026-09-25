@@ -8,6 +8,11 @@ plugin 物件用 Python 手動 `import` + 建構;這裡是透過
 dsl.loader.load_strategy() 讀 YAML,plugin 是用字串名稱透過
 registry.get() 動態查出來的。
 
+下單數量(qty)不再直接用策略 YAML 的 order_qty——改成讀
+demo/sandbox_order.yaml 的 position_sizing,用 dsl.order_config 換算出
+真正的 qty。PaperBroker 本身不追蹤帳戶餘額,這個換算只發生在這個檔案
+裡,算好的數字才傳進 StrategyRunner,runner.py/PaperBroker 完全不用改。
+
 執行方式:
   /opt/anaconda3/bin/python3 -m demo.run_from_yaml --strategy strategies/weekend_mean_reversion.yaml
   /opt/anaconda3/bin/python3 -m demo.run_from_yaml --strategy strategies/ma_crossover_bracket.yaml
@@ -24,10 +29,12 @@ from zoneinfo import ZoneInfo
 from strategy_lab.broker.synthetic_feed import SyntheticFeed
 from strategy_lab.dsl.discovery import list_strategy_files, prompt_strategy_choice
 from strategy_lab.dsl.loader import load_strategy
+from strategy_lab.dsl.order_config import compute_qty, load_order_config
 from strategy_lab.engine.runner import StrategyRunner
 
 HKT = ZoneInfo("Asia/Hong_Kong")
 STRATEGIES_DIR = Path(__file__).resolve().parents[1] / "strategies"
+SANDBOX_ORDER_CONFIG_PATH = Path(__file__).resolve().parent / "sandbox_order.yaml"
 
 # 兩個示範策略各自需要不同的起始時間(週末策略要從星期六開始、crossover
 # 策略要從平日開始)才跑得出有意義的結果,用策略名稱對應,demo 用途足夠。
@@ -59,19 +66,24 @@ def main() -> None:
     print(f"  exit        = {strategy.exit!r}")
     print(f"  time_window = {strategy.time_window!r}")
     print(f"  kill_switch = {strategy.kill_switch!r}")
+
+    start_price = 60000.0
+    order_config = load_order_config(SANDBOX_ORDER_CONFIG_PATH)
+    order_qty = compute_qty(order_config, current_price=start_price)
+    print(f"  order_qty   = {order_qty:.6f}(依 {SANDBOX_ORDER_CONFIG_PATH.name} 的 position_sizing 換算,起始價 {start_price:.2f})")
     print()
 
     runner = StrategyRunner(
         entry=strategy.entry,
         exit=strategy.exit,
         time_window=strategy.time_window,
-        order_qty=strategy.order_qty,
+        order_qty=order_qty,
         kill_switch=strategy.kill_switch,
     )
 
     start = START_TIMES.get(strategy.name, datetime(2026, 8, 1, 4, 0, tzinfo=HKT))
     tick_interval = TICK_INTERVALS.get(strategy.name, timedelta(minutes=5))
-    feed = SyntheticFeed(start_price=60000.0, volatility_pct=0.3, seed=args.seed)
+    feed = SyntheticFeed(start_price=start_price, volatility_pct=0.3, seed=args.seed)
     runner.run(now=start, feed=feed, tick_interval=tick_interval)
 
     print(f"trades filled: {len(runner.trades)}")

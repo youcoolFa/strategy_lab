@@ -417,6 +417,8 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | `mean_reversion_breakout_guard` 策略 | 新增 `strategies/mean_reversion_breakout_guard.yaml`;發現並修正 `SustainedPriceBreakout`/`SustainedBreakoutKillSwitch` 的 `days`(日曆日)跟 `weekly_window` 窗口長度不相容的缺口,改為 `hours`(滾動時間視窗) | 新增 §4.6.1;更新 §4.6 用語 | 已完成 |
 | kill_switch 多單位 + 載入期相容性檢查 | `SustainedPriceBreakout`/`SustainedBreakoutKillSwitch` 新增 `minutes`/`days` 當 `hours` 的替代輸入單位(互斥,正規化回 `hours`);`WeeklyWindow`/`DailySession` 新增 `max_span()`(併入 `TimeWindow` Protocol);`dsl/loader.py` 新增載入期檢查,kill_switch 視窗 `>=` time_window 跨度就直接報錯 | §1 補充 Protocol 變更;新增 §4.6.2 | 已完成 |
 | 互動式選策略 | 新增 `dsl/discovery.py`(`list_strategy_files()`/`prompt_strategy_choice()`,`input_fn`/`print_fn` 依賴注入);`demo/run_from_yaml.py` 的 `--strategy` 改為選填,不給就跳出互動選單;新增獨立小工具 `live/select_strategy.py`,選完把 `strategy_path` 寫回 `live_execution_config.yaml`(不動其他欄位)——刻意不放進 `live/main.py`,因為 `main()` 必須能無人值守啟動,`input()` 會讓它卡死在沒有人回應的輸入 | §6 新增 §6.6 | 已完成 |
+| 執行參數改用 YAML | `live/config.py`/`live/select_strategy.py` 從 JSON 改吃/寫 YAML;`live_execution_config.example.json` → `.example.yaml`,可以加註解 | §1 附近的 §6.5 補充說明 | 已完成 |
+| `order_qty` 移出策略層,改用 `position_sizing` | 新增 `dsl/order_config.py`(`OrderConfig`/`PositionSizing`/`compute_qty()`);`strategies/*.yaml` 移除 `order_qty` 欄位(`dsl/schema.py`/`dsl/loader.py` 同步移除,`extra="forbid"` 會強制兩邊一起改,忘改會直接報錯);新增 `demo/sandbox_order.yaml`(沙盒假資料,`PaperBroker` 本身不改);`live_execution_config.yaml` 新增 `order_type`/`position_sizing`/`account_value`;`account_percentage` 模式在 live 端因為還沒有查真實餘額的方法,沒給 `account_value` 會直接報錯 | 新增 §6.7 | 已完成(`account_percentage` 在 live 端待補真實餘額查詢) |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -689,5 +691,60 @@ PyYAML,執行設定另外維護一套 JSON 語法沒有必要;②YAML 可以加�
 小工具:列出策略 → 讀輸入 → 把選擇寫進 `live_execution_config.yaml` 的
 `strategy_path` 欄位(`update_strategy_path_in_config()`,只改這一個
 欄位,其餘 `dry_run`/`testnet` 等既有設定原封不動)→ 結束。之後
-`main()` 開機時一如既往只讀 JSON,不需要任何人守著。這是刻意的分工,不
+`main()` 開機時一如既往只讀 YAML,不需要任何人守著。這是刻意的分工,不
 是漏做了「把選單整合進 main()」這一步。
+
+### 6.7 `dsl/order_config.py`:「下多大單」跟「什麼時候該不該觸發」分開
+
+**動機**:原本 `strategies/*.yaml` 每個策略都有一個寫死的
+`order_qty: 1.0`(單位是幣本身,例如 1 顆 BTC)——這個數字只在
+`PaperBroker`(沙盒,帳戶餘額無限大)上跑過,從來沒有跟真實、有限的帳戶
+餘額對過。使用者指出:策略 YAML 該放的是「什麼時候該不該觸發」(進出場
+邏輯、時間窗、kill switch),不該放「這次要下多大」——後者該跟帳戶規模
+掛鉤,不是寫死在策略定義裡。`threshold_price`/`deviation_pct` 這些是
+校準給特定 symbol/帳戶規模用的,混進「下單數量」這種該獨立配置的東西,
+會讓策略檔案背負不屬於它的職責。
+
+**`side`/`price` 不在這個範圍內**——這兩個是策略邏輯本身的產物
+(entry plugin 永遠呼叫 `place_limit_buy`、exit 永遠呼叫
+`place_limit_sell`;`price` 由 `entry_price(ctx)`/`exit_price(ctx)`
+動態算),不是靜態設定值,不會出現在 `order_config.py` 或任何 YAML 的
+欄位裡。目前整套系統是純多頭(只做多、不做空),`side` 因此永遠是隱含
+在程式碼裡的,不是可配置資料。
+
+**`OrderConfig`/`PositionSizing`(`dsl/order_config.py`)**:兩個
+dataclass,`load_order_config(path)` 讀 YAML,`compute_qty(config,
+current_price)` 換算成真正的 qty。三種 `position_sizing.mode`:
+
+- `fixed_qty`——直接給數量,不需要知道價格,對應原本 `order_qty` 的語意。
+- `fixed_quote_amount`——給報價貨幣金額(如 500 USDT),除以當時價格。
+- `account_percentage`——給帳戶權益的百分比,除了要當時價格,還要知道
+  帳戶權益(`account_value`)。**live 端目前不能真的用這個模式**——
+  `BybitClient` 還沒有查真實帳戶餘額的方法,`account_value` 沒東西可以
+  自動填;`compute_qty()` 在這個模式下沒拿到 `account_value` 會直接
+  `raise ValueError`,不會靜默算出一個危險或錯誤的數字。
+
+**sandbox 跟 live 各自一份設定檔,共用同一套 schema,`PaperBroker` 本身
+完全不改**:
+
+- `demo/sandbox_order.yaml`——獨立的假資料,`account_value: 10000.0`
+  是假設值,不對應任何真實帳戶。`demo/run_from_yaml.py` 在建構
+  `StrategyRunner` **之前**,先用 `SyntheticFeed` 的起始價算好 qty,
+  傳給 `order_qty` 參數——`PaperBroker` 對這個數字從哪來完全無感,不需
+  要幫它加任何帳戶餘額/權益追蹤邏輯。
+- `live_execution_config.yaml` 新增 `order_type`/`position_sizing`/
+  `account_value` 三個欄位,`ExecutionConfig` 的 `position_sizing`
+  預設是 `PositionSizing(mode="fixed_qty", value=1.0)`,行為對齊拿掉
+  `order_qty: 1.0` 之前的樣子,不是破壞性變更。`load_execution_config()`
+  讀到 YAML 裡巢狀的 `position_sizing: {mode, value}` dict 時,要手動轉成
+  `PositionSizing` 物件(不能直接 `setattr`,`asdict()`/`==` 比較才會正確)。
+
+**`live/main.py` 的 `_resolve_order_qty()`**:`fixed_qty` 模式完全不呼叫
+`BybitClient.get_last_price()`——這是刻意的,對應
+`test_dry_run_false_still_builds_without_real_network_call` 那條「預設
+設定下建構 runner 不該發任何真實網路請求」的既有規則;只有
+`fixed_quote_amount`/`account_percentage` 才需要真的查一次當前價格。
+
+**`order_type`(限價/市價)獨立於 `position_sizing`**:`kill_switch`/
+收攤平倉的 `market_close()` 永遠是市價單,不受這個欄位影響——強制平倉
+要的是「保證立刻成交」,不是「照使用者偏好」,混進同一個開關會很危險。

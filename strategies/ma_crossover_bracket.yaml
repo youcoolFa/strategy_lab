@@ -1,7 +1,7 @@
-# 對應 demo/demo_crossover_phase1.py 的手動組裝版本,參數完全一致。
+# 對應 demo/demo_crossover_phase1.py 的手動組裝版本,進出場/時間窗參數完全一致。
+# 下單數量(qty)不在這裡設定,見 dsl/order_config.py。
 name: ma_crossover_bracket
 symbol: BTC/USDT
-order_qty: 1.0
 
 entry:
   type: ma_crossover

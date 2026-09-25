@@ -10,7 +10,6 @@ from strategy_lab.dsl.schema import PluginSpec, StrategyDefinition
 VALID_DEFINITION = {
     "name": "weekend_mean_reversion",
     "symbol": "BTC/USDT",
-    "order_qty": 1.0,
     "entry": {"type": "deviation_from_reference", "params": {"deviation_pct": 0.75}},
     "exit": {"type": "return_to_reference", "params": {}},
     "time_window": {"type": "weekly_window", "params": {"end_weekday": 0, "end_time": "06:00"}},

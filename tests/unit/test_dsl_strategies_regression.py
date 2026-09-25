@@ -18,7 +18,6 @@ STRATEGIES_DIR = Path(__file__).resolve().parents[2] / "strategies"
 class TestWeekendMeanReversionYaml:
     def test_matches_demo_weekend_phase1_hand_composed_version(self):
         strategy = load_strategy(STRATEGIES_DIR / "weekend_mean_reversion.yaml")
-        assert strategy.order_qty == 1.0
         assert strategy.entry == DeviationFromReferenceEntry(deviation_pct=0.75)
         assert strategy.exit == ReturnToReferenceExit()
         assert strategy.time_window == WeeklyWindow()  # 跟 demo 一樣全用預設值
@@ -27,7 +26,6 @@ class TestWeekendMeanReversionYaml:
 class TestMACrossoverBracketYaml:
     def test_matches_demo_crossover_phase1_hand_composed_version(self):
         strategy = load_strategy(STRATEGIES_DIR / "ma_crossover_bracket.yaml")
-        assert strategy.order_qty == 1.0
         assert strategy.entry == MACrossoverEntry(fast_window=5, slow_window=20)
         assert strategy.exit == BracketTPSLExit(take_profit_pct=1.0, stop_loss_pct=0.5)
         assert strategy.time_window == DailySession(start_time="09:00", end_time="17:00", cleanup_buffer_minutes=2)
@@ -38,7 +36,6 @@ class TestMeanReversionBreakoutGuardYaml:
         """進出場邏輯跟 weekend_mean_reversion.yaml 完全一樣,差別只在
         多了 kill_switch。"""
         strategy = load_strategy(STRATEGIES_DIR / "mean_reversion_breakout_guard.yaml")
-        assert strategy.order_qty == 1.0
         assert strategy.entry == DeviationFromReferenceEntry(deviation_pct=0.75)
         assert strategy.exit == ReturnToReferenceExit()
         assert strategy.time_window == WeeklyWindow()
