@@ -16,9 +16,12 @@ sandbox(demo/sandbox_order.yaml,用假設的 account_value)和 live
   fixed_quote_amount  給報價貨幣金額(如 500 USDT),除以當時價格換算成 qty。
   account_percentage  給帳戶權益的百分比,除了要當時價格,還要知道帳戶
                       權益——sandbox 用 YAML 裡直接寫的假設值
-                      (account_value);live 端 BybitClient 目前還沒有
-                      查真實餘額的方法,沒給 account_value 就會 raise,
-                      不會靜默算出一個危險或錯誤的數字。
+                      (account_value);live 端不設 account_value 的話,
+                      live/main.py 會自動呼叫
+                      BybitClient.get_account_equity() 查真實權益。這個
+                      模組本身完全不碰網路,不設 account_value 又沒有
+                      呼叫端幫忙查的話就會 raise,不會靜默算出一個危險
+                      或錯誤的數字。
 """
 
 from __future__ import annotations
@@ -73,8 +76,8 @@ def compute_qty(order_config: OrderConfig, current_price: float) -> float:
         if order_config.account_value is None:
             raise ValueError(
                 "position_sizing.mode 是 account_percentage,但沒有 account_value 可用"
-                "(sandbox 請在 order YAML 裡直接給一個假設值;live 端目前還沒有查真實"
-                "帳戶餘額的功能,這個模式暫時不能用在真實執行上)"
+                "(sandbox 請在 order YAML 裡直接給一個假設值;live 端如果看到這個錯誤,"
+                "代表呼叫端沒有先呼叫 BybitClient.get_account_equity() 查真實權益)"
             )
         return order_config.account_value * (value / 100) / current_price
     raise ValueError(f"未知的 position_sizing.mode: {mode!r}")

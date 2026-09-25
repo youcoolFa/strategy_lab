@@ -17,9 +17,9 @@ StrategyConfig 裡不一樣——Phase 3 的 DSL 已經把「策略是什麼」�
 邏輯**——跟 dsl/order_config.py(demo/sandbox_order.yaml 用的同一套
 schema)共用 `PositionSizing`,道理一樣:策略 YAML 的
 threshold_price/deviation_pct 是校準給特定 symbol 用的,不該跟「這次要
-下多大」混在一起。`account_percentage` 模式目前在這裡**還不能真的用**
-——`BybitClient` 還沒有查真實帳戶餘額的方法,`account_value` 沒有東西
-可以自動填,見 §6.7。
+下多大」混在一起。`account_percentage` 模式:不設 `account_value` 就會
+自動呼叫 `BybitClient.get_account_equity()` 查真實帳戶權益;有明確設
+`account_value` 才會用那個值覆蓋掉真實查詢結果,見 §6.7/§6.10。
 
 原本用 JSON,改成 YAML 是因為:①這個 repo 其他地方(策略定義)本來就
 已經在用 PyYAML,不需要為了這一份小小的執行設定額外維護兩套語法;

@@ -18,9 +18,9 @@ order_type: limit  # limit 或 market;kill_switch/收攤平倉永遠是 market,�
 position_sizing:
   mode: fixed_qty       # fixed_qty(直接給數量) / fixed_quote_amount(給報價貨幣金額,如 USDT) / account_percentage(帳戶權益百分比)
   value: 1.0            # 對應上面 mode 的數字
-# account_percentage 模式目前還不能真的用在這裡——BybitClient 還沒有查
-# 真實帳戶餘額的方法,account_value 沒有東西可以自動填,設了也會在啟動時
-# 直接報錯,不會靜默算出錯誤的數字。
+# account_percentage 模式:留 null 就會自動查真實帳戶權益
+# (BybitClient.get_account_equity(),需要真實 API key);想用比真實權益
+# 更保守的假設值算 qty,才自己填一個數字覆蓋掉真實查詢結果。
 account_value: null
 
 use_live_ticker_feed: false  # 要跟 Fa_Successful_trade 接的網路(mainnet/testnet)一致才能開

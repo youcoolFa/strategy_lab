@@ -52,12 +52,22 @@ def _resolve_order_qty(config: ExecutionConfig, bybit_client: BybitClient, symbo
     """把 config.position_sizing 換算成真正的下單數量。`fixed_qty` 不用
     知道價格,直接回傳,不會多打一次網路請求——這是
     test_dry_run_false_still_builds_without_real_network_call 在測的
-    行為:預設設定下,建構 runner 這件事本身不該發任何真實請求。"""
+    行為:預設設定下,建構 runner 這件事本身不該發任何真實請求。
+
+    `account_percentage` 模式:如果 `config.account_value` 沒有明確設
+    (使用者沒有手動覆蓋),就真的去查一次帳戶權益
+    (`BybitClient.get_account_equity()`)——這是需要驗證的端點,只有
+    這個模式才會用到。使用者仍然可以在設定檔手動填一個 `account_value`
+    覆蓋掉真實查詢結果(例如想用比真實權益更保守的假設值算 qty)。"""
+    account_value = config.account_value
+    if config.position_sizing.mode == "account_percentage" and account_value is None:
+        account_value = bybit_client.get_account_equity()
+
     order_config = OrderConfig(
         symbol=symbol,
         order_type=config.order_type,
         position_sizing=config.position_sizing,
-        account_value=config.account_value,
+        account_value=account_value,
     )
     if config.position_sizing.mode == "fixed_qty":
         return compute_qty(order_config, current_price=0.0)

@@ -158,3 +158,15 @@ class BybitClient:
         live/instrument_limits.py 的職責,這裡刻意只當一層薄薄的包裝。"""
         resp = self._call_with_retry(self._http.get_instruments_info, category=CATEGORY, symbol=symbol)
         return resp["result"]["list"][0]
+
+    def get_account_equity(self) -> float:
+        """回傳 UNIFIED 帳戶的總權益(USD 計價)——`position_sizing.mode
+        == "account_percentage"` 用這個數字換算 qty。這是需要驗證的
+        端點(要真實 API key),不像 get_last_price()/get_instrument_info()
+        是公開的。帳戶沒有任何資產時 Bybit 可能回傳空清單,回傳 0.0 而
+        不是丟例外,讓呼叫端自己決定要不要當成錯誤處理。"""
+        resp = self._call_with_retry(self._http.get_wallet_balance, accountType="UNIFIED")
+        accounts = resp["result"]["list"]
+        if not accounts:
+            return 0.0
+        return float(accounts[0]["totalEquity"])

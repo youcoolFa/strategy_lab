@@ -107,19 +107,47 @@ class TestBuildRunnerAndSymbolPositionSizing:
 
         assert runner.order_qty == pytest.approx(0.01)  # 500 / 50000
 
-    def test_account_percentage_without_account_value_raises_clear_error(self, monkeypatch):
-        """live 端目前沒有查真實帳戶餘額的方法——沒給 account_value 就
-        raise,不會靜默算出一個危險或錯誤的數字。"""
+    def test_account_percentage_without_account_value_queries_real_equity(self, monkeypatch):
+        """沒有手動覆蓋 account_value 時,自動呼叫
+        BybitClient.get_account_equity() 查真實帳戶權益——不再是
+        「沒給就 raise」,見 dsl/order_config.py 的 _resolve_order_qty()
+        wiring。"""
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
         monkeypatch.setattr(BybitClient, "get_last_price", lambda self, symbol: 50000.0)
+        monkeypatch.setattr(BybitClient, "get_account_equity", lambda self: 10000.0)
         config = ExecutionConfig(
             strategy_path="strategies/weekend_mean_reversion.yaml",
             position_sizing=PositionSizing(mode="account_percentage", value=2.0),
         )
 
-        with pytest.raises(ValueError, match="account_value"):
-            build_runner_and_symbol(config)
+        runner, _ = build_runner_and_symbol(config)
+
+        # 10000 的 2% = 200,除以現價 50000 = 0.004
+        assert runner.order_qty == pytest.approx(0.004)
+
+    def test_account_percentage_with_explicit_account_value_does_not_query_real_equity(self, monkeypatch):
+        """使用者自己在設定檔填了 account_value,就用那個值,不去查真實
+        權益——這是刻意留給使用者「用比真實權益更保守的假設值」的覆蓋
+        管道。"""
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        monkeypatch.setattr(BybitClient, "get_last_price", lambda self, symbol: 50000.0)
+
+        def fail_if_called(self):
+            raise AssertionError("account_value 已明確給定,不該再查真實權益")
+
+        monkeypatch.setattr(BybitClient, "get_account_equity", fail_if_called)
+        config = ExecutionConfig(
+            strategy_path="strategies/weekend_mean_reversion.yaml",
+            position_sizing=PositionSizing(mode="account_percentage", value=2.0),
+            account_value=5000.0,
+        )
+
+        runner, _ = build_runner_and_symbol(config)
+
+        # 5000 的 2% = 100,除以現價 50000 = 0.002
+        assert runner.order_qty == pytest.approx(0.002)
 
 
 class FakeLiveBroker:

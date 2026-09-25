@@ -23,6 +23,7 @@ class FakeHTTP:
         self.cancel_order_response = {"result": {}}
         self.positions_response = {"result": {"list": []}}
         self.instruments_info_response = None
+        self.wallet_balance_response = None
         self.raise_on_next_call = None
 
     def _maybe_raise(self):
@@ -65,6 +66,11 @@ class FakeHTTP:
         self.calls.append(("get_instruments_info", kwargs))
         self._maybe_raise()
         return self.instruments_info_response
+
+    def get_wallet_balance(self, **kwargs):
+        self.calls.append(("get_wallet_balance", kwargs))
+        self._maybe_raise()
+        return self.wallet_balance_response
 
 
 def make_client(http=None) -> BybitClient:
@@ -279,6 +285,35 @@ class TestGetInstrumentInfo:
         assert result["symbol"] == "BTCUSDT"
         assert result["lotSizeFilter"]["qtyStep"] == "0.001"
         assert http.calls == [("get_instruments_info", {"category": "linear", "symbol": "BTCUSDT"})]
+
+
+class TestGetAccountEquity:
+    def test_returns_total_equity_as_float(self):
+        http = FakeHTTP()
+        http.wallet_balance_response = {
+            "result": {
+                "list": [
+                    {
+                        "accountType": "UNIFIED",
+                        "totalEquity": "59.9654892",
+                        "coin": [{"coin": "USDT", "equity": "59.97658487"}],
+                    }
+                ]
+            }
+        }
+        client = make_client(http)
+
+        assert client.get_account_equity() == 59.9654892
+        assert http.calls == [("get_wallet_balance", {"accountType": "UNIFIED"})]
+
+    def test_returns_zero_when_no_account_data(self):
+        """帳戶還沒有任何資產(全新帳戶)時,Bybit 可能回傳空清單——不該
+        讓呼叫端崩潰,回傳 0 讓上層(fix_qty 之類)自己決定怎麼處理。"""
+        http = FakeHTTP()
+        http.wallet_balance_response = {"result": {"list": []}}
+        client = make_client(http)
+
+        assert client.get_account_equity() == 0.0
 
 
 class TestRetryOnNetworkFailure:

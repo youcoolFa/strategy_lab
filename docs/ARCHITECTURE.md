@@ -421,6 +421,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | `order_qty` 移出策略層,改用 `position_sizing` | 新增 `dsl/order_config.py`(`OrderConfig`/`PositionSizing`/`compute_qty()`);`strategies/*.yaml` 移除 `order_qty` 欄位(`dsl/schema.py`/`dsl/loader.py` 同步移除,`extra="forbid"` 會強制兩邊一起改,忘改會直接報錯);新增 `demo/sandbox_order.yaml`(沙盒假資料,`PaperBroker` 本身不改);`live_execution_config.yaml` 新增 `order_type`/`position_sizing`/`account_value`;`account_percentage` 模式在 live 端因為還沒有查真實餘額的方法,沒給 `account_value` 會直接報錯 | 新增 §6.7 | 已完成(`account_percentage` 在 live 端待補真實餘額查詢) |
 | 8 種下單方式 + `order_type` 真正接進 runner | `PaperBroker`/`LiveBroker` 新增 `limit_sell`/`market_buy`/`market_sell`/`limit_flat_buy`/`limit_flat_sell`/`market_flat_buy`/`market_flat_sell`(對稱於既有的 `place_limit_buy`/`place_limit_sell`);`interfaces.Broker` Protocol 擴充到 14 個方法;`reduce_only` 單不會讓部位穿越 0(`PaperBroker._fill()`/`LiveBroker` dry-run 都要處理);`StrategyRunner` 新增 `order_type` 欄位,`_try_enter()`/`_try_exit()` 依此選限價還是市價——這是真正修好「`order_type` 設定完全沒作用」缺口的地方 | 新增 §6.8 | 已完成(開空倉的 4 種方法目前沒有 entry/exit plugin 會呼叫,刻意先做成獨立可用的方法,不強行接進長倉專用狀態機) |
 | 下單前用真實精度限制修正 qty/price | 新增 `live/instrument_limits.py`(`fix_qty()`/`fix_price()`,永遠捨去 qty、依 side 決定 price 修正方向);新增 `live/fetch_instrument_limits.py`(下載腳本,公開端點);`BybitClient` 新增 `get_instrument_info()`;新增並 commit `instrument_limits.json`(公開市場資料,目前只有 BTCUSDT);`LiveBroker` 8 種下單方式送出前都先修正(dry-run 也修正,保證預覽準確),找不到資料就跳過、不會擋下下單;`LiveBroker` dry-run 的市價單額外接上 `get_last_price()` 查真實市價當模擬成交價(唯讀,不算真的下單) | 新增 §6.9 | 已完成(`PaperBroker`/沙盒刻意不套用這一層) |
+| `account_percentage` 補上真實帳戶權益查詢 | `BybitClient` 新增 `get_account_equity()`(包裝 `get_wallet_balance`,需要驗證的端點);`live/main.py` 的 `_resolve_order_qty()` 不設 `account_value` 就自動查真實權益,有明確設就用那個值覆蓋 | 新增 §6.10 | 已完成,並用真實 mainnet 帳戶端到端驗證過(算出的 qty 太小被 §6.9 的 `fix_qty()` 正確擋下) |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -861,3 +862,33 @@ warning log,qty/price 原樣傳給 `client`,交由交易所自己的驗證把關
 **`PaperBroker`(沙盒)刻意不套用這一層**——沙盒本來就不會真的碰到
 交易所的精度限制拒單,套用這層只會讓 `demo/run_from_yaml.py` 印出來的
 `qty` 多一層跟策略邏輯無關的細節,不值得增加的複雜度。
+
+### 6.10 `account_percentage` 補上真實帳戶權益查詢
+
+**動機**:§6.7 完成後,`account_percentage` 模式在 live 端一直是「有
+結構、不能真的用」的狀態——`BybitClient` 沒有查真實帳戶餘額的方法,
+`account_value` 沒東西可以自動填,設了會直接報錯。這一節把這個缺口
+補上。
+
+**`BybitClient.get_account_equity()`**:包裝 Bybit V5 的
+`get_wallet_balance(accountType="UNIFIED")`,回傳 `totalEquity`
+(USD 計價的帳戶總權益)。這是**需要驗證的端點**(要真實 API key),跟
+`get_last_price()`/`get_instrument_info()` 是公開端點不一樣——查詢本身
+不會動用任何資金,純讀取。帳戶沒有任何資產時 Bybit 可能回傳空清單,
+回傳 `0.0` 而不是丟例外,讓呼叫端(`fix_qty()`)自然地把過小的 qty 擋
+下來,不需要另外特判「帳戶是空的」這種情況。
+
+**`live/main.py` 的 `_resolve_order_qty()` 新增的邏輯**:`position_sizing.mode
+== "account_percentage"` 且 `config.account_value` 是 `None`(使用者
+沒有手動覆蓋)時,自動呼叫 `get_account_equity()` 查真實權益;使用者
+如果在 `live_execution_config.yaml` 明確填了 `account_value`,那個值
+會覆蓋掉真實查詢結果(不會再去查)——這是刻意留給使用者「想用比真實
+權益更保守的假設值算 qty」的覆蓋管道,不是被迫二選一。
+
+**端到端驗證過(用真實 mainnet 帳戶,dry-run)**:真實帳戶權益
+(約 60 USDT)× 2% ÷ 真實 BTC 現價,算出來的 qty 只有 `1.43e-05`——
+遠小於 BTCUSDT 的 `minOrderQty=0.001`。這筆單被 §6.9 的 `fix_qty()`
+正確擋下、報出清楚的錯誤訊息,不是靜默算出一個危險或錯誤的數字。這個
+結果本身也證實了一件事:用這個帳戶的實際餘額,`account_percentage`
+在小數值(2%)下對 BTC 這種高單價資產不太實用——`fixed_quote_amount`
+或調高百分比可能是這個帳戶規模更合適的模式。
