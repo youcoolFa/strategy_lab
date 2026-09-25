@@ -422,6 +422,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 8 種下單方式 + `order_type` 真正接進 runner | `PaperBroker`/`LiveBroker` 新增 `limit_sell`/`market_buy`/`market_sell`/`limit_flat_buy`/`limit_flat_sell`/`market_flat_buy`/`market_flat_sell`(對稱於既有的 `place_limit_buy`/`place_limit_sell`);`interfaces.Broker` Protocol 擴充到 14 個方法;`reduce_only` 單不會讓部位穿越 0(`PaperBroker._fill()`/`LiveBroker` dry-run 都要處理);`StrategyRunner` 新增 `order_type` 欄位,`_try_enter()`/`_try_exit()` 依此選限價還是市價——這是真正修好「`order_type` 設定完全沒作用」缺口的地方 | 新增 §6.8 | 已完成(開空倉的 4 種方法目前沒有 entry/exit plugin 會呼叫,刻意先做成獨立可用的方法,不強行接進長倉專用狀態機) |
 | 下單前用真實精度限制修正 qty/price | 新增 `live/instrument_limits.py`(`fix_qty()`/`fix_price()`,永遠捨去 qty、依 side 決定 price 修正方向);新增 `live/fetch_instrument_limits.py`(下載腳本,公開端點);`BybitClient` 新增 `get_instrument_info()`;新增並 commit `instrument_limits.json`(公開市場資料,目前只有 BTCUSDT);`LiveBroker` 8 種下單方式送出前都先修正(dry-run 也修正,保證預覽準確),找不到資料就跳過、不會擋下下單;`LiveBroker` dry-run 的市價單額外接上 `get_last_price()` 查真實市價當模擬成交價(唯讀,不算真的下單) | 新增 §6.9 | 已完成(`PaperBroker`/沙盒刻意不套用這一層) |
 | `account_percentage` 補上真實帳戶權益查詢 | `BybitClient` 新增 `get_account_equity()`(包裝 `get_wallet_balance`,需要驗證的端點);`live/main.py` 的 `_resolve_order_qty()` 不設 `account_value` 就自動查真實權益,有明確設就用那個值覆蓋 | 新增 §6.10 | 已完成,並用真實 mainnet 帳戶端到端驗證過(算出的 qty 太小被 §6.9 的 `fix_qty()` 正確擋下) |
+| 空倉支援(`direction`) | `rules/conditions.py` 新增 `PriceAboveReference`/`PriceAtOrBelowReference`;新增 plugin `ShortDeviationFromReferenceEntry`/`ShortReturnToReferenceExit`;`StrategyRunner` 新增 `direction`,`_try_enter()`/`_try_exit()` 依此分派開多/開空/平多/平空;`dsl/schema.py`/`dsl/loader.py` 新增 `direction` 欄位(屬於策略定義,不是執行參數);`Trade` 新增 `direction`/`pnl`(long/short 公式互為鏡像);新增示範 `strategies/weekend_short_breakout.yaml`。**過程中發現並修正真實 bug**:`_cleanup()` 原本 `remaining > 0` 才平倉,空倉的 `position_qty()` 是負數,永遠不會被強制平倉——改用 `market_flat_buy`/`market_flat_sell` 依正負號分派,不再呼叫 `market_close()` | 新增 §6.11 | 已完成(做空的 kill switch 偵測——偵測向下突破——未做,對應鏡像的 `SustainedPriceBreakdown` 留待之後) |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -892,3 +893,72 @@ warning log,qty/price 原樣傳給 `client`,交由交易所自己的驗證把關
 結果本身也證實了一件事:用這個帳戶的實際餘額,`account_percentage`
 在小數值(2%)下對 BTC 這種高單價資產不太實用——`fixed_quote_amount`
 或調高百分比可能是這個帳戶規模更合適的模式。
+
+### 6.11 空倉支援:`direction`,以及一個發現的真實 bug(`_cleanup()` 對負部位視而不見)
+
+**動機**:8 種下單方式(§6.8)裡,開空倉/平空倉那 4 個
+(`limit_sell`/`market_sell`/`limit_flat_sell`/`market_flat_sell`)當時
+做好了,但完全沒有任何 entry/exit plugin 會呼叫——系統實質上還是純
+多頭。這一節把「空倉」真正接成一條可以端到端跑起來的路徑。
+
+**發現的真實 bug**:動手接的過程中發現 `_cleanup()` 原本寫的是
+```python
+remaining = self.broker.position_qty()
+if remaining > 0:
+    self.broker.market_close(remaining)
+```
+`position_qty()` 對空倉會回傳**負數**(見 §6.8 `PaperBroker._fill()`/
+`LiveBroker` 的 `reduce_only` 語意)——`remaining > 0` 這個判斷式對負的
+部位永遠是 `False`,代表**空倉永遠不會被強制平倉**,`kill_switch`/
+`time_window`/`request_stop()` 觸發收攤時,空倉會被完全晾在那裡沒人
+管。這不是理論上的邊界案例,是接空倉支援時第一個整合測試就直接踩到
+的。修法:改依部位正負號分派(`remaining > 0` 呼叫
+`market_flat_buy()`,`remaining < 0` 呼叫
+`market_flat_sell(abs(remaining))`),不再呼叫舊的 `market_close()`
+——附帶好處是 `market_flat_buy`/`market_flat_sell` 會套用 §6.9 的下單
+精度修正,`market_close()` 原本沒有這一層。`market_close()` 本身完全
+不動,仍是 `Broker` Protocol 的一部分、仍有專屬測試,只是 runner.py
+不再呼叫它。
+
+**新的 rule primitives(`rules/conditions.py`)**:`PriceAboveReference`
+(鏡像 `PriceBelowReference`,漲破門檻觸發)、`PriceAtOrBelowReference`
+(鏡像 `PriceAtOrAboveReference`,跌回 origin 觸發)。
+
+**新的 entry/exit plugin**:`ShortDeviationFromReferenceEntry`
+(`entry/deviation_from_reference_short.py`)、
+`ShortReturnToReferenceExit`(`exit/return_to_reference_short.py`)——
+跟各自的多頭版本結構完全對稱,只是規則換成上面兩個鏡像 condition。
+
+**`StrategyRunner` 新增 `direction: Literal["long","short"] = "long"`**:
+`_try_enter()`/`_try_exit()` 依這個欄位在「買進開多/賣出開空」
+「賣出平多/買回平空」之間分派,呼叫 §6.8 對應的方法。`_try_exit()` 用
+`abs(self.broker.position_qty())` 當平倉數量——空倉的 `position_qty()`
+是負數,不能直接傳給下單方法的 `qty` 參數。
+
+**`direction` 屬於策略定義,不是執行參數**——跟 `order_qty` 被移出
+策略層(§6.7)的理由正好相反:`direction` 決定了 entry/exit 該配哪一種
+plugin 才有意義(`direction: long` 配 `ShortDeviationFromReferenceEntry`
+沒有道理),不是單純「怎麼下單」的獨立選擇。`dsl/schema.py`/
+`dsl/loader.py` 因此都有 `direction` 欄位,`demo/run_from_yaml.py`/
+`live/main.py` 把 `strategy.direction` 傳進 `StrategyRunner`。
+
+**`Trade` 新增 `direction` 欄位 + `pnl` property**:long 賺的是
+「賣得比買得貴」(`exit - entry`),short 賺的是「買回得比賣出時便宜」
+(`entry - exit`)——兩個公式互為鏡像,直接套用 long 的公式在 short 上
+會算出正負號相反的錯誤結果。三個 demo 腳本(`demo_weekend_phase1.py`/
+`demo_crossover_phase1.py`/`run_from_yaml.py`)原本各自手動算
+`(exit-entry)*qty`,一併改成用 `trade.pnl`,不再各自重算一次同樣的
+(而且對 short 是錯的)公式。
+
+**新增 `strategies/weekend_short_breakout.yaml`** 當端到端示範,
+`weekend_mean_reversion.yaml` 的鏡像版本(`direction: short` +
+`deviation_from_reference_short`/`return_to_reference_short`),已用
+`run_from_yaml.py` 實際跑過,`entry_price > exit_price` 且 `pnl` 為正,
+確認整條路徑(YAML → schema → loader → runner → 8 種下單方式 →
+`Trade.pnl`)接得通。
+
+**刻意沒做的部分**:`SustainedBreakoutKillSwitch` 目前只偵測「連續站
+上某價位」的向上突破,語意上是替多頭設計的——空倉情境下要偵測的是
+反方向的突破,需要一個鏡像版本(`SustainedPriceBreakdown`?),這次
+沒有做,對應的整合測試改用 `request_stop()` 驗證 `_cleanup()` 本身的
+正確性,不依賴一個語意不吻合的 kill switch 場景。

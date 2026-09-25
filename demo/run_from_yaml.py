@@ -80,6 +80,7 @@ def main() -> None:
         order_qty=order_qty,
         kill_switch=strategy.kill_switch,
         order_type=order_config.order_type,
+        direction=strategy.direction,
     )
 
     start = START_TIMES.get(strategy.name, datetime(2026, 8, 1, 4, 0, tzinfo=HKT))
@@ -89,8 +90,7 @@ def main() -> None:
 
     print(f"trades filled: {len(runner.trades)}")
     for i, trade in enumerate(runner.trades, 1):
-        pnl = (trade.exit_price - trade.entry_price) * trade.qty
-        print(f"  #{i}: entry={trade.entry_price:.2f} exit={trade.exit_price:.2f} qty={trade.qty:.4f} pnl={pnl:.2f}")
+        print(f"  #{i}: entry={trade.entry_price:.2f} exit={trade.exit_price:.2f} qty={trade.qty:.4f} pnl={trade.pnl:.2f}")
     print(f"final state: {runner.state.name}")
     print(f"position left over after cleanup: {runner.broker.position_qty():.4f}")
 

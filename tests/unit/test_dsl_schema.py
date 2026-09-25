@@ -33,6 +33,15 @@ class TestStrategyDefinition:
         assert definition.entry.type == "deviation_from_reference"
         assert definition.entry.params == {"deviation_pct": 0.75}
         assert definition.kill_switch is None
+        assert definition.direction == "long"
+
+    def test_direction_can_be_short(self):
+        definition = StrategyDefinition(**VALID_DEFINITION, direction="short")
+        assert definition.direction == "short"
+
+    def test_invalid_direction_raises(self):
+        with pytest.raises(ValidationError):
+            StrategyDefinition(**VALID_DEFINITION, direction="sideways")
 
     def test_kill_switch_is_optional_and_resolves_when_present(self):
         data = {

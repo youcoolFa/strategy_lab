@@ -8,7 +8,9 @@ from strategy_lab.interfaces import StrategyContext
 from strategy_lab.rules.conditions import (
     MaxDurationElapsed,
     MovingAverageCross,
+    PriceAboveReference,
     PriceAtOrAboveReference,
+    PriceAtOrBelowReference,
     PriceBelowReference,
     PriceChangeFromEntry,
     SustainedPriceBreakout,
@@ -56,6 +58,32 @@ class TestPriceAtOrAboveReference:
     def test_false_when_price_below_origin(self):
         condition = PriceAtOrAboveReference()
         assert condition.evaluate(make_ctx(price=999.0, origin_price=1000.0)) is False
+
+
+class TestPriceAboveReference:
+    """PriceBelowReference 的鏡像版本,給開空倉用:現價漲破
+    origin_price 的 deviation_pct% 就觸發(做空進場)。"""
+
+    def test_true_when_price_at_or_above_target(self):
+        condition = PriceAboveReference(deviation_pct=1.0)
+        assert condition.evaluate(make_ctx(price=1010.0, origin_price=1000.0)) is True
+
+    def test_false_when_price_below_target(self):
+        condition = PriceAboveReference(deviation_pct=1.0)
+        assert condition.evaluate(make_ctx(price=1005.0, origin_price=1000.0)) is False
+
+
+class TestPriceAtOrBelowReference:
+    """PriceAtOrAboveReference 的鏡像版本,給平空倉用:現價回到(或跌破)
+    origin_price 就觸發(回補出場)。"""
+
+    def test_true_when_price_at_or_below_origin(self):
+        condition = PriceAtOrBelowReference()
+        assert condition.evaluate(make_ctx(price=1000.0, origin_price=1000.0)) is True
+
+    def test_false_when_price_above_origin(self):
+        condition = PriceAtOrBelowReference()
+        assert condition.evaluate(make_ctx(price=1001.0, origin_price=1000.0)) is False
 
 
 class TestMovingAverageCross:

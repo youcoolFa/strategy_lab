@@ -35,8 +35,7 @@ def main() -> None:
     print(f"origin_price = {runner.origin_price:.2f}")
     print(f"trades filled: {len(runner.trades)}")
     for i, trade in enumerate(runner.trades, 1):
-        pnl = (trade.exit_price - trade.entry_price) * trade.qty
-        print(f"  #{i}: entry={trade.entry_price:.2f} exit={trade.exit_price:.2f} qty={trade.qty:.4f} pnl={pnl:.2f}")
+        print(f"  #{i}: entry={trade.entry_price:.2f} exit={trade.exit_price:.2f} qty={trade.qty:.4f} pnl={trade.pnl:.2f}")
     print(f"final state: {runner.state.name}")
     print(f"position left over after cleanup: {runner.broker.position_qty():.4f}")
 

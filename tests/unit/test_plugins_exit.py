@@ -9,8 +9,14 @@ from strategy_lab.interfaces import StrategyContext
 from strategy_lab.plugins.exit.bracket_tp_sl import BracketTPSLExit
 from strategy_lab.plugins.exit.max_hold_duration import MaxHoldDurationExit
 from strategy_lab.plugins.exit.return_to_reference import ReturnToReferenceExit
+from strategy_lab.plugins.exit.return_to_reference_short import ShortReturnToReferenceExit
 from strategy_lab.rules.composite import Or
-from strategy_lab.rules.conditions import MaxDurationElapsed, PriceAtOrAboveReference, PriceChangeFromEntry
+from strategy_lab.rules.conditions import (
+    MaxDurationElapsed,
+    PriceAtOrAboveReference,
+    PriceAtOrBelowReference,
+    PriceChangeFromEntry,
+)
 
 
 def make_ctx(**overrides):
@@ -35,6 +41,20 @@ class TestReturnToReferenceExit:
     def test_exit_price_is_origin_price(self):
         plugin = ReturnToReferenceExit()
         ctx = make_ctx(price=1200.0, origin_price=1000.0)
+        assert plugin.exit_price(ctx) == 1000.0
+
+
+class TestShortReturnToReferenceExit:
+    """ReturnToReferenceExit 的鏡像版本(平空倉用)——見
+    docs/ARCHITECTURE.md §6.11。"""
+
+    def test_rule_is_price_at_or_below_reference(self):
+        plugin = ShortReturnToReferenceExit()
+        assert isinstance(plugin.rule, PriceAtOrBelowReference)
+
+    def test_exit_price_is_origin_price(self):
+        plugin = ShortReturnToReferenceExit()
+        ctx = make_ctx(price=800.0, origin_price=1000.0)
         assert plugin.exit_price(ctx) == 1000.0
 
 

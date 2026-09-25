@@ -48,6 +48,12 @@ class TestLoadStrategyBasics:
         assert isinstance(strategy.exit, ReturnToReferenceExit)
         assert isinstance(strategy.time_window, WeeklyWindow)
         assert strategy.kill_switch is None
+        assert strategy.direction == "long"
+
+    def test_direction_short_is_loaded(self, tmp_path):
+        path = write_yaml(tmp_path, WEEKEND_YAML + "direction: short\n")
+        strategy = load_strategy(path)
+        assert strategy.direction == "short"
 
     def test_loaded_entry_is_structurally_equal_to_hand_composed(self, tmp_path):
         path = write_yaml(tmp_path, WEEKEND_YAML)

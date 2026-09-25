@@ -95,6 +95,7 @@ def build_runner_and_symbol(config: ExecutionConfig) -> Tuple[StrategyRunner, st
         broker=live_broker,
         kill_switch=strategy.kill_switch,
         order_type=config.order_type,
+        direction=strategy.direction,
     )
     return runner, symbol
 

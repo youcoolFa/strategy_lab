@@ -44,6 +44,29 @@ class PriceAtOrAboveReference:
 
 
 @dataclass
+class PriceAboveReference:
+    """PriceBelowReference 的鏡像版本,給開空倉用:現價漲破 origin_price
+    的 deviation_pct% 就觸發。"""
+
+    deviation_pct: float
+
+    def evaluate(self, ctx: StrategyContext) -> bool:
+        assert ctx.origin_price is not None, "origin_price 必須已設定"
+        target = ctx.origin_price * (1 + self.deviation_pct / 100)
+        return ctx.price >= target
+
+
+@dataclass
+class PriceAtOrBelowReference:
+    """PriceAtOrAboveReference 的鏡像版本,給平空倉用:現價回到(或跌破)
+    origin_price 就觸發。"""
+
+    def evaluate(self, ctx: StrategyContext) -> bool:
+        assert ctx.origin_price is not None, "origin_price 必須已設定"
+        return ctx.price <= ctx.origin_price
+
+
+@dataclass
 class MovingAverageCross:
     """快線由下往上穿越慢線,剛發生的那一刻(不含已經穿越過、持續在上方的情況)。"""
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 import yaml
 
@@ -40,6 +40,7 @@ class ComposedStrategy:
     exit: ExitSignal
     time_window: TimeWindow
     kill_switch: Optional[KillSwitch] = None
+    direction: Literal["long", "short"] = "long"
 
 
 def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
@@ -61,6 +62,7 @@ def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
         exit=registry_get("exit", definition.exit.type)(**definition.exit.params),
         time_window=time_window,
         kill_switch=kill_switch,
+        direction=definition.direction,
     )
 
 

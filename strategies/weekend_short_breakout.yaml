@@ -1,0 +1,29 @@
+# weekend_mean_reversion.yaml 的鏡像版本——做空,不是做多。
+# 邏輯完全對稱:漲破 origin_price 的 deviation_pct% 就賣出開空倉,
+# 跌回 origin_price 就買回平倉。用來示範/驗證 direction: short 這條路徑
+# 整個接得通(dsl/schema.py -> dsl/loader.py -> StrategyRunner -> 8 種
+# 下單方式裡開空/平空那 4 個),見 docs/ARCHITECTURE.md §6.11。
+#
+# 下單數量(qty)一樣不在這裡設定,見 demo/sandbox_order.yaml/
+# live_execution_config.yaml 的 position_sizing。
+name: weekend_short_breakout
+symbol: BTC/USDT
+direction: short
+
+entry:
+  type: deviation_from_reference_short
+  params:
+    deviation_pct: 0.75
+
+exit:
+  type: return_to_reference_short
+  params: {}
+
+time_window:
+  type: weekly_window
+  params:
+    start_weekday: 5
+    start_time: "04:00"
+    end_weekday: 0
+    end_time: "06:00"
+    cleanup_buffer_minutes: 5

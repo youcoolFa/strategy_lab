@@ -4,11 +4,15 @@ SyntheticFeed),所以測試不會被任何隨機數行為綁住。"""
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from strategy_lab.engine.runner import RunState, StrategyRunner
 from strategy_lab.plugins.entry.deviation_from_reference import DeviationFromReferenceEntry
+from strategy_lab.plugins.entry.deviation_from_reference_short import ShortDeviationFromReferenceEntry
 from strategy_lab.plugins.entry.ma_crossover import MACrossoverEntry
 from strategy_lab.plugins.exit.bracket_tp_sl import BracketTPSLExit
 from strategy_lab.plugins.exit.return_to_reference import ReturnToReferenceExit
+from strategy_lab.plugins.exit.return_to_reference_short import ShortReturnToReferenceExit
 from strategy_lab.plugins.kill_switch.sustained_breakout import SustainedBreakoutKillSwitch
 from strategy_lab.plugins.time_window.daily_session import DailySession
 from strategy_lab.plugins.time_window.weekly_window import WeeklyWindow
@@ -233,3 +237,106 @@ class TestOrderTypeSwitchesBetweenLimitAndMarket:
         assert len(runner.trades) == 1
         assert runner.trades[0].entry_price == 700.0
         assert runner.trades[0].exit_price == 1000.0
+
+
+class TestShortDirectionFullCycle:
+    """direction="short" 的完整進出場循環——見 docs/ARCHITECTURE.md
+    §6.11。用 ShortDeviationFromReferenceEntry/ShortReturnToReferenceExit
+    這對鏡像 plugin,驗證 runner 真的會呼叫 limit_sell/limit_flat_sell
+    (不是long那邊的 place_limit_buy/place_limit_sell),部位變成負數,
+    平倉時正確算出正的 qty,Trade.pnl 的正負號也對。"""
+
+    def test_entry_fill_exit_fill_produces_correct_short_pnl(self):
+        runner = StrategyRunner(
+            entry=ShortDeviationFromReferenceEntry(deviation_pct=1.0),
+            exit=ShortReturnToReferenceExit(),
+            time_window=WeeklyWindow(end_weekday=0, end_time="06:00", cleanup_buffer_minutes=5),
+            order_qty=1.0,
+            direction="short",
+        )
+        now = datetime(2026, 8, 1, 4, 0, tzinfo=timezone.utc)
+        runner.start(now, price=1000.0)  # origin_price=1000,做空進場目標=1010(漲破 1%)
+
+        runner.tick(now, 1000.0)
+        assert runner.state == RunState.IDLE
+
+        runner.tick(now + timedelta(minutes=5), 1011.0)  # 漲破 1010 -> 賣出開空倉
+        assert runner.state == RunState.ENTRY_PENDING
+        assert runner.entry_order.price == 1010.0
+
+        runner.tick(now + timedelta(minutes=10), 1011.0)  # 限價單成交
+        assert runner.state == RunState.IN_POSITION
+        assert runner.active_entry_price == 1010.0
+        assert runner.broker.position_qty() == -1.0  # 空倉是負數
+
+        runner.tick(now + timedelta(minutes=15), 1005.0)  # 還沒跌回 origin=1000
+        assert runner.state == RunState.IN_POSITION
+
+        runner.tick(now + timedelta(minutes=20), 1000.0)  # 跌回 origin -> 買回平倉
+        assert runner.state == RunState.EXIT_PENDING
+        assert runner.exit_order.price == 1000.0
+        assert runner.exit_order.qty == 1.0  # 平倉數量是正的,不是部位的 -1.0
+
+        runner.tick(now + timedelta(minutes=25), 1000.0)  # 出場單成交
+        assert runner.state == RunState.IDLE
+        assert runner.broker.position_qty() == 0.0
+        assert len(runner.trades) == 1
+        trade = runner.trades[0]
+        assert trade.entry_price == 1010.0
+        assert trade.exit_price == 1000.0
+        # 做空、價格從 1010 跌到 1000,應該賺錢——pnl 要是正的,不是
+        # long 那個公式(exit - entry)算出來的負數。
+        assert trade.pnl == pytest.approx(10.0)
+
+    def test_request_stop_forces_cleanup_of_short_position_via_market_flat_sell(self):
+        """對應 TestRequestStopInterruptsMidPosition 的 long 版本——這裡
+        驗證的重點是:_cleanup() 對 short 部位不能還呼叫 market_close()
+        那種「假設部位一定是正數」的邏輯,不然負的部位永遠不會被
+        「remaining > 0」這個判斷式抓到,根本不會被平倉。用
+        request_stop() 而不是 kill_switch 觸發:現有的
+        SustainedBreakoutKillSwitch 只偵測「連續站上某價位」的向上突破,
+        語意上是替多倉設計的,不適合直接套在空倉情境上(要偵測向下
+        突破需要另一個鏡像版本,不在這次的範圍內)。"""
+        runner = StrategyRunner(
+            entry=ShortDeviationFromReferenceEntry(deviation_pct=1.0),
+            exit=ShortReturnToReferenceExit(),
+            time_window=WeeklyWindow(end_weekday=5, end_time="06:00", cleanup_buffer_minutes=5),
+            order_qty=1.0,
+            direction="short",
+        )
+        now = datetime(2026, 8, 2, 4, 0, tzinfo=timezone.utc)  # 星期日,window_end 遠在之後
+        runner.start(now, price=1000.0)
+
+        runner.tick(now, 1000.0)
+        runner.tick(now + timedelta(minutes=5), 1011.0)
+        assert runner.state == RunState.ENTRY_PENDING
+        runner.tick(now + timedelta(minutes=10), 1011.0)
+        assert runner.state == RunState.IN_POSITION
+        assert runner.broker.position_qty() == -1.0
+
+        runner.request_stop()
+        runner.tick(now + timedelta(minutes=15), 1005.0)  # 還沒等到正常出場訊號
+
+        assert runner.state == RunState.STOPPED
+        assert runner.broker.position_qty() == 0.0  # 強制平倉——不是還停在 -1.0
+        assert runner.trades == []  # 不是走正常出場流程,不會產生 Trade 紀錄
+
+
+class TestTradePnl:
+    def test_long_pnl_is_exit_minus_entry(self):
+        from strategy_lab.engine.runner import Trade
+
+        trade = Trade(entry_price=990.0, exit_price=1000.0, qty=2.0, direction="long")
+        assert trade.pnl == pytest.approx(20.0)
+
+    def test_short_pnl_is_entry_minus_exit(self):
+        from strategy_lab.engine.runner import Trade
+
+        trade = Trade(entry_price=1010.0, exit_price=1000.0, qty=2.0, direction="short")
+        assert trade.pnl == pytest.approx(20.0)
+
+    def test_direction_defaults_to_long(self):
+        from strategy_lab.engine.runner import Trade
+
+        trade = Trade(entry_price=990.0, exit_price=1000.0, qty=1.0)
+        assert trade.direction == "long"

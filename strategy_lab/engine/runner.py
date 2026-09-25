@@ -52,6 +52,16 @@ class Trade:
     entry_price: float
     exit_price: float
     qty: float
+    direction: str = "long"  # "long" 或 "short"——見 docs/ARCHITECTURE.md §6.11
+
+    @property
+    def pnl(self) -> float:
+        """long 賺的是「賣得比買得貴」(exit - entry);short 賺的是
+        「買回得比賣出時便宜」(entry - exit)——兩者符號互為鏡像,直接
+        套用 long 那個公式在 short 上會算出正負號相反的錯誤結果。"""
+        if self.direction == "short":
+            return (self.entry_price - self.exit_price) * self.qty
+        return (self.exit_price - self.entry_price) * self.qty
 
 
 @dataclass
@@ -63,6 +73,7 @@ class StrategyRunner:
     broker: Broker = field(default_factory=PaperBroker)
     kill_switch: Optional[KillSwitch] = None
     order_type: str = "limit"  # "limit" 或 "market"——見 dsl/order_config.py
+    direction: str = "long"  # "long" 或 "short"——見 docs/ARCHITECTURE.md §6.11
 
     state: RunState = field(default=RunState.IDLE, init=False)
     window_end: Optional[datetime] = field(default=None, init=False)
@@ -156,14 +167,20 @@ class StrategyRunner:
 
     def _try_enter(self, now: datetime, price: float) -> None:
         """檢查是否滿足進場條件，若滿足則下進場單(限價或市價,依
-        order_type)。"""
+        order_type;買進開多倉或賣出開空倉,依 direction)。"""
 
         ctx = self._ctx(now, price)
         if self.entry.rule.evaluate(ctx):
-            if self.order_type == "market":
-                self.entry_order = self.broker.market_buy(qty=self.order_qty)
+            if self.direction == "short":
+                if self.order_type == "market":
+                    self.entry_order = self.broker.market_sell(qty=self.order_qty)
+                else:
+                    self.entry_order = self.broker.limit_sell(price=self.entry.entry_price(ctx), qty=self.order_qty)
             else:
-                self.entry_order = self.broker.place_limit_buy(price=self.entry.entry_price(ctx), qty=self.order_qty)
+                if self.order_type == "market":
+                    self.entry_order = self.broker.market_buy(qty=self.order_qty)
+                else:
+                    self.entry_order = self.broker.place_limit_buy(price=self.entry.entry_price(ctx), qty=self.order_qty)
             self.state = RunState.ENTRY_PENDING
 
     def _check_entry_fill(self, now: datetime) -> None:
@@ -180,14 +197,22 @@ class StrategyRunner:
 
     def _try_exit(self, now: datetime, price: float) -> None:
         """檢查是否滿足出場條件，若滿足則下出場單(限價或市價,依
-        order_type)。"""
+        order_type;平多倉或平空倉,依 direction)。`position_qty()`
+        空倉時是負數,平倉數量要取絕對值——不能直接把負數傳給
+        qty 參數。"""
         ctx = self._ctx(now, price)
         if self.exit.rule.evaluate(ctx):
-            qty = self.broker.position_qty()
-            if self.order_type == "market":
-                self.exit_order = self.broker.market_flat_buy(qty=qty)
+            qty = abs(self.broker.position_qty())
+            if self.direction == "short":
+                if self.order_type == "market":
+                    self.exit_order = self.broker.market_flat_sell(qty=qty)
+                else:
+                    self.exit_order = self.broker.limit_flat_sell(price=self.exit.exit_price(ctx), qty=qty)
             else:
-                self.exit_order = self.broker.place_limit_sell(price=self.exit.exit_price(ctx), qty=qty)
+                if self.order_type == "market":
+                    self.exit_order = self.broker.market_flat_buy(qty=qty)
+                else:
+                    self.exit_order = self.broker.place_limit_sell(price=self.exit.exit_price(ctx), qty=qty)
             self.state = RunState.EXIT_PENDING
 
     def _check_exit_fill(self) -> None:
@@ -196,7 +221,14 @@ class StrategyRunner:
         order = self.broker.fetch_order(self.exit_order.id)
         if order.status == "closed":
             assert self.active_entry_price is not None
-            self.trades.append(Trade(entry_price=self.active_entry_price, exit_price=order.price, qty=order.filled_qty))
+            self.trades.append(
+                Trade(
+                    entry_price=self.active_entry_price,
+                    exit_price=order.price,
+                    qty=order.filled_qty,
+                    direction=self.direction,
+                )
+            )
             self.active_entry_price = None
             self.entry_time = None
             self.state = RunState.IDLE
@@ -204,11 +236,21 @@ class StrategyRunner:
             self.state = RunState.IN_POSITION
 
     def _cleanup(self) -> None:
-        """時間窗口結束時，取消所有未成交單並強制平倉。"""
+        """時間窗口結束時，取消所有未成交單並強制平倉。改用
+        market_flat_buy()/market_flat_sell()(不是舊的 market_close())
+        是刻意的:`position_qty()` 對空倉會回傳負數,`market_close()`
+        原本假設部位一定是正數(`remaining > 0` 才平倉),空倉會被完全
+        忽略、永遠不會被強制平倉——見 docs/ARCHITECTURE.md §6.11。
+        依部位正負號決定方向,不依賴 self.direction:部位本身才是「現在
+        真的有沒有倉位」的唯一事實來源。附帶好處:market_flat_buy()/
+        market_flat_sell() 會套用 §6.9 的下單精度修正,market_close()
+        原本沒有。"""
         for order in (self.entry_order, self.exit_order):
             if order is not None:
                 self.broker.cancel_order(order.id)
         remaining = self.broker.position_qty()
         if remaining > 0:
-            self.broker.market_close(remaining)
+            self.broker.market_flat_buy(remaining)
+        elif remaining < 0:
+            self.broker.market_flat_sell(abs(remaining))
         self.state = RunState.STOPPED
