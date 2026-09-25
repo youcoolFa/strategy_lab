@@ -151,3 +151,10 @@ class BybitClient:
         resp = self._call_with_retry(self._http.get_positions, category=CATEGORY, symbol=symbol)
         positions = resp["result"]["list"]
         return sum(float(p["size"]) for p in positions if p.get("size"))
+
+    def get_instrument_info(self, symbol: str) -> dict:
+        """回傳單一交易對的原始 instrument 資料(priceFilter/lotSizeFilter
+        這些)——公開端點,不需要驗證。解析成好用的形狀是
+        live/instrument_limits.py 的職責,這裡刻意只當一層薄薄的包裝。"""
+        resp = self._call_with_retry(self._http.get_instruments_info, category=CATEGORY, symbol=symbol)
+        return resp["result"]["list"][0]

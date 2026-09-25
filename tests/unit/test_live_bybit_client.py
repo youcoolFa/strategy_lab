@@ -22,6 +22,7 @@ class FakeHTTP:
         self.order_history_response = {"result": {"list": []}}
         self.cancel_order_response = {"result": {}}
         self.positions_response = {"result": {"list": []}}
+        self.instruments_info_response = None
         self.raise_on_next_call = None
 
     def _maybe_raise(self):
@@ -59,6 +60,11 @@ class FakeHTTP:
         self.calls.append(("get_positions", kwargs))
         self._maybe_raise()
         return self.positions_response
+
+    def get_instruments_info(self, **kwargs):
+        self.calls.append(("get_instruments_info", kwargs))
+        self._maybe_raise()
+        return self.instruments_info_response
 
 
 def make_client(http=None) -> BybitClient:
@@ -244,6 +250,35 @@ class TestGetPositionQty:
         client = make_client(http)
 
         assert client.get_position_qty("BTCUSDT") == 0.0
+
+
+class TestGetInstrumentInfo:
+    def test_returns_the_single_instrument_dict(self):
+        http = FakeHTTP()
+        http.instruments_info_response = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "priceFilter": {"minPrice": "0.10", "maxPrice": "1999999.80", "tickSize": "0.10"},
+                        "lotSizeFilter": {
+                            "maxOrderQty": "1500.000",
+                            "minOrderQty": "0.001",
+                            "qtyStep": "0.001",
+                            "maxMktOrderQty": "150.000",
+                            "minNotionalValue": "5",
+                        },
+                    }
+                ]
+            }
+        }
+        client = make_client(http)
+
+        result = client.get_instrument_info("BTCUSDT")
+
+        assert result["symbol"] == "BTCUSDT"
+        assert result["lotSizeFilter"]["qtyStep"] == "0.001"
+        assert http.calls == [("get_instruments_info", {"category": "linear", "symbol": "BTCUSDT"})]
 
 
 class TestRetryOnNetworkFailure:

@@ -29,8 +29,15 @@ closed(不是下單當下就立即成交)——呼應 bot.py 的假設:「dry-ru
 在 bot.py 是在輪詢迴圈裡兌現的,這裡搬到 `fetch_order()` 兌現,行為
 等價:runner.py 下單後一定會在下一次 tick 呼叫 `fetch_order()` 才會
 知道有沒有成交,所以「下單當下」跟「第一次查詢時」對 runner.py 來說
-沒有可觀察的差異。市價單 dry-run 也沿用這個模式(不特地「立刻成交」)
-——dry-run 本來就不知道真實價格,兩種單種類在這裡沒有可觀察的差異。
+沒有可觀察的差異。市價單 dry-run 也沿用這個模式(不特地「立刻成交」)。
+
+**市價單 dry-run 下單當下會呼叫 `client.get_last_price()` 查一次真實
+市價,當作模擬成交價**——限價單不會(呼叫端已經算好價格傳進來了)。
+這是唯讀查詢,不是下單,`dry_run=True` 只擋「會真的花錢的動作」,不擋
+查價——跟 `BybitClient` 模組docstring「即使在模擬模式下,可能還是想用
+它查真實價格」是同一個取捨。沒有這一步,dry-run 市價單的
+`active_entry_price` 會是沒有意義的 `0.0`,跑起來的 log 沒辦法用來
+初步檢視策略邏輯合不合理。
 
 8 種下單方式(方向 buy/sell × 單種類 limit/market × 開倉/平倉),對稱於
 broker/paper_broker.py 的 PaperBroker——見 docs/ARCHITECTURE.md §6.8:
@@ -46,17 +53,34 @@ broker/paper_broker.py 的 PaperBroker——見 docs/ARCHITECTURE.md §6.8:
 `reduce_only=True` 的 dry-run 單一樣不會讓模擬部位「穿越」0——跟
 PaperBroker._fill() 同一條規則,不然沙盒/dry-run 測出來的部位軌跡會
 跟真實環境對不上。
+
+**每一種下單方式,不管 dry-run 還是真的下單,送出去之前都會先用
+`instrument_limits.py` 修正 qty/price 的精度**(`_fix_limit_order()`/
+`_fix_market_qty()`)——Bybit 每個交易對都有自己的 tickSize/qtyStep,
+`position_sizing` 算出來的浮點數(例如 0.003333...)幾乎一定對不上,不
+修正直接送出去,交易所會直接拒單。找不到這個 symbol 的精度資料(還沒
+下載過/symbol 打錯)時不會讓下單整個掛掉,原樣傳給 client,交由交易所
+自己的驗證把關——見 docs/ARCHITECTURE.md §6.9。
 """
 
 from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 from loguru import logger
 
 from strategy_lab.live.bybit_client import BybitClient, OrderResult
+from strategy_lab.live.instrument_limits import (
+    DEFAULT_LIMITS_PATH,
+    InstrumentLimits,
+    UnknownSymbolError,
+    fix_price,
+    fix_qty,
+    load_instrument_limits,
+)
 
 
 @dataclass
@@ -79,33 +103,61 @@ class LiveBroker:
     client: BybitClient
     symbol: str
     dry_run: bool = True
+    instrument_limits_path: Path = field(default_factory=lambda: DEFAULT_LIMITS_PATH)
 
     _dry_run_orders: Dict[str, LiveOrder] = field(default_factory=dict, init=False)
     _dry_run_position_qty: float = field(default=0.0, init=False)
     _dry_run_id_counter: itertools.count = field(default_factory=lambda: itertools.count(1), init=False)
+    _limits: Optional[InstrumentLimits] = field(default=None, init=False, repr=False)
+    _limits_loaded: bool = field(default=False, init=False, repr=False)
+
+    def _get_limits(self) -> Optional[InstrumentLimits]:
+        if not self._limits_loaded:
+            self._limits_loaded = True
+            try:
+                self._limits = load_instrument_limits(self.symbol, path=self.instrument_limits_path)
+            except (FileNotFoundError, UnknownSymbolError) as e:
+                logger.warning(f"[instrument_limits] 找不到 {self.symbol} 的精度限制,略過自動修正:{e}")
+        return self._limits
+
+    def _fix_limit_order(self, price: float, qty: float, side: str) -> Tuple[float, float]:
+        limits = self._get_limits()
+        if limits is None:
+            return price, qty
+        return fix_price(price, limits, side=side), fix_qty(qty, limits, order_type="limit")
+
+    def _fix_market_qty(self, qty: float) -> float:
+        limits = self._get_limits()
+        if limits is None:
+            return qty
+        return fix_qty(qty, limits, order_type="market")
 
     # --- 開倉 ---
     def place_limit_buy(self, price: float, qty: float) -> LiveOrder:
+        price, qty = self._fix_limit_order(price, qty, side="Buy")
         if self.dry_run:
             return self._dry_run_place("Buy", price, qty, reduce_only=False)
         result = self.client.place_limit_order(self.symbol, "Buy", qty, price, reduce_only=False)
         return _to_live_order(result)
 
     def limit_sell(self, price: float, qty: float) -> LiveOrder:
+        price, qty = self._fix_limit_order(price, qty, side="Sell")
         if self.dry_run:
             return self._dry_run_place("Sell", price, qty, reduce_only=False)
         result = self.client.place_limit_order(self.symbol, "Sell", qty, price, reduce_only=False)
         return _to_live_order(result)
 
     def market_buy(self, qty: float) -> LiveOrder:
+        qty = self._fix_market_qty(qty)
         if self.dry_run:
-            return self._dry_run_place("Buy", 0.0, qty, reduce_only=False)
+            return self._dry_run_place("Buy", self.client.get_last_price(self.symbol), qty, reduce_only=False)
         result = self.client.place_market_order(self.symbol, "Buy", qty, reduce_only=False)
         return _to_live_order(result)
 
     def market_sell(self, qty: float) -> LiveOrder:
+        qty = self._fix_market_qty(qty)
         if self.dry_run:
-            return self._dry_run_place("Sell", 0.0, qty, reduce_only=False)
+            return self._dry_run_place("Sell", self.client.get_last_price(self.symbol), qty, reduce_only=False)
         result = self.client.place_market_order(self.symbol, "Sell", qty, reduce_only=False)
         return _to_live_order(result)
 
@@ -113,6 +165,7 @@ class LiveBroker:
     def place_limit_sell(self, price: float, qty: float) -> LiveOrder:
         # exit 永遠是平倉,reduce_only 寫死 True——不能因為呼叫端忘記
         # 傳而意外開出新倉。
+        price, qty = self._fix_limit_order(price, qty, side="Sell")
         if self.dry_run:
             return self._dry_run_place("Sell", price, qty, reduce_only=True)
         result = self.client.place_limit_order(self.symbol, "Sell", qty, price, reduce_only=True)
@@ -125,20 +178,23 @@ class LiveBroker:
         return self.place_limit_sell(price, qty)
 
     def limit_flat_sell(self, price: float, qty: float) -> LiveOrder:
+        price, qty = self._fix_limit_order(price, qty, side="Buy")
         if self.dry_run:
             return self._dry_run_place("Buy", price, qty, reduce_only=True)
         result = self.client.place_limit_order(self.symbol, "Buy", qty, price, reduce_only=True)
         return _to_live_order(result)
 
     def market_flat_buy(self, qty: float) -> LiveOrder:
+        qty = self._fix_market_qty(qty)
         if self.dry_run:
-            return self._dry_run_place("Sell", 0.0, qty, reduce_only=True)
+            return self._dry_run_place("Sell", self.client.get_last_price(self.symbol), qty, reduce_only=True)
         result = self.client.place_market_order(self.symbol, "Sell", qty, reduce_only=True)
         return _to_live_order(result)
 
     def market_flat_sell(self, qty: float) -> LiveOrder:
+        qty = self._fix_market_qty(qty)
         if self.dry_run:
-            return self._dry_run_place("Buy", 0.0, qty, reduce_only=True)
+            return self._dry_run_place("Buy", self.client.get_last_price(self.symbol), qty, reduce_only=True)
         result = self.client.place_market_order(self.symbol, "Buy", qty, reduce_only=True)
         return _to_live_order(result)
 

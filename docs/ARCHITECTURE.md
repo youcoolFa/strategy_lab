@@ -420,6 +420,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 執行參數改用 YAML | `live/config.py`/`live/select_strategy.py` 從 JSON 改吃/寫 YAML;`live_execution_config.example.json` → `.example.yaml`,可以加註解 | §1 附近的 §6.5 補充說明 | 已完成 |
 | `order_qty` 移出策略層,改用 `position_sizing` | 新增 `dsl/order_config.py`(`OrderConfig`/`PositionSizing`/`compute_qty()`);`strategies/*.yaml` 移除 `order_qty` 欄位(`dsl/schema.py`/`dsl/loader.py` 同步移除,`extra="forbid"` 會強制兩邊一起改,忘改會直接報錯);新增 `demo/sandbox_order.yaml`(沙盒假資料,`PaperBroker` 本身不改);`live_execution_config.yaml` 新增 `order_type`/`position_sizing`/`account_value`;`account_percentage` 模式在 live 端因為還沒有查真實餘額的方法,沒給 `account_value` 會直接報錯 | 新增 §6.7 | 已完成(`account_percentage` 在 live 端待補真實餘額查詢) |
 | 8 種下單方式 + `order_type` 真正接進 runner | `PaperBroker`/`LiveBroker` 新增 `limit_sell`/`market_buy`/`market_sell`/`limit_flat_buy`/`limit_flat_sell`/`market_flat_buy`/`market_flat_sell`(對稱於既有的 `place_limit_buy`/`place_limit_sell`);`interfaces.Broker` Protocol 擴充到 14 個方法;`reduce_only` 單不會讓部位穿越 0(`PaperBroker._fill()`/`LiveBroker` dry-run 都要處理);`StrategyRunner` 新增 `order_type` 欄位,`_try_enter()`/`_try_exit()` 依此選限價還是市價——這是真正修好「`order_type` 設定完全沒作用」缺口的地方 | 新增 §6.8 | 已完成(開空倉的 4 種方法目前沒有 entry/exit plugin 會呼叫,刻意先做成獨立可用的方法,不強行接進長倉專用狀態機) |
+| 下單前用真實精度限制修正 qty/price | 新增 `live/instrument_limits.py`(`fix_qty()`/`fix_price()`,永遠捨去 qty、依 side 決定 price 修正方向);新增 `live/fetch_instrument_limits.py`(下載腳本,公開端點);`BybitClient` 新增 `get_instrument_info()`;新增並 commit `instrument_limits.json`(公開市場資料,目前只有 BTCUSDT);`LiveBroker` 8 種下單方式送出前都先修正(dry-run 也修正,保證預覽準確),找不到資料就跳過、不會擋下下單;`LiveBroker` dry-run 的市價單額外接上 `get_last_price()` 查真實市價當模擬成交價(唯讀,不算真的下單) | 新增 §6.9 | 已完成(`PaperBroker`/沙盒刻意不套用這一層) |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -808,3 +809,55 @@ current_price)` 換算成真正的 qty。三種 `position_sizing.mode`:
 (`limit_sell`/`market_buy`/`market_sell`/`limit_flat_buy`/
 `limit_flat_sell`/`market_flat_buy`/`market_flat_sell`)`PaperBroker`/
 `LiveBroker` 都已經實作,結構上滿足,不需要額外繼承或註冊。
+
+### 6.9 下單前用 Bybit 的商品精度限制修正 qty/price
+
+**動機**:Bybit 每個交易對(symbol)都有自己的價格/數量精度限制——
+`priceFilter.tickSize`(價格只能是這個數字的整數倍)、
+`lotSizeFilter.qtyStep`(數量同理)、`minOrderQty`/`maxOrderQty`、市價單
+另外有更小的 `maxMktOrderQty`、`minNotionalValue`(最小下單金額)。
+`position_sizing` 算出來的 qty 是浮點數(例如帳戶權益 2% 除以現價,常常
+是 `0.003333...` 這種數字),幾乎一定不會剛好是 `qtyStep` 的整數倍——
+不修正直接送出去,交易所會直接拒單。
+
+**下載機制(`live/fetch_instrument_limits.py`)** 跟 **資料/計算邏輯
+(`live/instrument_limits.py`)** 刻意分成兩個檔案:前者要真的打 Bybit
+API(`BybitClient.get_instrument_info()`,**公開端點,不需要真實 API
+key**),後者是純函式,不碰網路、不碰真實檔案以外的 I/O,可以完全獨立
+測試。下載腳本只抓 `strategies/*.yaml` 實際用到的 symbol(目前只有
+`BTCUSDT`),不是抓 Bybit 全部幾百個交易對的清單。
+
+**`instrument_limits.json`(專案根目錄)committed 進 git 是刻意的**——
+不是密鑰,是公開市場資料,這樣測試/沙盒不需要真的連網路就能跑;`.gitignore`
+沒有排除這個檔案。實際要上線前建議重新跑一次
+`python3 -m strategy_lab.live.fetch_instrument_limits`,確保精度沒有
+過期(交易所偶爾會調整,雖然不常見)。
+
+**修正規則,每一條都刻意選「對使用者保守」的方向,不是隨便四捨五入**:
+
+- `fix_qty()`:永遠只**無條件捨去**(往下取整)到 `qtyStep` 的倍數——
+  不會偷偷幫使用者多下一點。捨去後如果小於 `minOrderQty`,直接
+  `raise ValueError`,不會硬湊到最小值(那樣會悄悄改變 `position_sizing`
+  原本算好的風險大小)。市價單額外受 `maxMktOrderQty`(通常比一般
+  `maxOrderQty` 小)限制。
+- `fix_price()`:限價單的價格修正方向依 `side` 決定——買單(Buy)往下
+  修(不會不小心多付錢),賣單(Sell)往上修(不會不小心少賣錢)。
+- 換算時**先用 `round()` 修掉浮點數誤差、再取整、再乘回 step**——這是
+  使用者提出這個功能時具體點出的「數值浮點數問題」的來源(`0.1 + 0.2
+  != 0.3` 那類經典問題),不處理的話捨去/取整的結果可能會差一個 step。
+
+**`LiveBroker` 的每一種下單方式(8 種都有)在送出去之前,都會先呼叫
+`_fix_limit_order()`/`_fix_market_qty()`**——不管是 dry-run 還是真的
+下單:dry-run 也要修正,不然 dry-run 印出來的預覽跟實際會送出去的數字
+對不上,失去 dry-run 該有的參考價值。限制檔案讀取是 lazy + 快取的
+(`_get_limits()`,只在第一次真的要下單時讀一次,不是每次呼叫
+`LiveBroker.__init__` 就讀)。
+
+**找不到這個 symbol 的精度資料時,不會讓下單整個掛掉**——只記一筆
+warning log,qty/price 原樣傳給 `client`,交由交易所自己的驗證把關。
+這是刻意寬鬆的設計:`symbol_override` 允許任意字串,沒理由讓一個「還沒
+幫這個 symbol 下載過精度資料」的情況變成硬性阻塞。
+
+**`PaperBroker`(沙盒)刻意不套用這一層**——沙盒本來就不會真的碰到
+交易所的精度限制拒單,套用這層只會讓 `demo/run_from_yaml.py` 印出來的
+`qty` 多一層跟策略邏輯無關的細節,不值得增加的複雜度。

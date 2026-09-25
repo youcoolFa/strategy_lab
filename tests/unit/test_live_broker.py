@@ -23,6 +23,7 @@ class FakeBybitClient:
         self.place_market_order_result = None
         self.get_order_status_result = None
         self.position_qty_result = 0.0
+        self.last_price_result = 0.0
 
     def place_limit_order(self, symbol, side, qty, price, reduce_only=False):
         self.calls.append(("place_limit_order", symbol, side, qty, price, reduce_only))
@@ -31,6 +32,10 @@ class FakeBybitClient:
     def place_market_order(self, symbol, side, qty, reduce_only=False):
         self.calls.append(("place_market_order", symbol, side, qty, reduce_only))
         return self.place_market_order_result
+
+    def get_last_price(self, symbol):
+        self.calls.append(("get_last_price", symbol))
+        return self.last_price_result
 
     def get_order_status(self, symbol, order_id):
         self.calls.append(("get_order_status", symbol, order_id))
@@ -44,8 +49,11 @@ class FakeBybitClient:
         return self.position_qty_result
 
 
-def make_broker(client=None, dry_run=False) -> LiveBroker:
-    return LiveBroker(client=client or FakeBybitClient(), symbol="BTCUSDT", dry_run=dry_run)
+def make_broker(client=None, dry_run=False, instrument_limits_path=None) -> LiveBroker:
+    kwargs = {}
+    if instrument_limits_path is not None:
+        kwargs["instrument_limits_path"] = instrument_limits_path
+    return LiveBroker(client=client or FakeBybitClient(), symbol="BTCUSDT", dry_run=dry_run, **kwargs)
 
 
 class TestPlaceLimitBuy:
@@ -141,6 +149,84 @@ class TestEightOrderMethodsTranslateCorrectly:
         broker.market_flat_sell(qty=0.01)
 
         assert client.calls == [("place_market_order", "BTCUSDT", "Buy", 0.01, True)]
+
+
+class TestInstrumentLimitsAreAppliedBeforeSendingToClient:
+    """使用者提出的需求:出單前用 Bybit 的商品精度限制檢查/修正 qty、
+    price,通常是浮點數問題——見 live/instrument_limits.py。這裡故意用
+    一份 tickSize/qtyStep 明顯的假資料(不是真實下載的那份),讓修正
+    前後的差異看得出來,不依賴真實下載檔案裡實際的數字。"""
+
+    def _limits_path(self, tmp_path):
+        import json
+
+        path = tmp_path / "instrument_limits.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "BTCUSDT": {
+                        "priceFilter": {"minPrice": "0.10", "maxPrice": "1999999.80", "tickSize": "0.50"},
+                        "lotSizeFilter": {
+                            "maxOrderQty": "1500.000",
+                            "minOrderQty": "0.001",
+                            "qtyStep": "0.010",
+                            "maxMktOrderQty": "150.000",
+                            "minNotionalValue": "5",
+                        },
+                    }
+                }
+            )
+        )
+        return path
+
+    def test_limit_buy_qty_and_price_are_rounded_before_being_sent(self, tmp_path):
+        client = FakeBybitClient()
+        client.place_limit_order_result = OrderResult(order_id="o", status="open", price=60000.0)
+        broker = make_broker(client, instrument_limits_path=self._limits_path(tmp_path))
+
+        broker.place_limit_buy(price=60000.37, qty=0.0137)
+
+        # qty_step=0.01 -> 0.0137 捨去成 0.01;tickSize=0.5、買單往下修
+        # -> 60000.37 修成 60000.0
+        assert client.calls == [("place_limit_order", "BTCUSDT", "Buy", 0.01, 60000.0, False)]
+
+    def test_limit_sell_price_rounds_up_not_down(self, tmp_path):
+        client = FakeBybitClient()
+        client.place_limit_order_result = OrderResult(order_id="o", status="open", price=60000.5)
+        broker = make_broker(client, instrument_limits_path=self._limits_path(tmp_path))
+
+        broker.place_limit_sell(price=60000.13, qty=0.02)
+
+        assert client.calls == [("place_limit_order", "BTCUSDT", "Sell", 0.02, 60000.5, True)]
+
+    def test_market_qty_is_rounded_before_being_sent(self, tmp_path):
+        client = FakeBybitClient()
+        client.place_market_order_result = OrderResult(order_id="o", status="open")
+        broker = make_broker(client, instrument_limits_path=self._limits_path(tmp_path))
+
+        broker.market_buy(qty=0.0149)
+
+        assert client.calls == [("place_market_order", "BTCUSDT", "Buy", 0.01, False)]
+
+    def test_dry_run_also_applies_the_fix_so_the_preview_is_accurate(self, tmp_path):
+        broker = make_broker(dry_run=True, instrument_limits_path=self._limits_path(tmp_path))
+
+        placed = broker.place_limit_buy(price=60000.37, qty=0.0137)
+
+        assert placed.qty == 0.01
+        assert placed.price == 60000.0
+
+    def test_missing_limits_file_degrades_gracefully_without_raising(self, tmp_path):
+        """還沒下載過、或這個 symbol 不在檔案裡——不該讓下單整個掛掉,
+        原樣傳給 client,交由交易所自己的驗證把關。"""
+        client = FakeBybitClient()
+        client.place_limit_order_result = OrderResult(order_id="o", status="open", price=60000.37)
+        missing_path = tmp_path / "does_not_exist.json"
+        broker = make_broker(client, instrument_limits_path=missing_path)
+
+        broker.place_limit_buy(price=60000.37, qty=0.0137)
+
+        assert client.calls == [("place_limit_order", "BTCUSDT", "Buy", 0.0137, 60000.37, False)]
 
 
 class TestFetchOrder:
@@ -317,17 +403,63 @@ class TestDryRunPositionQty:
 
 
 class TestDryRunEightOrderMethods:
-    def test_market_buy_does_not_call_real_client_and_fills_on_first_poll(self):
+    def test_market_buy_queries_real_price_but_does_not_place_a_real_order(self):
+        """市價單的「價格」本來就沒有使用者能指定的意義,dry-run 要模擬
+        得像樣一點,還是得知道真實市價是多少——但只查價(唯讀),不會
+        真的下單。跟限價單一樣,第一次 fetch_order() 才變 closed。"""
         client = FakeBybitClient()
+        client.last_price_result = 61234.5
         broker = make_broker(client, dry_run=True)
 
         placed = broker.market_buy(qty=0.01)
-        assert client.calls == []
-        assert placed.status == "open"  # 跟限價單一樣,第一次 fetch_order() 才變 closed
+        assert client.calls == [("get_last_price", "BTCUSDT")]  # 只查價,沒下單
+        assert placed.status == "open"
+        assert placed.price == 61234.5
 
         fetched = broker.fetch_order(placed.id)
         assert fetched.status == "closed"
         assert broker.position_qty() == 0.01
+
+    def test_market_sell_queries_real_price(self):
+        client = FakeBybitClient()
+        client.last_price_result = 61234.5
+        broker = make_broker(client, dry_run=True)
+
+        placed = broker.market_sell(qty=0.01)
+
+        assert client.calls == [("get_last_price", "BTCUSDT")]
+        assert placed.price == 61234.5
+
+    def test_market_flat_buy_queries_real_price(self):
+        client = FakeBybitClient()
+        client.last_price_result = 61234.5
+        broker = make_broker(client, dry_run=True)
+
+        placed = broker.market_flat_buy(qty=0.01)
+
+        assert client.calls == [("get_last_price", "BTCUSDT")]
+        assert placed.price == 61234.5
+
+    def test_market_flat_sell_queries_real_price(self):
+        client = FakeBybitClient()
+        client.last_price_result = 58900.0
+        broker = make_broker(client, dry_run=True)
+
+        placed = broker.market_flat_sell(qty=0.01)
+
+        assert client.calls == [("get_last_price", "BTCUSDT")]
+        assert placed.price == 58900.0
+
+    def test_limit_orders_do_not_query_price_only_market_orders_do(self):
+        """限價單的價格是呼叫端算好傳進來的,不該多打一次網路請求去查
+        真實市價——只有市價單需要,因為它本來就沒有呼叫端指定的價格。"""
+        client = FakeBybitClient()
+        broker = make_broker(client, dry_run=True)
+
+        broker.place_limit_buy(price=60000.0, qty=0.01)
+        broker.limit_sell(price=60000.0, qty=0.01)
+
+        assert client.calls == []
 
     def test_limit_sell_opens_short_position(self):
         broker = make_broker(dry_run=True)
