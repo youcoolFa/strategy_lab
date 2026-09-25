@@ -196,3 +196,72 @@ class SustainedPriceBreakout:
 
         cutoff = ctx.now - timedelta(hours=self.hours)
         self._history = [(t, price) for (t, price) in self._history if t >= cutoff]
+
+
+@dataclass
+class SustainedPriceBreakdown:
+    """SustainedPriceBreakout 的鏡像,給做空策略用的 kill switch:過去
+    連續 `hours` 個小時內,每一筆觀察到的價格都低於 threshold_price,
+    且這段期間的平均價格低於 reference_price 減去 margin_pct%(或
+    margin_fixed 的絕對值)。多單用「連續突破上方」判斷趨勢反轉成真,
+    空單反過來用「連續跌破下方」——語意上不能共用
+    SustainedPriceBreakout,因為多空兩邊的「危險方向」相反。
+
+    其餘機制(滾動視窗、hours/minutes/days 互斥、margin_pct/margin_fixed
+    互斥)跟 SustainedPriceBreakout 完全一樣,見該類別的說明。
+    """
+
+    threshold_price: float
+    reference_price: float
+    hours: Optional[float] = None
+    minutes: Optional[float] = None
+    days: Optional[float] = None
+    margin_pct: Optional[float] = None
+    margin_fixed: Optional[float] = None
+
+    _first_observed_at: Optional[datetime] = field(default=None, init=False, repr=False)
+    _history: List[Tuple[datetime, float]] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if (self.margin_pct is None) == (self.margin_fixed is None):
+            raise ValueError("must set exactly one of margin_pct / margin_fixed")
+
+        given = [v for v in (self.hours, self.minutes, self.days) if v is not None]
+        if len(given) > 1:
+            raise ValueError("must set at most one of hours / minutes / days")
+        if self.minutes is not None:
+            self.hours = self.minutes / 60
+        elif self.days is not None:
+            self.hours = self.days * 24
+        elif self.hours is None:
+            self.hours = 72.0
+
+    @property
+    def window_duration(self) -> timedelta:
+        return timedelta(hours=self.hours)
+
+    def evaluate(self, ctx: StrategyContext) -> bool:
+        self._observe(ctx)
+
+        assert self._first_observed_at is not None
+        if ctx.now - self._first_observed_at < timedelta(hours=self.hours):
+            return False  # 觀察時間還沒涵蓋完整的 hours 視窗
+
+        if not all(price < self.threshold_price for _, price in self._history):
+            return False
+
+        avg = sum(price for _, price in self._history) / len(self._history)
+        target = (
+            self.reference_price * (1 - self.margin_pct / 100)
+            if self.margin_pct is not None
+            else self.reference_price - self.margin_fixed
+        )
+        return avg < target
+
+    def _observe(self, ctx: StrategyContext) -> None:
+        if self._first_observed_at is None:
+            self._first_observed_at = ctx.now
+        self._history.append((ctx.now, ctx.price))
+
+        cutoff = ctx.now - timedelta(hours=self.hours)
+        self._history = [(t, price) for (t, price) in self._history if t >= cutoff]

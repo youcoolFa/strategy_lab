@@ -422,7 +422,8 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 8 種下單方式 + `order_type` 真正接進 runner | `PaperBroker`/`LiveBroker` 新增 `limit_sell`/`market_buy`/`market_sell`/`limit_flat_buy`/`limit_flat_sell`/`market_flat_buy`/`market_flat_sell`(對稱於既有的 `place_limit_buy`/`place_limit_sell`);`interfaces.Broker` Protocol 擴充到 14 個方法;`reduce_only` 單不會讓部位穿越 0(`PaperBroker._fill()`/`LiveBroker` dry-run 都要處理);`StrategyRunner` 新增 `order_type` 欄位,`_try_enter()`/`_try_exit()` 依此選限價還是市價——這是真正修好「`order_type` 設定完全沒作用」缺口的地方 | 新增 §6.8 | 已完成(開空倉的 4 種方法目前沒有 entry/exit plugin 會呼叫,刻意先做成獨立可用的方法,不強行接進長倉專用狀態機) |
 | 下單前用真實精度限制修正 qty/price | 新增 `live/instrument_limits.py`(`fix_qty()`/`fix_price()`,永遠捨去 qty、依 side 決定 price 修正方向);新增 `live/fetch_instrument_limits.py`(下載腳本,公開端點);`BybitClient` 新增 `get_instrument_info()`;新增並 commit `instrument_limits.json`(公開市場資料,目前只有 BTCUSDT);`LiveBroker` 8 種下單方式送出前都先修正(dry-run 也修正,保證預覽準確),找不到資料就跳過、不會擋下下單;`LiveBroker` dry-run 的市價單額外接上 `get_last_price()` 查真實市價當模擬成交價(唯讀,不算真的下單) | 新增 §6.9 | 已完成(`PaperBroker`/沙盒刻意不套用這一層) |
 | `account_percentage` 補上真實帳戶權益查詢 | `BybitClient` 新增 `get_account_equity()`(包裝 `get_wallet_balance`,需要驗證的端點);`live/main.py` 的 `_resolve_order_qty()` 不設 `account_value` 就自動查真實權益,有明確設就用那個值覆蓋 | 新增 §6.10 | 已完成,並用真實 mainnet 帳戶端到端驗證過(算出的 qty 太小被 §6.9 的 `fix_qty()` 正確擋下) |
-| 空倉支援(`direction`) | `rules/conditions.py` 新增 `PriceAboveReference`/`PriceAtOrBelowReference`;新增 plugin `ShortDeviationFromReferenceEntry`/`ShortReturnToReferenceExit`;`StrategyRunner` 新增 `direction`,`_try_enter()`/`_try_exit()` 依此分派開多/開空/平多/平空;`dsl/schema.py`/`dsl/loader.py` 新增 `direction` 欄位(屬於策略定義,不是執行參數);`Trade` 新增 `direction`/`pnl`(long/short 公式互為鏡像);新增示範 `strategies/weekend_short_breakout.yaml`。**過程中發現並修正真實 bug**:`_cleanup()` 原本 `remaining > 0` 才平倉,空倉的 `position_qty()` 是負數,永遠不會被強制平倉——改用 `market_flat_buy`/`market_flat_sell` 依正負號分派,不再呼叫 `market_close()` | 新增 §6.11 | 已完成(做空的 kill switch 偵測——偵測向下突破——未做,對應鏡像的 `SustainedPriceBreakdown` 留待之後) |
+| 空倉支援(`direction`) | `rules/conditions.py` 新增 `PriceAboveReference`/`PriceAtOrBelowReference`;新增 plugin `ShortDeviationFromReferenceEntry`/`ShortReturnToReferenceExit`;`StrategyRunner` 新增 `direction`,`_try_enter()`/`_try_exit()` 依此分派開多/開空/平多/平空;`dsl/schema.py`/`dsl/loader.py` 新增 `direction` 欄位(屬於策略定義,不是執行參數);`Trade` 新增 `direction`/`pnl`(long/short 公式互為鏡像);新增示範 `strategies/weekend_short_breakout.yaml`。**過程中發現並修正真實 bug**:`_cleanup()` 原本 `remaining > 0` 才平倉,空倉的 `position_qty()` 是負數,永遠不會被強制平倉——改用 `market_flat_buy`/`market_flat_sell` 依正負號分派,不再呼叫 `market_close()` | 新增 §6.11 | 已完成(做空的 kill switch 偵測——偵測向下突破——未做,留待 §6.12) |
+| 做空用的 kill switch | `rules/conditions.py` 新增 `SustainedPriceBreakdown`(鏡像 `SustainedPriceBreakout`,偵測連續向下突破);新增 plugin `plugins/kill_switch/sustained_breakdown.py` 的 `SustainedBreakdownKillSwitch`,註冊為 `("kill_switch", "sustained_breakdown")`——不用碰 `dsl/loader.py`/`schema.py`,原本就是透過 registry 動態查找;新增示範 `strategies/weekend_short_breakout_guard.yaml`(鏡像 `mean_reversion_breakout_guard.yaml`) | 新增 §6.12 | 已完成,補上 §6.11 留下的缺口 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -957,8 +958,38 @@ plugin 才有意義(`direction: long` 配 `ShortDeviationFromReferenceEntry`
 確認整條路徑(YAML → schema → loader → runner → 8 種下單方式 →
 `Trade.pnl`)接得通。
 
-**刻意沒做的部分**:`SustainedBreakoutKillSwitch` 目前只偵測「連續站
-上某價位」的向上突破,語意上是替多頭設計的——空倉情境下要偵測的是
-反方向的突破,需要一個鏡像版本(`SustainedPriceBreakdown`?),這次
-沒有做,對應的整合測試改用 `request_stop()` 驗證 `_cleanup()` 本身的
-正確性,不依賴一個語意不吻合的 kill switch 場景。
+**§6.11 當時刻意沒做的部分**:`SustainedBreakoutKillSwitch` 只偵測「連續
+站上某價位」的向上突破,語意上是替多頭設計的——空倉情境下要偵測的是
+反方向的突破,需要一個鏡像版本,當時沒有做,對應的整合測試改用
+`request_stop()` 驗證 `_cleanup()` 本身的正確性,不依賴一個語意不吻合
+的 kill switch 場景。**這個缺口在 §6.12 補上了。**
+
+### 6.12 做空用的 kill switch:`SustainedPriceBreakdown` / `SustainedBreakdownKillSwitch`
+
+補 §6.11 留下的缺口。`rules/conditions.py` 新增 `SustainedPriceBreakdown`,
+完全鏡像 `SustainedPriceBreakout`——多單版本偵測「連續站上 threshold_price
++ 均價超過 reference_price 上方 margin」,空單版本反過來偵測「連續跌破
+threshold_price + 均價低於 reference_price 下方 margin」。滾動視窗、
+`hours`/`minutes`/`days` 互斥、`margin_pct`/`margin_fixed` 互斥這些機制
+完全照抄,只有兩處比較運算子方向相反(`price > threshold` → `price <
+threshold`,`avg > target` → `avg < target`,`target` 的 margin 計算也
+從加變減)。
+
+刻意不讓兩個 Condition 共用一個帶方向參數的實作:這個檔案裡
+`PriceAboveReference`/`PriceBelowReference` 這對鏡像本來就是分開的獨立
+類別,不是用一個 `direction` 旗標切換,保持風格一致,也避免一個
+"is_short: bool" 參數讓人要先讀懂旗標語意才看得懂邏輯。
+
+`plugins/kill_switch/sustained_breakdown.py` 新增 `SustainedBreakdownKillSwitch`,
+`__post_init__` 組出 `SustainedPriceBreakdown`,結構跟
+`SustainedBreakoutKillSwitch` 逐行對應。註冊為
+`("kill_switch", "sustained_breakdown")`——因為 `dsl/loader.py` 本來就是
+透過 `registry.get("kill_switch", strategy_dict["kill_switch"]["type"])`
+動態查找,新增這個 plugin 不需要碰 loader/schema 任何一行,YAML 裡
+`kill_switch.type: sustained_breakdown` 就能直接用。
+
+新增示範 `strategies/weekend_short_breakout_guard.yaml`
+(`weekend_short_breakout.yaml` 加一層 kill_switch,鏡像
+`mean_reversion_breakout_guard.yaml` 對 `weekend_mean_reversion.yaml`
+做的事),已用 `run_from_yaml.py` 實際跑過,載入/執行/`_cleanup()` 都
+正常,`position left over after cleanup` 為 0。

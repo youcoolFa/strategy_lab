@@ -1,0 +1,42 @@
+# weekend_short_breakout.yaml 再加一層 kill_switch,鏡像
+# mean_reversion_breakout_guard.yaml 的做法:如果價格連續跌破(不是短暫
+# 的均值回歸,而是趨勢真的變了),就終止整個策略迴圈、強制平倉,不再
+# 繼續嘗試「賣漲」。用 sustained_breakdown(SustainedPriceBreakdown)
+# 而不是 sustained_breakout——空單的「危險方向」是向下突破,跟多單相反。
+#
+# 注意:kill_switch 的 threshold_price/reference_price 是「絕對價格」,
+# 下面這兩個數字是示範用的參考值,實際上線前要照當下真實市場價位重新
+# 校準,不能直接沿用。
+#
+# 下單數量(qty)不在這裡設定——那是「怎麼下單」的資料,由
+# demo/sandbox_order.yaml(沙盒)或 live_execution_config.yaml(真實執行)
+# 的 position_sizing 決定,見 dsl/order_config.py。
+name: weekend_short_breakout_guard
+symbol: BTC/USDT
+direction: short
+
+entry:
+  type: deviation_from_reference_short
+  params:
+    deviation_pct: 0.75
+
+exit:
+  type: return_to_reference_short
+  params: {}
+
+time_window:
+  type: weekly_window
+  params:
+    start_weekday: 5
+    start_time: "04:00"
+    end_weekday: 0
+    end_time: "06:00"
+    cleanup_buffer_minutes: 5
+
+kill_switch:
+  type: sustained_breakdown
+  params:
+    threshold_price: 58000.0
+    reference_price: 60000.0
+    hours: 24.0
+    margin_pct: 3.0

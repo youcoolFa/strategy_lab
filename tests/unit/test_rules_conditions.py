@@ -13,6 +13,7 @@ from strategy_lab.rules.conditions import (
     PriceAtOrBelowReference,
     PriceBelowReference,
     PriceChangeFromEntry,
+    SustainedPriceBreakdown,
     SustainedPriceBreakout,
     simple_moving_average,
 )
@@ -224,4 +225,93 @@ class TestSustainedPriceBreakoutTimeUnits:
         with pytest.raises(ValueError):
             SustainedPriceBreakout(
                 threshold_price=100.0, reference_price=90.0, hours=6.0, days=1.0, margin_pct=5.0
+            )
+
+
+class TestSustainedPriceBreakdown:
+    """SustainedPriceBreakout 的鏡像:偵測「連續站在某價位之下」的向下
+    突破,給做空策略用的 kill switch——多單用 SustainedPriceBreakout
+    (連續突破上方 + 均價超過 reference 上方 margin),空單反過來
+    (連續跌破下方 + 均價低於 reference 下方 margin)。"""
+
+    def _tick(self, hours_offset: float, price: float) -> StrategyContext:
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return make_ctx(now=base + timedelta(hours=hours_offset), price=price)
+
+    def test_requires_both_margin_pct_and_margin_fixed_to_be_exclusive(self):
+        with pytest.raises(ValueError):
+            SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0)
+        with pytest.raises(ValueError):
+            SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0, margin_pct=5.0, margin_fixed=1.0)
+
+    def test_false_before_observation_window_is_covered(self):
+        condition = SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0, hours=6.0, margin_pct=5.0)
+        assert condition.evaluate(self._tick(0, 87.0)) is False
+        assert condition.evaluate(self._tick(2, 85.0)) is False
+        assert condition.evaluate(self._tick(5, 84.0)) is False  # 還沒滿 6 小時
+
+    def test_true_once_window_covered_all_below_threshold_and_average_below_margin(self):
+        condition = SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0, hours=6.0, margin_pct=5.0)
+        condition.evaluate(self._tick(0, 87.0))
+        condition.evaluate(self._tick(3, 85.0))
+        assert condition.evaluate(self._tick(6, 84.0)) is True  # 剛好滿 6 小時
+
+    def test_false_when_any_observation_in_window_is_at_or_above_threshold(self):
+        condition = SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0, hours=6.0, margin_pct=5.0)
+        condition.evaluate(self._tick(0, 87.0))
+        condition.evaluate(self._tick(3, 91.0))  # 這一筆沒跌破門檻
+        assert condition.evaluate(self._tick(6, 84.0)) is False
+
+    def test_false_when_average_above_margin(self):
+        condition = SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0, hours=6.0, margin_pct=20.0)
+        condition.evaluate(self._tick(0, 87.0))
+        condition.evaluate(self._tick(3, 85.0))
+        # 平均約 85.33,目標 100*0.8=80,平均沒有低於目標
+        assert condition.evaluate(self._tick(6, 84.0)) is False
+
+    def test_margin_fixed_mode(self):
+        condition = SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0, hours=6.0, margin_fixed=15.0)
+        condition.evaluate(self._tick(0, 87.0))
+        condition.evaluate(self._tick(3, 85.0))
+        # 目標 100-15=85,平均約 85.33 沒低於目標
+        assert condition.evaluate(self._tick(6, 84.0)) is False
+
+    def test_old_observations_outside_the_window_no_longer_count(self):
+        """滾動視窗:很久以前一筆高於門檻的觀察,一旦滑出視窗之外,不該
+        繼續拖累後面的判斷。"""
+        condition = SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0, hours=6.0, margin_pct=5.0)
+        condition.evaluate(self._tick(0, 150.0))  # 很高,但之後會滑出視窗
+        condition.evaluate(self._tick(10, 87.0))
+        condition.evaluate(self._tick(13, 85.0))
+        assert condition.evaluate(self._tick(16, 84.0)) is True  # 視窗是 [10,16],t=0 已經滑出去了
+
+
+class TestSustainedPriceBreakdownTimeUnits:
+    """跟 TestSustainedPriceBreakoutTimeUnits 對稱:hours/minutes/days
+    互斥,換算後效果要跟直接寫等值 hours 完全一樣。"""
+
+    def _tick(self, hours_offset: float, price: float) -> StrategyContext:
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return make_ctx(now=base + timedelta(hours=hours_offset), price=price)
+
+    def test_days_param_converts_to_equivalent_hours_window(self):
+        condition = SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0, days=0.25, margin_pct=5.0)
+        condition.evaluate(self._tick(0, 87.0))
+        assert condition.evaluate(self._tick(5, 84.0)) is False  # 0.25 天 = 6 小時,還沒滿
+        assert condition.evaluate(self._tick(6, 84.0)) is True
+
+    def test_minutes_param_converts_to_equivalent_hours_window(self):
+        condition = SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0, minutes=360.0, margin_pct=5.0)
+        condition.evaluate(self._tick(0, 87.0))
+        assert condition.evaluate(self._tick(5, 84.0)) is False  # 360 分鐘 = 6 小時,還沒滿
+        assert condition.evaluate(self._tick(6, 84.0)) is True
+
+    def test_default_with_no_unit_given_is_still_seventy_two_hours(self):
+        condition = SustainedPriceBreakdown(threshold_price=90.0, reference_price=100.0, margin_pct=5.0)
+        assert condition.window_duration == timedelta(hours=72.0)
+
+    def test_more_than_one_unit_given_raises(self):
+        with pytest.raises(ValueError):
+            SustainedPriceBreakdown(
+                threshold_price=90.0, reference_price=100.0, hours=6.0, days=1.0, margin_pct=5.0
             )
