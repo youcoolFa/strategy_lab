@@ -73,6 +73,76 @@ class TestPlaceLimitSell:
         assert client.calls == [("place_limit_order", "BTCUSDT", "Sell", 0.01, 61000.0, True)]
 
 
+class TestEightOrderMethodsTranslateCorrectly:
+    """8 種下單方式(方向 buy/sell × 單種類 limit/market × 開倉/平倉),
+    對稱於 broker/paper_broker.py——見 docs/ARCHITECTURE.md §6.8。
+    place_limit_buy/place_limit_sell 已經在上面兩個 class 測過,這裡補
+    剩下 6 個 + limit_flat_buy 別名。"""
+
+    def test_limit_sell_opens_short_not_reduce_only(self):
+        client = FakeBybitClient()
+        client.place_limit_order_result = OrderResult(order_id="o", status="open", price=60000.0)
+        broker = make_broker(client)
+
+        broker.limit_sell(price=60000.0, qty=0.01)
+
+        assert client.calls == [("place_limit_order", "BTCUSDT", "Sell", 0.01, 60000.0, False)]
+
+    def test_market_buy_opens_long_not_reduce_only(self):
+        client = FakeBybitClient()
+        client.place_market_order_result = OrderResult(order_id="o", status="open")
+        broker = make_broker(client)
+
+        broker.market_buy(qty=0.01)
+
+        assert client.calls == [("place_market_order", "BTCUSDT", "Buy", 0.01, False)]
+
+    def test_market_sell_opens_short_not_reduce_only(self):
+        client = FakeBybitClient()
+        client.place_market_order_result = OrderResult(order_id="o", status="open")
+        broker = make_broker(client)
+
+        broker.market_sell(qty=0.01)
+
+        assert client.calls == [("place_market_order", "BTCUSDT", "Sell", 0.01, False)]
+
+    def test_limit_flat_buy_is_equivalent_to_place_limit_sell(self):
+        client = FakeBybitClient()
+        client.place_limit_order_result = OrderResult(order_id="o", status="open", price=61000.0)
+        broker = make_broker(client)
+
+        broker.limit_flat_buy(price=61000.0, qty=0.01)
+
+        assert client.calls == [("place_limit_order", "BTCUSDT", "Sell", 0.01, 61000.0, True)]
+
+    def test_limit_flat_sell_closes_short_reduce_only(self):
+        client = FakeBybitClient()
+        client.place_limit_order_result = OrderResult(order_id="o", status="open", price=59000.0)
+        broker = make_broker(client)
+
+        broker.limit_flat_sell(price=59000.0, qty=0.01)
+
+        assert client.calls == [("place_limit_order", "BTCUSDT", "Buy", 0.01, 59000.0, True)]
+
+    def test_market_flat_buy_closes_long_reduce_only(self):
+        client = FakeBybitClient()
+        client.place_market_order_result = OrderResult(order_id="o", status="open")
+        broker = make_broker(client)
+
+        broker.market_flat_buy(qty=0.01)
+
+        assert client.calls == [("place_market_order", "BTCUSDT", "Sell", 0.01, True)]
+
+    def test_market_flat_sell_closes_short_reduce_only(self):
+        client = FakeBybitClient()
+        client.place_market_order_result = OrderResult(order_id="o", status="open")
+        broker = make_broker(client)
+
+        broker.market_flat_sell(qty=0.01)
+
+        assert client.calls == [("place_market_order", "BTCUSDT", "Buy", 0.01, True)]
+
+
 class TestFetchOrder:
     def test_returns_order_like_result(self):
         client = FakeBybitClient()
@@ -244,6 +314,50 @@ class TestDryRunPositionQty:
         broker.position_qty()
 
         assert client.calls == []
+
+
+class TestDryRunEightOrderMethods:
+    def test_market_buy_does_not_call_real_client_and_fills_on_first_poll(self):
+        client = FakeBybitClient()
+        broker = make_broker(client, dry_run=True)
+
+        placed = broker.market_buy(qty=0.01)
+        assert client.calls == []
+        assert placed.status == "open"  # 跟限價單一樣,第一次 fetch_order() 才變 closed
+
+        fetched = broker.fetch_order(placed.id)
+        assert fetched.status == "closed"
+        assert broker.position_qty() == 0.01
+
+    def test_limit_sell_opens_short_position(self):
+        broker = make_broker(dry_run=True)
+        placed = broker.limit_sell(price=60000.0, qty=0.01)
+        broker.fetch_order(placed.id)
+        assert broker.position_qty() == -0.01
+
+    def test_market_flat_sell_closes_short_position(self):
+        broker = make_broker(dry_run=True)
+        opened = broker.limit_sell(price=60000.0, qty=0.01)
+        broker.fetch_order(opened.id)
+        assert broker.position_qty() == -0.01
+
+        closed = broker.market_flat_sell(qty=0.01)
+        broker.fetch_order(closed.id)
+        assert broker.position_qty() == 0.0
+
+    def test_flat_order_larger_than_position_clamps_at_zero_not_flipped(self):
+        """reduce_only 語意:平倉單不該讓部位穿越 0——跟
+        broker/paper_broker.py 的 TestFlatOrdersCannotFlipPositionSide
+        是同一個規則,LiveBroker 的 dry-run 模擬要一致。"""
+        broker = make_broker(dry_run=True)
+        opened = broker.place_limit_buy(price=60000.0, qty=1.0)
+        broker.fetch_order(opened.id)
+        assert broker.position_qty() == 1.0
+
+        closed = broker.market_flat_buy(qty=5.0)  # 部位只有 1.0,卻想平 5.0
+        broker.fetch_order(closed.id)
+
+        assert broker.position_qty() == 0.0  # 不會變成 -4.0
 
 
 class TestDryRunCancelOrder:

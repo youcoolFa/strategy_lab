@@ -29,7 +29,23 @@ closed(不是下單當下就立即成交)——呼應 bot.py 的假設:「dry-ru
 在 bot.py 是在輪詢迴圈裡兌現的,這裡搬到 `fetch_order()` 兌現,行為
 等價:runner.py 下單後一定會在下一次 tick 呼叫 `fetch_order()` 才會
 知道有沒有成交,所以「下單當下」跟「第一次查詢時」對 runner.py 來說
-沒有可觀察的差異。
+沒有可觀察的差異。市價單 dry-run 也沿用這個模式(不特地「立刻成交」)
+——dry-run 本來就不知道真實價格,兩種單種類在這裡沒有可觀察的差異。
+
+8 種下單方式(方向 buy/sell × 單種類 limit/market × 開倉/平倉),對稱於
+broker/paper_broker.py 的 PaperBroker——見 docs/ARCHITECTURE.md §6.8:
+    place_limit_buy   開多倉,限價,reduce_only=False
+    limit_sell        開空倉,限價,reduce_only=False
+    market_buy        開多倉,市價,reduce_only=False
+    market_sell       開空倉,市價,reduce_only=False
+    place_limit_sell  平多倉,限價,reduce_only=True(= limit_flat_buy)
+    limit_flat_sell   平空倉,限價,reduce_only=True
+    market_flat_buy   平多倉,市價,reduce_only=True
+    market_flat_sell  平空倉,市價,reduce_only=True
+
+`reduce_only=True` 的 dry-run 單一樣不會讓模擬部位「穿越」0——跟
+PaperBroker._fill() 同一條規則,不然沙盒/dry-run 測出來的部位軌跡會
+跟真實環境對不上。
 """
 
 from __future__ import annotations
@@ -51,6 +67,7 @@ class LiveOrder:
     side: Optional[str] = None
     qty: float = 0.0
     filled_qty: float = 0.0
+    reduce_only: bool = False
 
 
 def _to_live_order(result: OrderResult) -> LiveOrder:
@@ -67,18 +84,62 @@ class LiveBroker:
     _dry_run_position_qty: float = field(default=0.0, init=False)
     _dry_run_id_counter: itertools.count = field(default_factory=lambda: itertools.count(1), init=False)
 
+    # --- 開倉 ---
     def place_limit_buy(self, price: float, qty: float) -> LiveOrder:
         if self.dry_run:
-            return self._dry_run_place("Buy", price, qty)
+            return self._dry_run_place("Buy", price, qty, reduce_only=False)
         result = self.client.place_limit_order(self.symbol, "Buy", qty, price, reduce_only=False)
         return _to_live_order(result)
 
+    def limit_sell(self, price: float, qty: float) -> LiveOrder:
+        if self.dry_run:
+            return self._dry_run_place("Sell", price, qty, reduce_only=False)
+        result = self.client.place_limit_order(self.symbol, "Sell", qty, price, reduce_only=False)
+        return _to_live_order(result)
+
+    def market_buy(self, qty: float) -> LiveOrder:
+        if self.dry_run:
+            return self._dry_run_place("Buy", 0.0, qty, reduce_only=False)
+        result = self.client.place_market_order(self.symbol, "Buy", qty, reduce_only=False)
+        return _to_live_order(result)
+
+    def market_sell(self, qty: float) -> LiveOrder:
+        if self.dry_run:
+            return self._dry_run_place("Sell", 0.0, qty, reduce_only=False)
+        result = self.client.place_market_order(self.symbol, "Sell", qty, reduce_only=False)
+        return _to_live_order(result)
+
+    # --- 平倉 ---
     def place_limit_sell(self, price: float, qty: float) -> LiveOrder:
         # exit 永遠是平倉,reduce_only 寫死 True——不能因為呼叫端忘記
         # 傳而意外開出新倉。
         if self.dry_run:
-            return self._dry_run_place("Sell", price, qty)
+            return self._dry_run_place("Sell", price, qty, reduce_only=True)
         result = self.client.place_limit_order(self.symbol, "Sell", qty, price, reduce_only=True)
+        return _to_live_order(result)
+
+    def limit_flat_buy(self, price: float, qty: float) -> LiveOrder:
+        """跟 place_limit_sell 是同一件事——見 PaperBroker 同名方法的
+        說明,保留 place_limit_sell 是因為 runner.py/既有測試已經在用
+        這個名字。"""
+        return self.place_limit_sell(price, qty)
+
+    def limit_flat_sell(self, price: float, qty: float) -> LiveOrder:
+        if self.dry_run:
+            return self._dry_run_place("Buy", price, qty, reduce_only=True)
+        result = self.client.place_limit_order(self.symbol, "Buy", qty, price, reduce_only=True)
+        return _to_live_order(result)
+
+    def market_flat_buy(self, qty: float) -> LiveOrder:
+        if self.dry_run:
+            return self._dry_run_place("Sell", 0.0, qty, reduce_only=True)
+        result = self.client.place_market_order(self.symbol, "Sell", qty, reduce_only=True)
+        return _to_live_order(result)
+
+    def market_flat_sell(self, qty: float) -> LiveOrder:
+        if self.dry_run:
+            return self._dry_run_place("Buy", 0.0, qty, reduce_only=True)
+        result = self.client.place_market_order(self.symbol, "Buy", qty, reduce_only=True)
         return _to_live_order(result)
 
     def fetch_order(self, order_id: str) -> LiveOrder:
@@ -115,11 +176,11 @@ class LiveBroker:
     # ------------------------------------------------------------------
     # dry-run 內部模擬
     # ------------------------------------------------------------------
-    def _dry_run_place(self, side: str, price: float, qty: float) -> LiveOrder:
+    def _dry_run_place(self, side: str, price: float, qty: float, reduce_only: bool) -> LiveOrder:
         order_id = f"dry-run-{next(self._dry_run_id_counter)}"
-        order = LiveOrder(id=order_id, status="open", price=price, side=side, qty=qty)
+        order = LiveOrder(id=order_id, status="open", price=price, side=side, qty=qty, reduce_only=reduce_only)
         self._dry_run_orders[order_id] = order
-        logger.info(f"[dry-run] 模擬下 {side} 單:{self.symbol} @ {price:.2f} qty={qty:.4f}")
+        logger.info(f"[dry-run] 模擬下 {side} 單:{self.symbol} @ {price:.2f} qty={qty:.4f} reduce_only={reduce_only}")
         return order
 
     def _dry_run_fill_if_pending(self, order_id: str) -> LiveOrder:
@@ -127,5 +188,13 @@ class LiveBroker:
         if order.status == "open":
             order.status = "closed"
             order.filled_qty = order.qty
-            self._dry_run_position_qty += order.qty if order.side == "Buy" else -order.qty
+            delta = order.qty if order.side == "Buy" else -order.qty
+            new_qty = self._dry_run_position_qty + delta
+            if order.reduce_only:
+                # 平倉單不該讓部位穿越 0——跟 PaperBroker._fill() 同一條規則。
+                if self._dry_run_position_qty > 0:
+                    new_qty = max(0.0, new_qty)
+                elif self._dry_run_position_qty < 0:
+                    new_qty = min(0.0, new_qty)
+            self._dry_run_position_qty = new_qty
         return order

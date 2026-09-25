@@ -183,3 +183,53 @@ class TestRequestStopInterruptsMidPosition:
         runner.tick(now, 1000.0)
 
         assert runner.state == RunState.STOPPED
+
+
+class TestOrderTypeSwitchesBetweenLimitAndMarket:
+    """order_type="market" 是解決 docs/ARCHITECTURE.md §6.7 那個
+    「order_type 設定完全沒作用」缺口的最後一步——這裡驗證真的接進
+    _try_enter()/_try_exit() 了,不是只停在 ExecutionConfig 的資料結構。"""
+
+    def test_default_order_type_is_limit(self):
+        runner = StrategyRunner(
+            entry=DeviationFromReferenceEntry(deviation_pct=1.0),
+            exit=ReturnToReferenceExit(),
+            time_window=WeeklyWindow(end_weekday=0, end_time="06:00", cleanup_buffer_minutes=5),
+            order_qty=1.0,
+        )
+        assert runner.order_type == "limit"
+
+    def test_market_order_type_fills_entry_and_exit_immediately_no_price_crossing_needed(self):
+        """市價單不用等 tick() 價格穿越限價——這裡故意讓價格一步跳過
+        原本的進場目標,驗證下的真的是市價單而不是「剛好同價成交」的
+        限價單。"""
+        runner = StrategyRunner(
+            entry=DeviationFromReferenceEntry(deviation_pct=1.0),
+            exit=ReturnToReferenceExit(),
+            time_window=WeeklyWindow(end_weekday=0, end_time="06:00", cleanup_buffer_minutes=5),
+            order_qty=1.0,
+            order_type="market",
+        )
+        now = datetime(2026, 8, 1, 4, 0, tzinfo=timezone.utc)
+        runner.start(now, price=1000.0)  # origin_price=1000,進場目標=990
+
+        runner.tick(now, 1000.0)
+        assert runner.state == RunState.IDLE
+
+        # 跌破 990(觸發進場條件),但價格是 700,遠低於原本限價單會設的
+        # 990——市價單應該直接用 700 成交,不是掛在 990 等。
+        runner.tick(now + timedelta(minutes=5), 700.0)
+        assert runner.state == RunState.ENTRY_PENDING
+
+        runner.tick(now + timedelta(minutes=10), 700.0)  # 市價單本來就已經成交,這次只是查到
+        assert runner.state == RunState.IN_POSITION
+        assert runner.active_entry_price == 700.0  # 不是限價單會用的 990
+
+        runner.tick(now + timedelta(minutes=15), 1000.0)  # 回到 origin -> 市價出場
+        assert runner.state == RunState.EXIT_PENDING
+
+        runner.tick(now + timedelta(minutes=20), 1000.0)
+        assert runner.state == RunState.IDLE
+        assert len(runner.trades) == 1
+        assert runner.trades[0].entry_price == 700.0
+        assert runner.trades[0].exit_price == 1000.0

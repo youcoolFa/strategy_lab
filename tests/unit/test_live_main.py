@@ -39,6 +39,16 @@ class TestBuildRunnerAndSymbol:
         assert runner.broker.symbol == "BTCUSDT"
         assert runner.broker.dry_run is True
         assert runner.order_qty == 1.0  # 預設 position_sizing 是 fixed_qty, value=1.0
+        assert runner.order_type == "limit"  # 預設值,對齊 ExecutionConfig.order_type
+
+    def test_order_type_market_is_threaded_through_to_runner(self, monkeypatch):
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", order_type="market")
+
+        runner, _ = build_runner_and_symbol(config)
+
+        assert runner.order_type == "market"
 
     def test_symbol_override_takes_precedence_over_yaml(self, monkeypatch):
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")

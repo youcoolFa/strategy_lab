@@ -62,6 +62,7 @@ class StrategyRunner:
     order_qty: float
     broker: Broker = field(default_factory=PaperBroker)
     kill_switch: Optional[KillSwitch] = None
+    order_type: str = "limit"  # "limit" 或 "market"——見 dsl/order_config.py
 
     state: RunState = field(default=RunState.IDLE, init=False)
     window_end: Optional[datetime] = field(default=None, init=False)
@@ -154,11 +155,15 @@ class StrategyRunner:
         )
 
     def _try_enter(self, now: datetime, price: float) -> None:
-        """檢查是否滿足進場條件，若滿足則下進場限價單。"""
+        """檢查是否滿足進場條件，若滿足則下進場單(限價或市價,依
+        order_type)。"""
 
         ctx = self._ctx(now, price)
         if self.entry.rule.evaluate(ctx):
-            self.entry_order = self.broker.place_limit_buy(price=self.entry.entry_price(ctx), qty=self.order_qty)
+            if self.order_type == "market":
+                self.entry_order = self.broker.market_buy(qty=self.order_qty)
+            else:
+                self.entry_order = self.broker.place_limit_buy(price=self.entry.entry_price(ctx), qty=self.order_qty)
             self.state = RunState.ENTRY_PENDING
 
     def _check_entry_fill(self, now: datetime) -> None:
@@ -174,11 +179,15 @@ class StrategyRunner:
             self.state = RunState.IDLE
 
     def _try_exit(self, now: datetime, price: float) -> None:
-        """檢查是否滿足進場條件，若滿足則下進場限價單。"""
+        """檢查是否滿足出場條件，若滿足則下出場單(限價或市價,依
+        order_type)。"""
         ctx = self._ctx(now, price)
         if self.exit.rule.evaluate(ctx):
             qty = self.broker.position_qty()
-            self.exit_order = self.broker.place_limit_sell(price=self.exit.exit_price(ctx), qty=qty)
+            if self.order_type == "market":
+                self.exit_order = self.broker.market_flat_buy(qty=qty)
+            else:
+                self.exit_order = self.broker.place_limit_sell(price=self.exit.exit_price(ctx), qty=qty)
             self.state = RunState.EXIT_PENDING
 
     def _check_exit_fill(self) -> None:

@@ -419,6 +419,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 互動式選策略 | 新增 `dsl/discovery.py`(`list_strategy_files()`/`prompt_strategy_choice()`,`input_fn`/`print_fn` 依賴注入);`demo/run_from_yaml.py` 的 `--strategy` 改為選填,不給就跳出互動選單;新增獨立小工具 `live/select_strategy.py`,選完把 `strategy_path` 寫回 `live_execution_config.yaml`(不動其他欄位)——刻意不放進 `live/main.py`,因為 `main()` 必須能無人值守啟動,`input()` 會讓它卡死在沒有人回應的輸入 | §6 新增 §6.6 | 已完成 |
 | 執行參數改用 YAML | `live/config.py`/`live/select_strategy.py` 從 JSON 改吃/寫 YAML;`live_execution_config.example.json` → `.example.yaml`,可以加註解 | §1 附近的 §6.5 補充說明 | 已完成 |
 | `order_qty` 移出策略層,改用 `position_sizing` | 新增 `dsl/order_config.py`(`OrderConfig`/`PositionSizing`/`compute_qty()`);`strategies/*.yaml` 移除 `order_qty` 欄位(`dsl/schema.py`/`dsl/loader.py` 同步移除,`extra="forbid"` 會強制兩邊一起改,忘改會直接報錯);新增 `demo/sandbox_order.yaml`(沙盒假資料,`PaperBroker` 本身不改);`live_execution_config.yaml` 新增 `order_type`/`position_sizing`/`account_value`;`account_percentage` 模式在 live 端因為還沒有查真實餘額的方法,沒給 `account_value` 會直接報錯 | 新增 §6.7 | 已完成(`account_percentage` 在 live 端待補真實餘額查詢) |
+| 8 種下單方式 + `order_type` 真正接進 runner | `PaperBroker`/`LiveBroker` 新增 `limit_sell`/`market_buy`/`market_sell`/`limit_flat_buy`/`limit_flat_sell`/`market_flat_buy`/`market_flat_sell`(對稱於既有的 `place_limit_buy`/`place_limit_sell`);`interfaces.Broker` Protocol 擴充到 14 個方法;`reduce_only` 單不會讓部位穿越 0(`PaperBroker._fill()`/`LiveBroker` dry-run 都要處理);`StrategyRunner` 新增 `order_type` 欄位,`_try_enter()`/`_try_exit()` 依此選限價還是市價——這是真正修好「`order_type` 設定完全沒作用」缺口的地方 | 新增 §6.8 | 已完成(開空倉的 4 種方法目前沒有 entry/exit plugin 會呼叫,刻意先做成獨立可用的方法,不強行接進長倉專用狀態機) |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -748,3 +749,62 @@ current_price)` 換算成真正的 qty。三種 `position_sizing.mode`:
 **`order_type`(限價/市價)獨立於 `position_sizing`**:`kill_switch`/
 收攤平倉的 `market_close()` 永遠是市價單,不受這個欄位影響——強制平倉
 要的是「保證立刻成交」,不是「照使用者偏好」,混進同一個開關會很危險。
+
+**這一節寫完當下,`order_type` 其實還沒有真的接進 `StrategyRunner`**
+——只是被讀進 `ExecutionConfig`/`OrderConfig` 這個資料結構,`_try_enter()`/
+`_try_exit()` 還是寫死呼叫限價單方法,設 `order_type: market` 會被完全
+無視。這個缺口在 §6.8 補上。
+
+### 6.8 8 種下單方式,以及把 `order_type`真正接進 `StrategyRunner`
+
+**動機**:§6.7 完成後才發現 `order_type` 是個「看起來能設定、實際沒有
+接線」的欄位——`LiveBroker.place_limit_buy`/`place_limit_sell` 寫死永遠
+呼叫 `client.place_limit_order()`,從不呼叫 `place_market_order()`。
+使用者接著提出更完整的需求:不是只修這一個 bug,而是把「方向
+(buy/sell)× 單種類(limit/market)× 開倉/平倉」這三個維度的組合,
+全部做成明確命名的方法,一次把底打完,之後真的要做空(見 §5 工作量
+分佈表「做空及多倉位」)才不用回頭重挖 broker 這一層。
+
+**8 種下單方式**(`broker/paper_broker.py` 的 `PaperBroker` 跟
+`live/broker.py` 的 `LiveBroker` 都要有,對稱):
+
+| 方法 | 方向 | 單種類 | reduce_only | 用途 |
+|---|---|---|---|---|
+| `place_limit_buy` | buy | limit | False | 開多倉 |
+| `limit_sell` | sell | limit | False | 開空倉 |
+| `market_buy` | buy | market | False | 開多倉 |
+| `market_sell` | sell | market | False | 開空倉 |
+| `place_limit_sell`(= `limit_flat_buy`) | sell | limit | True | 平多倉 |
+| `limit_flat_sell` | buy | limit | True | 平空倉 |
+| `market_flat_buy` | sell | market | True | 平多倉 |
+| `market_flat_sell` | buy | market | True | 平空倉 |
+
+`place_limit_buy`/`place_limit_sell` 是既有名字(runner.py 跟一堆既有
+測試已經在用),保留不動;`limit_flat_buy` 是新命名規則下的別名,兩個
+呼叫的是同一段邏輯。目前系統仍是純多頭(只有 entry/exit 會被
+`StrategyRunner` 實際呼叫,対應 `place_limit_buy`/`place_limit_sell`/
+`market_buy`/`market_flat_buy` 這 4 種),開空倉的 4 種
+(`limit_sell`/`market_sell`/`limit_flat_sell`/`market_flat_sell`)目前
+沒有任何 entry/exit plugin 會呼叫——刻意先做成可用、有測試的獨立方法,
+不強行接進現在的長倉專用狀態機。
+
+**`reduce_only=True` 的單不會讓模擬部位「穿越」0**:多倉最多平到 0、
+空倉最多回補到 0,不會意外開出反方向的新倉——這是真實交易所
+`reduceOnly` 參數的行為,`PaperBroker._fill()`/`LiveBroker` dry-run 的
+`_dry_run_fill_if_pending()` 都要模擬一致,不然沙盒/dry-run 測出來的
+部位軌跡會跟真實環境對不上。`PaperBroker` 為此新增 `_last_price`
+(每次 `tick()` 更新),市價單下單當下(不用等價格穿越)就直接用這個
+價格成交。
+
+**`StrategyRunner` 新增 `order_type: str = "limit"` 欄位,`_try_enter()`/
+`_try_exit()` 依這個值選擇呼叫限價還是市價方法**——這才是真正解決
+`order_type` 沒作用那個缺口的地方。`live/main.py`
+(`config.order_type`)、`demo/run_from_yaml.py`
+(`order_config.order_type`)都把值傳進 `StrategyRunner`。`market_close()`
+(kill_switch/收攤用)完全不受這個欄位影響,繼續維持前面說的「強制平倉
+永遠市價」規則。
+
+**`interfaces.Broker` Protocol 從 7 個方法擴充到 14 個**——多出來的 7 個
+(`limit_sell`/`market_buy`/`market_sell`/`limit_flat_buy`/
+`limit_flat_sell`/`market_flat_buy`/`market_flat_sell`)`PaperBroker`/
+`LiveBroker` 都已經實作,結構上滿足,不需要額外繼承或註冊。
