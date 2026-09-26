@@ -51,6 +51,10 @@ class ExecutionConfig:
     # --- 要跑哪個策略(參數本身在 YAML 裡,不在這裡) ---
     strategy_path: str = "strategies/weekend_mean_reversion.yaml"
     symbol_override: Optional[str] = None  # Bybit 原生格式(如 "BTCUSDT");不設就從 YAML 的 symbol 轉換
+    # 起點價格:None = 用啟動當下的即時價格;填數字 = 手動指定(例如週六
+    # 04:00 的價格)。Fa_Successful_trade 的 Redis 歷史價格還沒接上前,
+    # 手動輸入是唯一能讓中途啟動仍對齊 04:00 起點的方式。
+    origin_price: Optional[float] = None
 
     # --- 執行安全設定(預設值對照 sat_strategy/app/config.py) ---
     dry_run: bool = True
@@ -58,6 +62,10 @@ class ExecutionConfig:
     poll_interval_seconds: int = 5
     max_api_retries: int = 5
     retry_backoff_cap_seconds: float = 30.0
+    # Bybit V5 商品類型:"linear"(USDT 永續)/"spot"(現貨)/"inverse"(幣本位)/
+    # "option"(期權)。原本寫死在 BybitClient 內部,2026-09-26 改成可設定
+    # ——預設維持 linear,對齊之前的行為不變。
+    category: Literal["linear", "spot", "inverse", "option"] = "linear"
 
     # --- 下單方式(見 dsl/order_config.py) ---
     order_type: Literal["limit", "market"] = "limit"

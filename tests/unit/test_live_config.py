@@ -43,6 +43,17 @@ class TestExecutionConfigDefaults:
     def test_strategy_path_defaults_to_weekend_mean_reversion(self):
         assert ExecutionConfig().strategy_path == "strategies/weekend_mean_reversion.yaml"
 
+    def test_origin_price_defaults_to_none(self):
+        # None = 用啟動當下的即時價格;要手動指定(例如週六 04:00 的價格)
+        # 才在 live_execution_config.yaml 填數字。
+        assert ExecutionConfig().origin_price is None
+
+    def test_category_defaults_to_linear(self):
+        # BybitClient 原本把 category="linear" 寫死在模組常數,現在改成
+        # 可設定的欄位——預設維持 linear(舊行為不變,sat_strategy 只交易
+        # USDT 永續合約),但可以覆蓋成 spot/inverse/option。
+        assert ExecutionConfig().category == "linear"
+
 
 class TestLoadExecutionConfigFromYaml:
     def test_missing_file_returns_pure_defaults(self, tmp_path):
@@ -60,6 +71,22 @@ class TestLoadExecutionConfigFromYaml:
         assert config.dry_run is False
         assert config.testnet is False
         assert config.strategy_path == "strategies/ma_crossover_bracket.yaml"
+
+    def test_category_override_is_applied(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(yaml.dump({"category": "spot"}))
+
+        config = load_execution_config(config_path=path)
+
+        assert config.category == "spot"
+
+    def test_origin_price_override_is_applied(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(yaml.dump({"origin_price": 0.4772}))
+
+        config = load_execution_config(config_path=path)
+
+        assert config.origin_price == 0.4772
 
     def test_nested_position_sizing_override_is_parsed_into_dataclass(self, tmp_path):
         """position_sizing 在 YAML 裡是巢狀 dict,不能直接 setattr——要轉成

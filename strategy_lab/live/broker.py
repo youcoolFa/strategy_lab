@@ -11,10 +11,9 @@ symbol 是什麼)的物件——跟 `broker/paper_broker.py` 的 `PaperBroker`
 週期不會變),不是每次呼叫都要傳——這是 `Broker` 合約的方法簽名
 (`place_limit_buy(price, qty)`)天生就沒有 symbol 參數的原因。
 
-`tick(price)` 是刻意的 no-op:真實交易所自己在背景撮合訂單,不需要
-外部餵價格才成交——這跟 `PaperBroker.tick()` 的語意完全不同,但兩者
-都滿足同一個 `Broker` Protocol,`runner.py` 不需要、也不應該知道這個
-差異。
+`tick(price)` 在真實模式下沒有作用:真實交易所自己在背景撮合訂單,
+不需要外部餵價格才成交。dry-run 模式下它只記下最新價,給下面的模擬
+成交判斷用。`runner.py` 不需要知道這個差異。
 
 `dry_run`(預設 `True`,安全預設)對應 sat_strategy/app/bot.py 每個下單
 方法前的 `if self.config.dry_run: return ...`。放在 `LiveBroker` 而不是
@@ -23,13 +22,12 @@ symbol 是什麼)的物件——跟 `broker/paper_broker.py` 的 `PaperBroker`
 `LiveBroker`,它才是 bot.py `_place_entry_order`/`_place_exit_order`
 這些方法的對應位置。
 
-dry-run 訂單在**第一次被 `fetch_order()` 查詢時**才從 open 變成
-closed(不是下單當下就立即成交)——呼應 bot.py 的假設:「dry-run 模式
-沒有真的交易所可以查,直接視為立即成交,方便測試整體流程」,那個假設
-在 bot.py 是在輪詢迴圈裡兌現的,這裡搬到 `fetch_order()` 兌現,行為
-等價:runner.py 下單後一定會在下一次 tick 呼叫 `fetch_order()` 才會
-知道有沒有成交,所以「下單當下」跟「第一次查詢時」對 runner.py 來說
-沒有可觀察的差異。市價單 dry-run 也沿用這個模式(不特地「立刻成交」)。
+dry-run 訂單在 `fetch_order()` 查詢時才判斷成交:**市價單**第一次查詢
+就成交;**限價單**要等 `tick()` 看到的價格碰到限價(買單 價格 <= 限價、
+賣單 價格 >= 限價)才成交,跟 `PaperBroker` 同一條規則。bot.py 的
+dry-run 是「查詢一次就當成交」,但搭配一啟動就掛單的機制,會變成每個
+輪詢週期都假成交一輪(sat_strategy 8/1 的 dry-run log 就是這樣跑出
+7.7 萬次循環),模擬結果沒有參考價值——見 docs/ARCHITECTURE.md §6.14。
 
 **市價單 dry-run 下單當下會呼叫 `client.get_last_price()` 查一次真實
 市價,當作模擬成交價**——限價單不會(呼叫端已經算好價格傳進來了)。
@@ -92,6 +90,7 @@ class LiveOrder:
     qty: float = 0.0
     filled_qty: float = 0.0
     reduce_only: bool = False
+    order_type: str = "limit"
 
 
 def _to_live_order(result: OrderResult) -> LiveOrder:
@@ -107,6 +106,7 @@ class LiveBroker:
 
     _dry_run_orders: Dict[str, LiveOrder] = field(default_factory=dict, init=False)
     _dry_run_position_qty: float = field(default=0.0, init=False)
+    _dry_run_last_price: Optional[float] = field(default=None, init=False)
     _dry_run_id_counter: itertools.count = field(default_factory=lambda: itertools.count(1), init=False)
     _limits: Optional[InstrumentLimits] = field(default=None, init=False, repr=False)
     _limits_loaded: bool = field(default=False, init=False, repr=False)
@@ -150,14 +150,14 @@ class LiveBroker:
     def market_buy(self, qty: float) -> LiveOrder:
         qty = self._fix_market_qty(qty)
         if self.dry_run:
-            return self._dry_run_place("Buy", self.client.get_last_price(self.symbol), qty, reduce_only=False)
+            return self._dry_run_place("Buy", self.client.get_last_price(self.symbol), qty, reduce_only=False, order_type="market")
         result = self.client.place_market_order(self.symbol, "Buy", qty, reduce_only=False)
         return _to_live_order(result)
 
     def market_sell(self, qty: float) -> LiveOrder:
         qty = self._fix_market_qty(qty)
         if self.dry_run:
-            return self._dry_run_place("Sell", self.client.get_last_price(self.symbol), qty, reduce_only=False)
+            return self._dry_run_place("Sell", self.client.get_last_price(self.symbol), qty, reduce_only=False, order_type="market")
         result = self.client.place_market_order(self.symbol, "Sell", qty, reduce_only=False)
         return _to_live_order(result)
 
@@ -187,14 +187,14 @@ class LiveBroker:
     def market_flat_buy(self, qty: float) -> LiveOrder:
         qty = self._fix_market_qty(qty)
         if self.dry_run:
-            return self._dry_run_place("Sell", self.client.get_last_price(self.symbol), qty, reduce_only=True)
+            return self._dry_run_place("Sell", self.client.get_last_price(self.symbol), qty, reduce_only=True, order_type="market")
         result = self.client.place_market_order(self.symbol, "Sell", qty, reduce_only=True)
         return _to_live_order(result)
 
     def market_flat_sell(self, qty: float) -> LiveOrder:
         qty = self._fix_market_qty(qty)
         if self.dry_run:
-            return self._dry_run_place("Buy", self.client.get_last_price(self.symbol), qty, reduce_only=True)
+            return self._dry_run_place("Buy", self.client.get_last_price(self.symbol), qty, reduce_only=True, order_type="market")
         result = self.client.place_market_order(self.symbol, "Buy", qty, reduce_only=True)
         return _to_live_order(result)
 
@@ -227,21 +227,37 @@ class LiveBroker:
         self.client.place_market_order(self.symbol, "Sell", qty, reduce_only=True)
 
     def tick(self, price: float) -> None:
-        pass
+        # 真實模式下交易所自己撮合,這裡什麼都不用做;dry-run 記下最新價,
+        # 讓限價單要等價格碰到限價才模擬成交(跟 PaperBroker.tick() 一致)。
+        self._dry_run_last_price = price
 
     # ------------------------------------------------------------------
     # dry-run 內部模擬
     # ------------------------------------------------------------------
-    def _dry_run_place(self, side: str, price: float, qty: float, reduce_only: bool) -> LiveOrder:
+    def _dry_run_place(
+        self, side: str, price: float, qty: float, reduce_only: bool, order_type: str = "limit"
+    ) -> LiveOrder:
         order_id = f"dry-run-{next(self._dry_run_id_counter)}"
-        order = LiveOrder(id=order_id, status="open", price=price, side=side, qty=qty, reduce_only=reduce_only)
+        order = LiveOrder(
+            id=order_id, status="open", price=price, side=side, qty=qty, reduce_only=reduce_only, order_type=order_type
+        )
         self._dry_run_orders[order_id] = order
-        logger.info(f"[dry-run] 模擬下 {side} 單:{self.symbol} @ {price:.2f} qty={qty:.4f} reduce_only={reduce_only}")
+        logger.info(
+            f"[dry-run] 模擬下 {order_type} {side} 單:{self.symbol} @ {price} qty={qty:.4f} reduce_only={reduce_only}"
+        )
         return order
+
+    def _dry_run_price_reached(self, order: LiveOrder) -> bool:
+        if order.order_type == "market":
+            return True
+        last = self._dry_run_last_price
+        if last is None:
+            return False
+        return last <= order.price if order.side == "Buy" else last >= order.price
 
     def _dry_run_fill_if_pending(self, order_id: str) -> LiveOrder:
         order = self._dry_run_orders[order_id]
-        if order.status == "open":
+        if order.status == "open" and self._dry_run_price_reached(order):
             order.status = "closed"
             order.filled_qty = order.qty
             delta = order.qty if order.side == "Buy" else -order.qty

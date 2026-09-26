@@ -87,6 +87,30 @@ class TestGetLastPrice:
         assert http.calls == [("get_tickers", {"category": "linear", "symbol": "BTCUSDT"})]
 
 
+class TestCategoryIsConfigurable:
+    """`category`(spot/linear/inverse/option)原本寫死在模組常數,改成
+    建構子參數——預設維持 `linear`(舊行為不變),但可以覆蓋成其他市場
+    類型。"""
+
+    def test_defaults_to_linear_when_not_specified(self):
+        http = FakeHTTP()
+        http.tickers_response = {"result": {"list": [{"lastPrice": "100.0"}]}}
+        client = BybitClient(api_key="test", api_secret="test", http_client=http)
+
+        client.get_last_price("BTCUSDT")
+
+        assert http.calls == [("get_tickers", {"category": "linear", "symbol": "BTCUSDT"})]
+
+    def test_overriding_category_is_used_in_every_api_call(self):
+        http = FakeHTTP()
+        http.tickers_response = {"result": {"list": [{"lastPrice": "1.5"}]}}
+        client = BybitClient(api_key="test", api_secret="test", category="spot", http_client=http)
+
+        client.get_last_price("BTCUSDT")
+
+        assert http.calls == [("get_tickers", {"category": "spot", "symbol": "BTCUSDT"})]
+
+
 class TestPlaceLimitOrder:
     def test_returns_open_order_result(self):
         http = FakeHTTP()
@@ -245,10 +269,27 @@ class TestCancelOrder:
 class TestGetPositionQty:
     def test_sums_position_sizes(self):
         http = FakeHTTP()
-        http.positions_response = {"result": {"list": [{"size": "0.03"}]}}
+        http.positions_response = {"result": {"list": [{"side": "Buy", "size": "0.03"}]}}
         client = make_client(http)
 
         assert client.get_position_qty("BTCUSDT") == 0.03
+
+    def test_short_position_is_negative(self):
+        # Bybit 的 size 永遠是正數,方向在 side。空單要回傳負數,
+        # runner._cleanup() 靠正負號決定用買回還是賣出平倉。
+        http = FakeHTTP()
+        http.positions_response = {"result": {"list": [{"side": "Sell", "size": "41.1"}]}}
+        client = make_client(http)
+
+        assert client.get_position_qty("WLDUSDT") == -41.1
+
+    def test_flat_one_way_position_with_empty_side_is_zero(self):
+        # 真實 mainnet 回傳:沒持倉時 side 是空字串、size 是 "0"。
+        http = FakeHTTP()
+        http.positions_response = {"result": {"list": [{"side": "", "size": "0", "positionIdx": 0}]}}
+        client = make_client(http)
+
+        assert client.get_position_qty("WLDUSDT") == 0.0
 
     def test_returns_zero_when_no_position(self):
         http = FakeHTTP()
@@ -256,6 +297,24 @@ class TestGetPositionQty:
         client = make_client(http)
 
         assert client.get_position_qty("BTCUSDT") == 0.0
+
+
+class TestGetOpenOrders:
+    def test_returns_raw_open_order_list_for_symbol(self):
+        http = FakeHTTP()
+        http.open_orders_response = {
+            "result": {"list": [{"orderId": "o1", "side": "Buy", "price": "0.4764", "qty": "41.1"}]}
+        }
+        client = make_client(http)
+
+        orders = client.get_open_orders("WLDUSDT")
+
+        assert orders == [{"orderId": "o1", "side": "Buy", "price": "0.4764", "qty": "41.1"}]
+        assert http.calls == [("get_open_orders", {"category": "linear", "symbol": "WLDUSDT"})]
+
+    def test_empty_when_no_open_orders(self):
+        client = make_client(FakeHTTP())
+        assert client.get_open_orders("WLDUSDT") == []
 
 
 class TestGetInstrumentInfo:

@@ -65,3 +65,18 @@ class TestUpdateStrategyPathInConfig:
         update_strategy_path_in_config(config_path, example, "strategies/ma_crossover_bracket.yaml")
 
         assert config_path.read_text().endswith("\n")
+
+
+class TestSelectStrategyConfigArgument:
+    def test_writes_chosen_strategy_into_the_given_config_file(self, tmp_path, monkeypatch):
+        import strategy_lab.live.select_strategy as module
+
+        target = tmp_path / "live_wld_short.yaml"
+        monkeypatch.setattr(module, "prompt_strategy_choice", lambda files: module.STRATEGIES_DIR / "weekend_mean_reversion.yaml")
+
+        module.main(["--config", str(target)])
+
+        data = yaml.safe_load(target.read_text())
+        assert data["strategy_path"] == "strategies/weekend_mean_reversion.yaml"
+        assert data["dry_run"] is True  # 新檔從 example 範本建立,安全預設值
+        assert not (module.CONFIG_PATH == target)

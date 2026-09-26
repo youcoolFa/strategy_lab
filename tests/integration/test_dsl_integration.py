@@ -25,20 +25,17 @@ class TestWeekendStrategyFromYaml:
         now = datetime(2026, 8, 1, 4, 0, tzinfo=timezone.utc)
         runner.start(now, price=1000.0)  # origin_price=1000,進場目標=992.5(deviation_pct=0.75)
 
-        runner.tick(now, 1000.0)
-        assert runner.state == RunState.IDLE
-
-        runner.tick(now + timedelta(minutes=5), 991.0)  # 跌破 992.5 -> 下單
+        runner.tick(now, 1000.0)  # sat_strategy 機制:一啟動就掛 992.5 買單
         assert runner.state == RunState.ENTRY_PENDING
 
-        runner.tick(now + timedelta(minutes=10), 991.0)  # 限價單成交
+        runner.tick(now + timedelta(minutes=5), 991.0)  # 碰到 992.5,成交
         assert runner.state == RunState.IN_POSITION
         assert runner.active_entry_price == 992.5
 
-        runner.tick(now + timedelta(minutes=15), 1000.0)  # 回到 origin -> 下出場單
+        runner.tick(now + timedelta(minutes=10), 991.0)  # 成交後馬上掛平倉 1000
         assert runner.state == RunState.EXIT_PENDING
 
-        runner.tick(now + timedelta(minutes=20), 1000.0)  # 出場單成交
+        runner.tick(now + timedelta(minutes=15), 1000.0)  # 平倉成交
         assert runner.state == RunState.IDLE
         assert len(runner.trades) == 1
         assert runner.trades[0].entry_price == 992.5

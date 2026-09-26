@@ -4,10 +4,10 @@
 from pathlib import Path
 
 from strategy_lab.dsl.loader import load_strategy
-from strategy_lab.plugins.entry.deviation_from_reference import DeviationFromReferenceEntry
+from strategy_lab.plugins.entry.resting_deviation_from_reference import RestingDeviationFromReferenceEntry
 from strategy_lab.plugins.entry.ma_crossover import MACrossoverEntry
 from strategy_lab.plugins.exit.bracket_tp_sl import BracketTPSLExit
-from strategy_lab.plugins.exit.return_to_reference import ReturnToReferenceExit
+from strategy_lab.plugins.exit.resting_return_to_reference import RestingReturnToReferenceExit
 from strategy_lab.plugins.kill_switch.sustained_breakout import SustainedBreakoutKillSwitch
 from strategy_lab.plugins.time_window.daily_session import DailySession
 from strategy_lab.plugins.time_window.weekly_window import WeeklyWindow
@@ -18,9 +18,13 @@ STRATEGIES_DIR = Path(__file__).resolve().parents[2] / "strategies"
 class TestWeekendMeanReversionYaml:
     def test_matches_demo_weekend_phase1_hand_composed_version(self):
         strategy = load_strategy(STRATEGIES_DIR / "weekend_mean_reversion.yaml")
-        assert strategy.entry == DeviationFromReferenceEntry(deviation_pct=0.75)
-        assert strategy.exit == ReturnToReferenceExit()
+        assert strategy.entry == RestingDeviationFromReferenceEntry(deviation_pct=0.75)
+        assert strategy.exit == RestingReturnToReferenceExit()
         assert strategy.time_window == WeeklyWindow()  # 跟 demo 一樣全用預設值
+
+    def test_direction_is_set_explicitly_in_yaml(self):
+        strategy = load_strategy(STRATEGIES_DIR / "weekend_mean_reversion.yaml")
+        assert strategy.direction == "long"
 
 
 class TestMACrossoverBracketYaml:
@@ -36,8 +40,8 @@ class TestMeanReversionBreakoutGuardYaml:
         """進出場邏輯跟 weekend_mean_reversion.yaml 完全一樣,差別只在
         多了 kill_switch。"""
         strategy = load_strategy(STRATEGIES_DIR / "mean_reversion_breakout_guard.yaml")
-        assert strategy.entry == DeviationFromReferenceEntry(deviation_pct=0.75)
-        assert strategy.exit == ReturnToReferenceExit()
+        assert strategy.entry == RestingDeviationFromReferenceEntry(deviation_pct=0.75)
+        assert strategy.exit == RestingReturnToReferenceExit()
         assert strategy.time_window == WeeklyWindow()
 
     def test_kill_switch_is_resolved_with_matching_params(self):

@@ -18,8 +18,11 @@ live/bybit_client.py
 key/secret)是下一階段的事,這個檔案本身只需要 http_client 的介面
 形狀正確就能測試完整。
 
-`category="linear"` 寫死:sat_strategy 的策略只交易 USDT 永續合約,不
-支援其他市場類型,沒有必要做成可設定的參數,徒增混淆。
+`category` 是建構子參數,預設 `"linear"`(USDT 永續合約,對齊
+sat_strategy 原本的假設)——2026-09-26 改成可設定,因為使用者實際部署
+時想拿掉「只能交易永續合約」這個隱性假設,讓 `live_execution_config.yaml`
+自己決定要用 `spot`/`linear`/`inverse`/`option` 哪一種 Bybit V5 商品
+類型。
 
 重試邏輯對應 bot.py 的 `_call_with_retry`:只重試 `FailedRequestError`
 (網路層失敗,通常是暫時性的);`InvalidRequestError`(Bybit 回傳明確
@@ -36,8 +39,6 @@ from typing import Optional
 
 from pybit.exceptions import FailedRequestError, InvalidRequestError
 from pybit.unified_trading import HTTP
-
-CATEGORY = "linear"
 
 _ORDER_NOT_FOUND_PHRASES = ("order does not exist", "order not exists", "order not found")
 
@@ -62,10 +63,12 @@ class BybitClient:
         testnet: bool = True,
         max_retries: int = 5,
         retry_backoff_cap_seconds: float = 30.0,
+        category: str = "linear",
         http_client: Optional[HTTP] = None,
     ) -> None:
         self._max_retries = max_retries
         self._retry_backoff_cap_seconds = retry_backoff_cap_seconds
+        self._category = category
         self._http = http_client or HTTP(
             testnet=testnet,
             api_key=api_key or os.getenv("BYBIT_API_KEY", ""),
@@ -83,13 +86,13 @@ class BybitClient:
                 time.sleep(wait)
 
     def get_last_price(self, symbol: str) -> float:
-        resp = self._call_with_retry(self._http.get_tickers, category=CATEGORY, symbol=symbol)
+        resp = self._call_with_retry(self._http.get_tickers, category=self._category, symbol=symbol)
         return float(resp["result"]["list"][0]["lastPrice"])
 
     def place_limit_order(self, symbol: str, side: str, qty: float, price: float, reduce_only: bool = False) -> OrderResult:
         resp = self._call_with_retry(
             self._http.place_order,
-            category=CATEGORY,
+            category=self._category,
             symbol=symbol,
             side=side,
             orderType="Limit",
@@ -103,7 +106,7 @@ class BybitClient:
     def place_market_order(self, symbol: str, side: str, qty: float, reduce_only: bool = False) -> OrderResult:
         resp = self._call_with_retry(
             self._http.place_order,
-            category=CATEGORY,
+            category=self._category,
             symbol=symbol,
             side=side,
             orderType="Market",
@@ -113,7 +116,7 @@ class BybitClient:
         return OrderResult(order_id=resp["result"]["orderId"], status="open")
 
     def get_order_status(self, symbol: str, order_id: str) -> OrderResult:
-        open_resp = self._call_with_retry(self._http.get_open_orders, category=CATEGORY, symbol=symbol, orderId=order_id)
+        open_resp = self._call_with_retry(self._http.get_open_orders, category=self._category, symbol=symbol, orderId=order_id)
         open_list = open_resp["result"]["list"]
         if open_list:
             order = open_list[0]
@@ -125,7 +128,7 @@ class BybitClient:
             )
 
         history_resp = self._call_with_retry(
-            self._http.get_order_history, category=CATEGORY, symbol=symbol, orderId=order_id
+            self._http.get_order_history, category=self._category, symbol=symbol, orderId=order_id
         )
         history_list = history_resp["result"]["list"]
         if not history_list:
@@ -141,22 +144,32 @@ class BybitClient:
 
     def cancel_order(self, symbol: str, order_id: str) -> None:
         try:
-            self._call_with_retry(self._http.cancel_order, category=CATEGORY, symbol=symbol, orderId=order_id)
+            self._call_with_retry(self._http.cancel_order, category=self._category, symbol=symbol, orderId=order_id)
         except InvalidRequestError as e:
             if not any(phrase in str(e).lower() for phrase in _ORDER_NOT_FOUND_PHRASES):
                 raise
             # 訂單已經不存在(已成交/已取消)——視為成功,呼叫端不用分辨這種差異。
 
     def get_position_qty(self, symbol: str) -> float:
-        resp = self._call_with_retry(self._http.get_positions, category=CATEGORY, symbol=symbol)
+        """多單正數、空單負數。Bybit 的 size 永遠是正數,方向在 side
+        ("Buy"/"Sell",沒持倉時是空字串)。"""
+        resp = self._call_with_retry(self._http.get_positions, category=self._category, symbol=symbol)
         positions = resp["result"]["list"]
-        return sum(float(p["size"]) for p in positions if p.get("size"))
+        total = 0.0
+        for p in positions:
+            size = float(p.get("size") or 0.0)
+            total += -size if p.get("side") == "Sell" else size
+        return total
+
+    def get_open_orders(self, symbol: str) -> list:
+        resp = self._call_with_retry(self._http.get_open_orders, category=self._category, symbol=symbol)
+        return resp["result"]["list"]
 
     def get_instrument_info(self, symbol: str) -> dict:
         """回傳單一交易對的原始 instrument 資料(priceFilter/lotSizeFilter
         這些)——公開端點,不需要驗證。解析成好用的形狀是
         live/instrument_limits.py 的職責,這裡刻意只當一層薄薄的包裝。"""
-        resp = self._call_with_retry(self._http.get_instruments_info, category=CATEGORY, symbol=symbol)
+        resp = self._call_with_retry(self._http.get_instruments_info, category=self._category, symbol=symbol)
         return resp["result"]["list"][0]
 
     def get_account_equity(self) -> float:

@@ -340,12 +340,10 @@ class TestDryRunPlaceOrders:
 
 
 class TestDryRunFetchOrder:
-    def test_dry_run_order_fills_on_first_fetch_order_call(self):
-        """呼應 sat_strategy/app/bot.py 的假設:「dry-run 模式沒有真的
-        交易所可以查,直接視為立即成交,方便測試整體流程」——第一次
-        查詢就從 open 變成 closed,不用真的等待任何事情發生。"""
+    def test_dry_run_limit_order_fills_on_fetch_after_price_reaches_limit(self):
         broker = make_broker(dry_run=True)
         placed = broker.place_limit_buy(price=60000.0, qty=0.01)
+        broker.tick(60000.0)
 
         fetched = broker.fetch_order(placed.id)
 
@@ -365,6 +363,7 @@ class TestDryRunFetchOrder:
     def test_fetching_an_already_filled_dry_run_order_stays_closed(self):
         broker = make_broker(dry_run=True)
         placed = broker.place_limit_buy(price=60000.0, qty=0.01)
+        broker.tick(60000.0)
         broker.fetch_order(placed.id)  # 第一次查詢,變成 closed
 
         second_fetch = broker.fetch_order(placed.id)  # 第二次查詢
@@ -378,6 +377,7 @@ class TestDryRunPositionQty:
         placed = broker.place_limit_buy(price=60000.0, qty=0.01)
         assert broker.position_qty() == 0.0  # 還沒被查詢過,還沒「成交」
 
+        broker.tick(60000.0)
         broker.fetch_order(placed.id)
 
         assert broker.position_qty() == 0.01
@@ -385,10 +385,12 @@ class TestDryRunPositionQty:
     def test_decreases_after_sell_order_is_polled_filled(self):
         broker = make_broker(dry_run=True)
         entry = broker.place_limit_buy(price=60000.0, qty=0.01)
+        broker.tick(60000.0)
         broker.fetch_order(entry.id)
         assert broker.position_qty() == 0.01
 
         exit_order = broker.place_limit_sell(price=61000.0, qty=0.01)
+        broker.tick(61000.0)
         broker.fetch_order(exit_order.id)
 
         assert broker.position_qty() == 0.0
@@ -464,12 +466,14 @@ class TestDryRunEightOrderMethods:
     def test_limit_sell_opens_short_position(self):
         broker = make_broker(dry_run=True)
         placed = broker.limit_sell(price=60000.0, qty=0.01)
+        broker.tick(60000.0)
         broker.fetch_order(placed.id)
         assert broker.position_qty() == -0.01
 
     def test_market_flat_sell_closes_short_position(self):
         broker = make_broker(dry_run=True)
         opened = broker.limit_sell(price=60000.0, qty=0.01)
+        broker.tick(60000.0)
         broker.fetch_order(opened.id)
         assert broker.position_qty() == -0.01
 
@@ -483,6 +487,7 @@ class TestDryRunEightOrderMethods:
         是同一個規則,LiveBroker 的 dry-run 模擬要一致。"""
         broker = make_broker(dry_run=True)
         opened = broker.place_limit_buy(price=60000.0, qty=1.0)
+        broker.tick(60000.0)
         broker.fetch_order(opened.id)
         assert broker.position_qty() == 1.0
 
@@ -490,6 +495,62 @@ class TestDryRunEightOrderMethods:
         broker.fetch_order(closed.id)
 
         assert broker.position_qty() == 0.0  # 不會變成 -4.0
+
+
+class TestDryRunLimitOrdersFillOnlyWhenPriceReachesLimit:
+    """dry-run 的限價單跟 PaperBroker 一樣,要等 tick() 看到的價格碰到
+    限價才成交。一啟動就掛單的策略(sat_strategy 機制)把單掛在離市價
+    很遠的地方,如果查詢一次就當成成交,dry-run 會每 5 秒假成交一輪。"""
+
+    def test_buy_limit_stays_open_while_price_above_limit(self):
+        broker = make_broker(dry_run=True)
+        placed = broker.place_limit_buy(price=60000.0, qty=0.01)
+        broker.tick(60500.0)
+
+        assert broker.fetch_order(placed.id).status == "open"
+        assert broker.position_qty() == 0.0
+
+    def test_buy_limit_fills_once_price_at_or_below_limit(self):
+        broker = make_broker(dry_run=True)
+        placed = broker.place_limit_buy(price=60000.0, qty=0.01)
+        broker.tick(60500.0)
+        broker.fetch_order(placed.id)
+        broker.tick(59990.0)
+
+        fetched = broker.fetch_order(placed.id)
+
+        assert fetched.status == "closed"
+        assert fetched.price == 60000.0
+        assert broker.position_qty() == 0.01
+
+    def test_sell_limit_stays_open_while_price_below_limit(self):
+        broker = make_broker(dry_run=True)
+        placed = broker.limit_sell(price=60000.0, qty=0.01)
+        broker.tick(59500.0)
+
+        assert broker.fetch_order(placed.id).status == "open"
+
+    def test_sell_limit_fills_once_price_at_or_above_limit(self):
+        broker = make_broker(dry_run=True)
+        placed = broker.limit_sell(price=60000.0, qty=0.01)
+        broker.tick(60010.0)
+
+        assert broker.fetch_order(placed.id).status == "closed"
+        assert broker.position_qty() == -0.01
+
+    def test_limit_order_not_filled_before_any_price_is_seen(self):
+        broker = make_broker(dry_run=True)
+        placed = broker.place_limit_buy(price=60000.0, qty=0.01)
+
+        assert broker.fetch_order(placed.id).status == "open"
+
+    def test_market_order_still_fills_on_first_fetch_without_tick(self):
+        client = FakeBybitClient()
+        client.last_price_result = 61234.5
+        broker = make_broker(client, dry_run=True)
+        placed = broker.market_buy(qty=0.01)
+
+        assert broker.fetch_order(placed.id).status == "closed"
 
 
 class TestDryRunCancelOrder:
@@ -506,6 +567,7 @@ class TestDryRunCancelOrder:
     def test_canceling_an_already_filled_order_is_a_noop(self):
         broker = make_broker(dry_run=True)
         placed = broker.place_limit_buy(price=60000.0, qty=0.01)
+        broker.tick(60000.0)
         broker.fetch_order(placed.id)  # 先讓它「成交」
 
         broker.cancel_order(placed.id)  # 不應該把已成交的單改成 canceled
@@ -518,6 +580,7 @@ class TestDryRunMarketClose:
         client = FakeBybitClient()
         broker = make_broker(client, dry_run=True)
         entry = broker.place_limit_buy(price=60000.0, qty=0.02)
+        broker.tick(60000.0)
         broker.fetch_order(entry.id)
         assert broker.position_qty() == 0.02
 

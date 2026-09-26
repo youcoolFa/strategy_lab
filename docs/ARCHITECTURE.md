@@ -424,6 +424,9 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | `account_percentage` 補上真實帳戶權益查詢 | `BybitClient` 新增 `get_account_equity()`(包裝 `get_wallet_balance`,需要驗證的端點);`live/main.py` 的 `_resolve_order_qty()` 不設 `account_value` 就自動查真實權益,有明確設就用那個值覆蓋 | 新增 §6.10 | 已完成,並用真實 mainnet 帳戶端到端驗證過(算出的 qty 太小被 §6.9 的 `fix_qty()` 正確擋下) |
 | 空倉支援(`direction`) | `rules/conditions.py` 新增 `PriceAboveReference`/`PriceAtOrBelowReference`;新增 plugin `ShortDeviationFromReferenceEntry`/`ShortReturnToReferenceExit`;`StrategyRunner` 新增 `direction`,`_try_enter()`/`_try_exit()` 依此分派開多/開空/平多/平空;`dsl/schema.py`/`dsl/loader.py` 新增 `direction` 欄位(屬於策略定義,不是執行參數);`Trade` 新增 `direction`/`pnl`(long/short 公式互為鏡像);新增示範 `strategies/weekend_short_breakout.yaml`。**過程中發現並修正真實 bug**:`_cleanup()` 原本 `remaining > 0` 才平倉,空倉的 `position_qty()` 是負數,永遠不會被強制平倉——改用 `market_flat_buy`/`market_flat_sell` 依正負號分派,不再呼叫 `market_close()` | 新增 §6.11 | 已完成(做空的 kill switch 偵測——偵測向下突破——未做,留待 §6.12) |
 | 做空用的 kill switch | `rules/conditions.py` 新增 `SustainedPriceBreakdown`(鏡像 `SustainedPriceBreakout`,偵測連續向下突破);新增 plugin `plugins/kill_switch/sustained_breakdown.py` 的 `SustainedBreakdownKillSwitch`,註冊為 `("kill_switch", "sustained_breakdown")`——不用碰 `dsl/loader.py`/`schema.py`,原本就是透過 registry 動態查找;新增示範 `strategies/weekend_short_breakout_guard.yaml`(鏡像 `mean_reversion_breakout_guard.yaml`) | 新增 §6.12 | 已完成,補上 §6.11 留下的缺口 |
+| `category`(Bybit V5 商品類型)從寫死改成可設定 | `BybitClient` 原本模組常數 `CATEGORY = "linear"` 改成建構子參數 `category`,存進 `self._category`,7 處 API 呼叫都換掉;`ExecutionConfig` 新增 `category: Literal["linear","spot","inverse","option"] = "linear"`;`live/main.py` 建構 `BybitClient` 時多傳 `category=config.category` | 新增 §6.13 | 已完成,預設值不變,對既有部署零行為影響 |
+| `weekend_mean_reversion` 改回 sat_strategy 機制(一啟動就掛單)+ 雙向 + 手動 origin | 新增 `AlwaysTrue` 條件;新增 plugin `resting_deviation_from_reference`/`resting_return_to_reference`(rule 永遠成立,掛單價就是觸發條件,方向讀 `ctx.direction`,不再 `round(…, 2)`);`StrategyContext` 新增 `direction`;`StrategyRunner` 拒絕 resting plugin + `order_type=market`;`ExecutionConfig.origin_price`(手動起點)+ `live/main.py` 的 `resolve_origin_price()`;`LiveBroker` dry-run 限價單改成價格碰到才成交;`weekend_mean_reversion.yaml`/`mean_reversion_breakout_guard.yaml`/`demo_weekend_phase1.py` 改用新 plugin | 新增 §6.14 | 已完成;舊的 `deviation_from_reference`(先看價格越過門檻才下單)保留給其他策略 |
+| `--config` + 啟動殘留檢查 + 空單正負號修正 | `live/main.py`/`live/select_strategy.py` 新增 `--config`(每個策略一份設定檔,檔案不存在直接報錯);`live_*.yaml` gitignore;`ensure_clean_start()`:非 dry-run 時交易所上該 symbol 有掛單或持倉就拒絕啟動;`BybitClient.get_open_orders()`;`get_position_qty()` 依 `side` 回傳正負號(原本空單是正數) | 新增 §6.15 | 已完成,啟動檢查已對真實 mainnet 掛單驗證 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -993,3 +996,105 @@ threshold`,`avg > target` → `avg < target`,`target` 的 margin 計算也
 `mean_reversion_breakout_guard.yaml` 對 `weekend_mean_reversion.yaml`
 做的事),已用 `run_from_yaml.py` 實際跑過,載入/執行/`_cleanup()` 都
 正常,`position left over after cleanup` 為 0。
+
+### 6.13 `category`(Bybit V5 商品類型)從寫死改成可設定欄位
+
+`live/bybit_client.py` 原本有一個模組常數 `CATEGORY = "linear"`,
+docstring 明講理由:「sat_strategy 的策略只交易 USDT 永續合約,不支援
+其他市場類型,沒有必要做成可設定的參數」——這是當初移植 sat_strategy
+時的合理假設,但使用者實際部署到自己帳戶時想拿掉這個隱性假設,改成
+`ExecutionConfig` 的欄位,讓 `live_execution_config.yaml` 自己決定。
+
+改法:`BybitClient.__init__` 新增 `category: str = "linear"` 參數,存進
+`self._category`,原本每個方法裡的模組常數 `CATEGORY` 全部換成
+`self._category`(`get_last_price`/`place_limit_order`/
+`place_market_order`/`get_order_status`/`cancel_order`/
+`get_position_qty`/`get_instrument_info` 共 7 處呼叫)。`get_account_equity()`
+不受影響——它打的是 `get_wallet_balance`,這個端點本來就沒有
+`category` 參數。`ExecutionConfig` 新增對應欄位
+`category: Literal["linear", "spot", "inverse", "option"] = "linear"`
+(對齊 Bybit V5 API 實際支援的四種值),`live/main.py` 的
+`build_runner_and_symbol()` 建構 `BybitClient` 時多傳一個
+`category=config.category`。
+
+預設值維持 `"linear"`,對已經在跑的部署(WLDUSDT 永續合約)行為完全
+不變——這是加一個新欄位,不是改行為,所有既有測試不用改斷言就能過。
+`live_execution_config.yaml`/`.example.yaml` 都補上 `category: linear`
+欄位跟列出四個可選值的註解。
+
+### 6.14 `weekend_mean_reversion` 改回 sat_strategy 的機制:一啟動就掛單
+
+**為什麼**:2026-09-26 對照 `sat_strategy/app/bot.py` 發現兩邊的進出場
+時機不同。sat_strategy 一啟動就把限價買單掛在簿上等價格下來,買單成交
+後馬上掛平倉單;strategy_lab 從 Phase 2 起改成「每 tick 先檢查價格有沒有
+越過門檻,越過了才下單」。後者在實盤的差異:沒有單掛在簿上(使用者實際
+看到「連買單都沒有掛」)、觸發時多半變成 taker 吃單、兩次輪詢之間的插針
+抓不到。
+
+**做法**:不改 runner 狀態機,新增一對 plugin。
+- `resting_deviation_from_reference` / `resting_return_to_reference` 的
+  `rule` 是 `AlwaysTrue`——IDLE 狀態的第一個 tick 就下單,掛單價本身就是
+  觸發條件,由交易所(或 PaperBroker / dry-run 模擬)撮合決定何時成交。
+- runner 原本的狀態轉移剛好就是 sat_strategy 的迴圈:進場單被取消 →
+  回 IDLE → 下個 tick 重掛;平倉單被取消 → 回 IN_POSITION → 重掛平倉;
+  平倉成交 → 回 IDLE → 補回同價位進場單。
+- 方向由策略 YAML 的 `direction` 決定,經 `StrategyContext.direction`
+  傳給 plugin:long 掛買在 `origin × (1 − d%)`,short 掛賣在
+  `origin × (1 + d%)`;平倉都掛在 `origin`。同一對 plugin 兩個方向共用,
+  不像 §6.11 的 `_short` plugin 要換一對。
+- 刻意跟 sat_strategy 不同的地方:**不 `round(…, 2)`**。那是為 BTC 價位
+  寫的,WLD(約 0.48)會被四捨五入成 0.47 或 0.48,把 0.75% 扭成 −1.5%
+  或 +0.2%。精度交給 `LiveBroker` 依真實 tickSize 修正(§6.9)。
+- 這個機制下 `rule` 永遠成立,搭配 `order_type=market` 會變成一啟動就市價
+  進場、一成交就市價平倉,所以 `StrategyRunner.__post_init__` 看到任一
+  plugin 有 `resting = True` 且不是 limit 就直接 `ValueError`。
+
+**手動 origin_price**:`ExecutionConfig.origin_price`(預設 `None`)。
+Fa_Successful_trade 的 Redis 歷史價格還沒接上前,中途啟動(例如週六
+17:20)想對齊週六 04:00 的起點,只能手動填。`None` 則沿用啟動當下的即時
+價。`run_forever()` 用 `resolve_origin_price()` 決定 origin,log 會印出
+來源與現價偏離百分比。
+
+**dry-run 限價單改成價格碰到才成交**:原本 `LiveBroker` dry-run 在第一次
+`fetch_order()` 就把任何單當成已成交(照抄 bot.py 的假設)。搭配一啟動
+就掛單,會每個輪詢週期都假成交一輪——sat_strategy 8/1 的 dry-run log 就是
+這樣跑出 7.7 萬次循環。現在 `tick()` 在 dry-run 記下最新價,限價單要等
+價格碰到限價(買 ≤、賣 ≥)才成交,市價單維持第一次查詢就成交,跟
+`PaperBroker` 同一條規則。
+
+**影響範圍**:`weekend_mean_reversion.yaml`、`mean_reversion_breakout_guard.yaml`
+(它的定義就是「同一套進出場 + kill_switch」)、`demo_weekend_phase1.py`
+改用新 plugin。舊的 `deviation_from_reference`/`return_to_reference`
+及 `_short` 版本保留不動,`weekend_short_breakout.yaml` 仍是「先越過門檻
+才下單」的版本。
+
+### 6.15 `--config`、啟動殘留檢查、空單正負號
+
+**`--config`**:同時跑多個策略時,原本只能共用 `live_execution_config.yaml`,
+想跑第二個策略就得改 `strategy_path`,第一個策略斷線重啟時會讀到被改過
+的設定,跑錯策略。改成 `live/main.py --config <檔案>`,每個策略一份,
+重啟用同一行指令。指定的檔案不存在直接 `FileNotFoundError`,不退回預設
+值(打錯檔名時默默用預設值會跑錯策略)。`select_strategy.py` 也支援
+`--config`,檔案不存在就從 example 範本建立。不給 `--config` 時行為不變。
+
+限制:不同策略要用不同 symbol。Bybit 單向持倉模式(`positionIdx: 0`,
+已對真實帳戶確認)下同一個 symbol 只有一個部位,`_cleanup()` 平掉的是
+整個部位、`_try_exit()` 的平倉數量也是整個部位,兩個策略會互相平倉。
+
+**`ensure_clean_start()`**:§6.14 之後策略一啟動就掛單。如果 process
+當機或被強制關閉,`_cleanup()` 沒跑,掛單留在交易所上;重啟後新 process
+不知道那張單,會再掛一張,變成兩倍部位。`run_forever()` 第一步先查
+`get_open_orders()` 與 `get_position_qty()`,有任何殘留就
+`LeftoverExchangeStateError` 拒絕啟動,列出殘留內容,讓人到 Bybit 手動
+處理。刻意不自動取消:帳戶上可能有使用者自己手動下的單,這裡分不出
+哪些是上一次策略留下的(要分得出來需要下單時帶 `orderLinkId` 前綴)。
+dry-run 跳過這個檢查。已對真實 mainnet 驗證:正在跑的策略掛著 0.4764
+買單時,檢查正確拒絕啟動。
+
+**`get_position_qty()` 正負號**:Bybit 的 `size` 永遠是正數,方向在
+`side`(`"Buy"`/`"Sell"`,沒持倉時是 `""`)。原本直接加總 `size`,空單
+會被讀成正數——`_cleanup()` 依正負號決定平倉方向,空單會被當成多單送出
+reduceOnly 賣單,交易所拒單,空單永遠平不掉。§6.11 的空單支援在 PaperBroker
+和 dry-run 下正確,只有真實模式有這個問題,§6.14 開放 `direction: short`
+後才會真的被踩到。
+

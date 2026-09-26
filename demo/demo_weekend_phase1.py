@@ -13,8 +13,8 @@ from zoneinfo import ZoneInfo
 
 from strategy_lab.broker.synthetic_feed import SyntheticFeed
 from strategy_lab.engine.runner import StrategyRunner
-from strategy_lab.plugins.entry.deviation_from_reference import DeviationFromReferenceEntry
-from strategy_lab.plugins.exit.return_to_reference import ReturnToReferenceExit
+from strategy_lab.plugins.entry.resting_deviation_from_reference import RestingDeviationFromReferenceEntry
+from strategy_lab.plugins.exit.resting_return_to_reference import RestingReturnToReferenceExit
 from strategy_lab.plugins.time_window.weekly_window import WeeklyWindow
 
 HKT = ZoneInfo("Asia/Hong_Kong")
@@ -22,8 +22,8 @@ HKT = ZoneInfo("Asia/Hong_Kong")
 
 def main() -> None:
     runner = StrategyRunner(
-        entry=DeviationFromReferenceEntry(deviation_pct=0.75),
-        exit=ReturnToReferenceExit(),
+        entry=RestingDeviationFromReferenceEntry(deviation_pct=0.75),
+        exit=RestingReturnToReferenceExit(),
         time_window=WeeklyWindow(),
         order_qty=1.0,
     )

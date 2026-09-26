@@ -1,24 +1,36 @@
+# 週末均值回歸,機制跟 sat_strategy/app/bot.py 一樣:
+#   1. 啟動時決定 origin_price(live_execution_config.yaml 的 origin_price
+#      有填就用手動值,沒填就用啟動當下的即時價)
+#   2. 一啟動就掛限價進場單,不等價格先越過門檻
+#        long  -> 買單掛在 origin × (1 − deviation_pct%)
+#        short -> 賣單掛在 origin × (1 + deviation_pct%)
+#   3. 進場成交後馬上掛 reduceOnly 限價平倉單在 origin
+#   4. 平倉成交後補回同價位的進場單;同一筆未平倉前不會重複開倉
+#   5. 窗口結束前 cleanup_buffer_minutes 分鐘:取消掛單、市價平掉剩餘部位
+# 這個機制只能搭配 order_type: limit,設成 market 會直接報錯。
+#
 # 對應 demo/demo_weekend_phase1.py 的手動組裝版本,進出場/時間窗參數完全一致。
 # 下單數量(qty)不在這裡設定——那是「怎麼下單」的資料,由
 # demo/sandbox_order.yaml(沙盒)或 live_execution_config.yaml(真實執行)
 # 的 position_sizing 決定,見 dsl/order_config.py。
 name: weekend_mean_reversion
 symbol: BTC/USDT
+direction: long   # long(跌破買入,回 origin 賣出平倉)/ short(漲破賣出放空,回 origin 買回平倉)
 
 entry:
-  type: deviation_from_reference
+  type: resting_deviation_from_reference
   params:
     deviation_pct: 0.75
 
 exit:
-  type: return_to_reference
+  type: resting_return_to_reference
   params: {}
 
 time_window:
   type: weekly_window
   params:
-    start_weekday: 5
+    start_weekday: 5 # 5 = friday HK_time
     start_time: "04:00"
-    end_weekday: 0
+    end_weekday: 0 # 0 = monday HK_time
     end_time: "06:00"
     cleanup_buffer_minutes: 5

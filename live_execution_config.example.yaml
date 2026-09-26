@@ -3,18 +3,26 @@
 #   cp live_execution_config.example.yaml live_execution_config.yaml
 # 再依實際部署需求修改——尤其 dry_run/testnet 這兩項,改成 false 之前
 # 務必先確認整條流程真的沒問題。
+#
+# 同時跑多個策略:每個策略複製一份自己的設定檔(例如 live_wld_long.yaml,
+# live_*.yaml 都已 gitignore),用 --config 指定,斷線重啟用同一行指令:
+#   python3 -m strategy_lab.live.main --config live_wld_long.yaml
+# 不同策略要用不同的 symbol——同一個 symbol 在 Bybit 單向持倉模式下共用
+# 一個部位,會互相平掉對方的倉位。
 
 strategy_path: strategies/weekend_mean_reversion.yaml  # 要跑哪個策略;也可以用 live/select_strategy.py 互動選擇
 symbol_override: null  # 不設就從策略 YAML 的 symbol 轉換成 Bybit 格式(如 "BTCUSDT")
+origin_price: null  # 起點價格:填數字 = 手動指定(例如週六 04:00 的價格);null = 用啟動當下的即時價格
 
 dry_run: true   # 先觀察 log,不真的下單;確認邏輯沒問題後才考慮改 false
 testnet: true   # 先用 Bybit 測試網;確認沒問題後才考慮改 false 接正式環境
-poll_interval_seconds: 5
-max_api_retries: 5
-retry_backoff_cap_seconds: 30.0
+poll_interval_seconds: 5   # run_forever() 每隔幾秒查一次價、跑一次 tick()
+max_api_retries: 5   # 呼叫 Bybit API 失敗時最多重試幾次(用指數退避)
+retry_backoff_cap_seconds: 30.0   # 指數退避(2^次數 秒)最多等這麼久,不會無限拉長
+category: linear   # linear(USDT 永續,預設)/ spot(現貨)/ inverse(幣本位)/ option(期權)
 
 # 下單方式——「下多大單」不是策略邏輯,是這裡的事(見 dsl/order_config.py)。
-order_type: limit  # limit 或 market;kill_switch/收攤平倉永遠是 market,不受這裡影響
+order_type: limit  # limit 或 market;kill_switch/收攤平倉永遠是 market,不受這裡影響。weekend_mean_reversion(一啟動就掛單)只能用 limit
 position_sizing:
   mode: fixed_qty       # fixed_qty(直接給數量) / fixed_quote_amount(給報價貨幣金額,如 USDT) / account_percentage(帳戶權益百分比)
   value: 1.0            # 對應上面 mode 的數字

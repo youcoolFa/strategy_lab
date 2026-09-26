@@ -18,12 +18,12 @@ name: mean_reversion_breakout_guard
 symbol: BTC/USDT
 
 entry:
-  type: deviation_from_reference
+  type: resting_deviation_from_reference
   params:
     deviation_pct: 0.75
 
 exit:
-  type: return_to_reference
+  type: resting_return_to_reference
   params: {}
 
 time_window:

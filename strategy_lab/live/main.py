@@ -9,6 +9,8 @@ live/main.py
     3. dsl.loader.load_strategy() 讀策略(entry/exit/time_window/
        kill_switch,參數都在 YAML 裡,這個檔案不重複定義)
     4. 組出 BybitClient -> LiveBroker -> StrategyRunner
+    4b. ensure_clean_start():交易所上這個 symbol 還有上次留下的掛單/持倉
+        (當機後 _cleanup() 沒跑)就拒絕啟動,避免重複掛單
     5. 如果 use_live_ticker_feed,啟動 market_feed.ticker_feed
     6. 用真實時鐘驅動的迴圈跑 runner.tick(),直到 STOPPED
     7. 收到 SIGINT/SIGTERM 呼叫 runner.request_stop(),讓下一次 tick()
@@ -16,15 +18,20 @@ live/main.py
        真實掛單或部位
 
 執行方式:
-    /opt/anaconda3/bin/python3 -m strategy_lab.live.main
+    /opt/anaconda3/bin/python3 -m strategy_lab.live.main                            # 讀 live_execution_config.yaml
+    /opt/anaconda3/bin/python3 -m strategy_lab.live.main --config live_wld_long.yaml  # 每個策略一份設定檔
+同時跑多個策略時,每個策略用自己的設定檔、而且要是不同的 symbol(同一個
+symbol 在 Bybit 單向持倉模式下共用一個部位,會互相平掉對方的倉位)。
 """
 
 from __future__ import annotations
 
+import argparse
 import signal
 import time
 from datetime import datetime
-from typing import Callable, Optional, Tuple
+from pathlib import Path
+from typing import Callable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -83,6 +90,7 @@ def build_runner_and_symbol(config: ExecutionConfig) -> Tuple[StrategyRunner, st
         testnet=config.testnet,
         max_retries=config.max_api_retries,
         retry_backoff_cap_seconds=config.retry_backoff_cap_seconds,
+        category=config.category,
     )
     live_broker = LiveBroker(client=bybit_client, symbol=symbol, dry_run=config.dry_run)
     order_qty = _resolve_order_qty(config, bybit_client, symbol)
@@ -114,12 +122,46 @@ def get_current_price(runner: StrategyRunner, config: ExecutionConfig, symbol: s
     return live_broker.client.get_last_price(symbol)
 
 
+class LeftoverExchangeStateError(RuntimeError):
+    pass
+
+
+def ensure_clean_start(client, symbol: str, dry_run: bool) -> None:
+    """當機或被強制關閉時 _cleanup() 沒跑,舊掛單/部位還留在交易所上;新
+    process 不知道它們存在,直接啟動會再掛一張,變成兩倍部位。有殘留就
+    拒絕啟動,讓人先到 Bybit 手動處理。"""
+    if dry_run:
+        return
+    orders = client.get_open_orders(symbol)
+    position = client.get_position_qty(symbol)
+    if not orders and position == 0:
+        return
+    lines = [f"{symbol} 在交易所上還有上次留下的東西,拒絕啟動(避免重複掛單/重複開倉):"]
+    for o in orders:
+        lines.append(f"  掛單 {o.get('orderId')} {o.get('side')} @ {o.get('price')} qty={o.get('qty')}")
+    if position != 0:
+        lines.append(f"  持倉 {position}")
+    lines.append("請先到 Bybit 取消這些掛單/平掉持倉,再重新啟動。")
+    raise LeftoverExchangeStateError("\n".join(lines))
+
+
+def resolve_origin_price(config: ExecutionConfig, current_price: float) -> float:
+    if config.origin_price is None:
+        return current_price
+    if config.origin_price <= 0:
+        raise ValueError(f"origin_price 必須大於 0,目前是 {config.origin_price}")
+    return config.origin_price
+
+
 def run_forever(
     runner: StrategyRunner,
     config: ExecutionConfig,
     symbol: str,
     now_fn: Callable[[], datetime] = lambda: datetime.now(HKT),
 ) -> None:
+    live_broker: LiveBroker = runner.broker  # type: ignore[assignment]
+    ensure_clean_start(live_broker.client, symbol, config.dry_run)
+
     if config.use_live_ticker_feed:
         ticker_feed.start()
 
@@ -132,8 +174,13 @@ def run_forever(
 
     now = now_fn()
     price = get_current_price(runner, config, symbol)
-    logger.info(f"啟動 strategy_lab live runner,起始價格 = {price:.2f}")
-    runner.start(now, price)
+    origin = resolve_origin_price(config, price)
+    source = "手動輸入" if config.origin_price is not None else "啟動當下即時價"
+    logger.info(
+        f"啟動 strategy_lab live runner:origin_price = {origin}({source}),"
+        f"目前價格 = {price},差 {(price / origin - 1) * 100:+.3f}%"
+    )
+    runner.start(now, origin)
     runner.tick(now, price)
 
     while runner.state != RunState.STOPPED:
@@ -147,9 +194,23 @@ def run_forever(
     logger.info(f"strategy_lab live runner 結束,共完成 {len(runner.trades)} 筆交易")
 
 
-def main() -> None:
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="strategy_lab live runner")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="執行設定檔路徑;同時跑多個策略時每個策略用自己的一份,斷線重啟用同一行指令。不給就用 live_execution_config.yaml",
+    )
+    args = parser.parse_args(argv)
+
+    config_path: Optional[Path] = None
+    if args.config is not None:
+        config_path = Path(args.config)
+        if not config_path.exists():
+            raise FileNotFoundError(f"找不到設定檔 {config_path}(不會退回預設值,避免跑錯策略)")
+
     load_dotenv()
-    config = load_execution_config()
+    config = load_execution_config(config_path=config_path)
     logger.info(f"載入執行參數: {config.to_dict()}")
 
     if config.dry_run:

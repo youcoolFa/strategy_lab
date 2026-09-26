@@ -23,6 +23,15 @@ def simple_moving_average(values: Sequence[float], window: int) -> Optional[floa
 
 
 @dataclass
+class AlwaysTrue:
+    """永遠成立。給 sat_strategy 那種「一啟動就掛限價單」的 plugin 用:
+    觸發條件就是限價本身,由交易所撮合決定,不用先看價格越過門檻。"""
+
+    def evaluate(self, ctx: StrategyContext) -> bool:
+        return True
+
+
+@dataclass
 class PriceBelowReference:
     """現價跌破 origin_price 的 deviation_pct%。"""
 

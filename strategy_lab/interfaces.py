@@ -52,6 +52,7 @@ class StrategyContext:
     entry_price: Optional[float] = None
     position_qty: float = 0.0
     entry_time: Optional[datetime] = None
+    direction: str = "long"  # "long" 或 "short",來自策略 YAML 的 direction
 
 
 @runtime_checkable

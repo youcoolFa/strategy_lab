@@ -86,6 +86,15 @@ class StrategyRunner:
     entry_time: Optional[datetime] = field(default=None, init=False)
     _stop_requested: bool = field(default=False, init=False)
 
+    def __post_init__(self) -> None:
+        # resting plugin 的 rule 永遠成立,掛單價本身就是觸發條件;市價單
+        # 會變成一啟動就市價進場、一成交就市價平倉。
+        resting = getattr(self.entry, "resting", False) or getattr(self.exit, "resting", False)
+        if resting and self.order_type != "limit":
+            raise ValueError(
+                f"一啟動就掛單的策略(sat_strategy 機制)只能用 order_type=limit,目前是 {self.order_type!r}"
+            )
+
     def request_stop(self) -> None:
         """對應 sat_strategy/app/bot.py 的 _stop_requested——給外部訊號
         處理器(SIGINT/SIGTERM)呼叫,不是策略邏輯自己決定要停。下一次
@@ -163,6 +172,7 @@ class StrategyRunner:
             entry_price=self.active_entry_price,
             position_qty=self.broker.position_qty(),
             entry_time=self.entry_time,
+            direction=self.direction,
         )
 
     def _try_enter(self, now: datetime, price: float) -> None:
