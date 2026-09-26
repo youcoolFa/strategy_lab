@@ -46,5 +46,53 @@
     "fullName": "Bitcoin",
     "marketRegion": "",
     "underlyingTicker": ""
+  },
+  "WLDUSDT": {
+    "symbol": "WLDUSDT",
+    "contractType": "LinearPerpetual",
+    "status": "Trading",
+    "baseCoin": "WLD",
+    "quoteCoin": "USDT",
+    "launchTime": "1690184920000",
+    "deliveryTime": "0",
+    "deliveryFeeRate": "",
+    "priceScale": "4",
+    "leverageFilter": {
+      "minLeverage": "1",
+      "maxLeverage": "50.00",
+      "leverageStep": "0.01"
+    },
+    "priceFilter": {
+      "minPrice": "0.0001",
+      "maxPrice": "1999.9998",
+      "tickSize": "0.0001"
+    },
+    "lotSizeFilter": {
+      "maxOrderQty": "1850000.0",
+      "minOrderQty": "0.1",
+      "qtyStep": "0.1",
+      "postOnlyMaxOrderQty": "1850000.0",
+      "maxMktOrderQty": "370000.0",
+      "minNotionalValue": "5"
+    },
+    "unifiedMarginTrade": true,
+    "fundingInterval": 480,
+    "settleCoin": "USDT",
+    "copyTrading": "both",
+    "upperFundingRate": "0.008",
+    "lowerFundingRate": "-0.008",
+    "isPreListing": false,
+    "preListingInfo": null,
+    "riskParameters": {
+      "priceLimitRatioX": "0.05",
+      "priceLimitRatioY": "0.1"
+    },
+    "displayName": "WLDUSDT",
+    "symbolType": "",
+    "forbidUplWithdrawal": false,
+    "symbolId": 335,
+    "fullName": "Worldcoin",
+    "marketRegion": "",
+    "underlyingTicker": ""
   }
 }
