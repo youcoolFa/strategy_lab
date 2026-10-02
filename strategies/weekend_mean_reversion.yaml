@@ -14,8 +14,9 @@
 # demo/sandbox_order.yaml(沙盒)或 live_execution_config.yaml(真實執行)
 # 的 position_sizing 決定,見 dsl/order_config.py。
 name: weekend_mean_reversion
-symbol: BTC/USDT
+symbol: WLD/USDT # BTC/USDT
 direction: long   # long(跌破買入,回 origin 賣出平倉)/ short(漲破賣出放空,回 origin 買回平倉)
+loop: null   # 重複次數:總 event 數 = loop + 1;0 = 只做 1 個 event;null = 不限次數(做到時間窗結束)
 
 entry:
   type: resting_deviation_from_reference

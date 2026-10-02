@@ -7,11 +7,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from strategy_lab.dsl.loader import load_strategy
 from strategy_lab.dsl.order_config import PositionSizing
 from strategy_lab.engine.runner import RunState
 from strategy_lab.live.bybit_client import BybitClient
 from strategy_lab.live.config import ExecutionConfig
 from strategy_lab.live.main import (
+    install_stop_signal_handlers,
+    setup_file_logging,
     LeftoverExchangeStateError,
     build_runner_and_symbol,
     ensure_clean_start,
@@ -23,6 +26,14 @@ from strategy_lab.live.main import (
 )
 
 HKT = ZoneInfo("Asia/Hong_Kong")
+
+
+@pytest.fixture(autouse=True)
+def _log_dir_in_tmp(tmp_path, monkeypatch):
+    # main() 會寫 log 檔;測試時寫到 tmp,不污染專案的 logs/。
+    import strategy_lab.live.main as main_module
+
+    monkeypatch.setattr(main_module, "LOG_DIR", tmp_path / "logs")
 
 
 class TestToBybitSymbol:
@@ -44,8 +55,9 @@ class TestBuildRunnerAndSymbol:
 
         runner, symbol = build_runner_and_symbol(config)
 
-        assert symbol == "BTCUSDT"
-        assert runner.broker.symbol == "BTCUSDT"
+        expected = to_bybit_symbol(load_strategy(config.strategy_path).symbol)
+        assert symbol == expected
+        assert runner.broker.symbol == expected
         assert runner.broker.dry_run is True
         assert runner.order_qty == 1.0  # 預設 position_sizing 是 fixed_qty, value=1.0
         assert runner.order_type == "limit"  # 預設值,對齊 ExecutionConfig.order_type
@@ -402,3 +414,99 @@ class TestMainConfigArgument:
         main([])
 
         assert seen["path"] is None
+
+
+class StopRecorder:
+    def __init__(self):
+        self.stop_requested = False
+
+    def request_stop(self):
+        self.stop_requested = True
+
+
+class TestStopSignalHandlers:
+    """2026-09-27 事故:關掉 PyCharm 時終端機送 SIGHUP,原本只處理
+    SIGINT/SIGTERM,程式直接被砍掉、沒收尾,WLD 掛單留在交易所上。"""
+
+    def _install(self, monkeypatch):
+        import signal
+
+        import strategy_lab.live.main as main_module
+
+        registered = {}
+        detached = []
+        monkeypatch.setattr(main_module.signal, "signal", lambda sig, handler: registered.__setitem__(sig, handler))
+        monkeypatch.setattr(main_module, "_detach_from_closed_terminal", lambda: detached.append(True))
+        runner = StopRecorder()
+        install_stop_signal_handlers(runner)
+        return signal, registered, detached, runner
+
+    def test_sighup_sigint_sigterm_are_all_handled(self, monkeypatch):
+        signal, registered, _, _ = self._install(monkeypatch)
+        assert {signal.SIGHUP, signal.SIGINT, signal.SIGTERM} <= set(registered)
+
+    def test_sighup_requests_normal_cleanup_and_detaches_from_the_dead_terminal(self, monkeypatch):
+        signal, registered, detached, runner = self._install(monkeypatch)
+
+        registered[signal.SIGHUP](signal.SIGHUP, None)
+
+        assert runner.stop_requested is True
+        assert detached == [True]  # 終端機已經關了,之後寫 stdout/stderr 會出錯
+
+    def test_ctrl_c_requests_cleanup_without_detaching(self, monkeypatch):
+        signal, registered, detached, runner = self._install(monkeypatch)
+
+        registered[signal.SIGINT](signal.SIGINT, None)
+
+        assert runner.stop_requested is True
+        assert detached == []
+
+
+class TestFileLogging:
+    def test_log_file_is_named_after_the_config_and_receives_messages(self, tmp_path):
+        from loguru import logger
+
+        path, sink_id = setup_file_logging("live_btc_band", log_dir=tmp_path)
+        try:
+            logger.info("hello-file-log")
+        finally:
+            logger.remove(sink_id)
+
+        assert path.parent == tmp_path
+        assert path.name.startswith("live_btc_band_") and path.suffix == ".log"
+        assert "hello-file-log" in path.read_text(encoding="utf-8")
+
+    def test_main_writes_crash_traceback_into_the_log_file(self, monkeypatch, tmp_path):
+        import strategy_lab.live.main as main_module
+
+        log_dir = tmp_path / "crash_logs"
+        monkeypatch.setattr(main_module, "LOG_DIR", log_dir)
+        monkeypatch.setattr(main_module, "load_dotenv", lambda: None)
+        monkeypatch.setattr(main_module, "build_runner_and_symbol", lambda config: (None, "X"))
+
+        def boom(runner, config, symbol):
+            raise RuntimeError("network-boom")
+
+        monkeypatch.setattr(main_module, "run_forever", boom)
+        path = tmp_path / "live_wld_long.yaml"
+        path.write_text("dry_run: true\n")
+
+        with pytest.raises(RuntimeError, match="network-boom"):
+            main(["--config", str(path)])
+
+        logs = list(log_dir.glob("live_wld_long_*.log"))
+        assert len(logs) == 1
+        text = logs[0].read_text(encoding="utf-8")
+        assert "network-boom" in text and "Traceback" in text
+
+
+class TestLoopWiring:
+    def test_strategy_loop_and_event_logger_are_passed_to_runner(self, monkeypatch):
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=True)
+
+        runner, _ = build_runner_and_symbol(config)
+
+        assert runner.loop == load_strategy(config.strategy_path).loop
+        assert runner.on_event is not None

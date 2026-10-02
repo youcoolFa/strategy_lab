@@ -131,3 +131,50 @@ class TestRestingPluginsRequireLimitOrders:
         # 買進、一成交就市價平倉,完全不是這個策略的意思。
         with pytest.raises(ValueError, match="limit"):
             make_runner(order_type="market")
+
+
+class TestBandReversionCycle:
+    """weekend_band_reversion:進場在 origin 下方 1%,平倉在 origin 上方 1%。"""
+
+    def _runner(self, direction):
+        from strategy_lab.plugins.exit.resting_offset_from_reference import RestingOffsetFromReferenceExit
+
+        return StrategyRunner(
+            entry=RestingDeviationFromReferenceEntry(deviation_pct=1.0),
+            exit=RestingOffsetFromReferenceExit(offset_pct=1.0),
+            time_window=WeeklyWindow(end_weekday=0, end_time="06:00", cleanup_buffer_minutes=5),
+            order_qty=1.0,
+            direction=direction,
+        )
+
+    def test_long_buys_below_origin_and_sells_above_origin(self):
+        runner = self._runner("long")
+        runner.start(NOW, price=1000.0)
+
+        runner.tick(at(0), 1000.0)  # 掛買 990
+        runner.tick(at(5), 989.0)  # 成交
+        runner.tick(at(10), 989.0)  # 掛賣 1010
+        assert runner.exit_order.price == pytest.approx(1010.0)
+
+        runner.tick(at(15), 1000.0)  # 回到 origin 還不會平倉
+        assert runner.state == RunState.EXIT_PENDING
+
+        runner.tick(at(20), 1010.0)  # 漲到 1010 才平倉
+        assert runner.state == RunState.IDLE
+        assert runner.trades[0].pnl == pytest.approx(20.0)
+
+    def test_short_sells_above_origin_and_buys_back_below_origin(self):
+        runner = self._runner("short")
+        runner.start(NOW, price=1000.0)
+
+        runner.tick(at(0), 1000.0)  # 掛賣 1010
+        runner.tick(at(5), 1011.0)  # 成交
+        runner.tick(at(10), 1011.0)  # 掛買回 990
+        assert runner.exit_order.price == pytest.approx(990.0)
+
+        runner.tick(at(15), 1000.0)
+        assert runner.state == RunState.EXIT_PENDING
+
+        runner.tick(at(20), 990.0)
+        assert runner.state == RunState.IDLE
+        assert runner.trades[0].pnl == pytest.approx(20.0)

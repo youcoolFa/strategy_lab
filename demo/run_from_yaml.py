@@ -81,6 +81,7 @@ def main() -> None:
         kill_switch=strategy.kill_switch,
         order_type=order_config.order_type,
         direction=strategy.direction,
+        loop=strategy.loop,
     )
 
     start = START_TIMES.get(strategy.name, datetime(2026, 8, 1, 4, 0, tzinfo=HKT))

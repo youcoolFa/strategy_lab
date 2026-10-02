@@ -25,6 +25,8 @@ class FakeHTTP:
         self.instruments_info_response = None
         self.wallet_balance_response = None
         self.raise_on_next_call = None
+        self.fee_rates_response = None
+        self.account_info_response = None
 
     def _maybe_raise(self):
         if self.raise_on_next_call is not None:
@@ -71,6 +73,14 @@ class FakeHTTP:
         self.calls.append(("get_wallet_balance", kwargs))
         self._maybe_raise()
         return self.wallet_balance_response
+
+    def get_fee_rates(self, **kwargs):
+        self.calls.append(("get_fee_rates", kwargs))
+        return self.fee_rates_response
+
+    def get_account_info(self, **kwargs):
+        self.calls.append(("get_account_info", kwargs))
+        return self.account_info_response
 
 
 def make_client(http=None) -> BybitClient:
@@ -174,12 +184,53 @@ class TestGetOrderStatus:
     def test_returns_open_when_found_in_open_orders(self):
         http = FakeHTTP()
         http.open_orders_response = {
-            "result": {"list": [{"orderId": "o1", "price": "60000.0", "cumExecQty": "0"}]}
+            "result": {"list": [{"orderId": "o1", "orderStatus": "New", "price": "60000.0", "cumExecQty": "0"}]}
         }
         client = make_client(http)
 
         result = client.get_order_status("BTCUSDT", "o1")
         assert result == OrderResult(order_id="o1", status="open", price=60000.0, filled_qty=0.0)
+
+    def test_filled_order_returned_by_realtime_endpoint_is_closed(self):
+        # 2026-09-27 真實 mainnet:帶 orderId 查 /v5/order/realtime,剛成交的單
+        # 也會回傳(orderStatus=Filled)。原本一律當 open,runner 永遠等不到
+        # 成交,平倉單從未掛出。
+        http = FakeHTTP()
+        http.open_orders_response = {
+            "result": {
+                "list": [
+                    {
+                        "orderId": "e613ce13",
+                        "orderStatus": "Filled",
+                        "price": "84882.5",
+                        "avgPrice": "84880.1",
+                        "cumExecQty": "0.001",
+                    }
+                ]
+            }
+        }
+        client = make_client(http)
+
+        result = client.get_order_status("BTCUSDT", "e613ce13")
+
+        assert result == OrderResult(order_id="e613ce13", status="closed", price=84880.1, filled_qty=0.001)
+        assert [c[0] for c in http.calls] == ["get_open_orders"]  # 不用再查歷史
+
+    def test_partially_filled_in_realtime_is_still_open(self):
+        http = FakeHTTP()
+        http.open_orders_response = {
+            "result": {"list": [{"orderId": "o1", "orderStatus": "PartiallyFilled", "price": "100", "cumExecQty": "0.5"}]}
+        }
+        assert make_client(http).get_order_status("BTCUSDT", "o1").status == "open"
+
+    def test_cancelled_in_realtime_is_canceled(self):
+        http = FakeHTTP()
+        http.open_orders_response = {
+            "result": {"list": [{"orderId": "o1", "orderStatus": "Cancelled", "price": "100", "avgPrice": "0", "cumExecQty": "0"}]}
+        }
+        result = make_client(http).get_order_status("BTCUSDT", "o1")
+        assert result.status == "canceled"
+        assert result.price == 100.0
 
     def test_falls_back_to_history_when_not_in_open_orders(self):
         http = FakeHTTP()
@@ -416,3 +467,21 @@ class TestSafeDefaults:
 
         sig = inspect.signature(BybitClient.__init__)
         assert sig.parameters["testnet"].default is True
+
+
+class TestPreflightQueries:
+    def test_get_fee_rates_returns_maker_and_taker(self):
+        http = FakeHTTP()
+        http.fee_rates_response = {"result": {"list": [{"symbol": "BTCUSDT", "takerFeeRate": "0.00055", "makerFeeRate": "0.0002"}]}}
+        assert make_client(http).get_fee_rates("BTCUSDT") == (0.0002, 0.00055)
+        assert http.calls == [("get_fee_rates", {"category": "linear", "symbol": "BTCUSDT"})]
+
+    def test_get_leverage_reads_position_leverage(self):
+        http = FakeHTTP()
+        http.positions_response = {"result": {"list": [{"symbol": "BTCUSDT", "side": "", "size": "0", "leverage": "100"}]}}
+        assert make_client(http).get_leverage("BTCUSDT") == 100.0
+
+    def test_get_margin_mode(self):
+        http = FakeHTTP()
+        http.account_info_response = {"result": {"marginMode": "REGULAR_MARGIN"}}
+        assert make_client(http).get_margin_mode() == "REGULAR_MARGIN"

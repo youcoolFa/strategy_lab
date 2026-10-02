@@ -2,6 +2,7 @@
 # 下單數量(qty)不在這裡設定,見 dsl/order_config.py。
 name: ma_crossover_bracket
 symbol: BTC/USDT
+loop: null   # 重複次數:總 event 數 = loop + 1;0 = 只做 1 個 event;null = 不限次數(做到時間窗結束)
 
 entry:
   type: ma_crossover

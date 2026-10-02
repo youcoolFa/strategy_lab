@@ -6,13 +6,20 @@ regression 用)。"""
 
 import json
 
-from strategy_lab.live.fetch_instrument_limits import _symbols_used_by_strategies, fetch_and_save
+import yaml
+
+from strategy_lab.live.fetch_instrument_limits import STRATEGIES_DIR, _symbols_used_by_strategies, fetch_and_save
+from strategy_lab.live.main import to_bybit_symbol
 
 
 class TestSymbolsUsedByStrategies:
-    def test_finds_btcusdt_from_all_strategy_yamls(self):
-        # 三份策略 YAML 目前都是 BTC/USDT,轉成 Bybit 格式後應該只有一個。
-        assert _symbols_used_by_strategies() == ["BTCUSDT"]
+    def test_returns_sorted_unique_bybit_symbols_of_every_strategy_yaml(self):
+        # 從策略檔本身推出預期值,換幣時不用改測試。
+        expected = sorted(
+            {to_bybit_symbol(yaml.safe_load(p.read_text())["symbol"]) for p in STRATEGIES_DIR.glob("*.yaml")}
+        )
+        assert _symbols_used_by_strategies() == expected
+        assert all("/" not in s for s in expected)
 
 
 class FakeBybitClientForFetch:

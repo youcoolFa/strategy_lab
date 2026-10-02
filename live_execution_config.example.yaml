@@ -7,10 +7,16 @@
 # 同時跑多個策略:每個策略複製一份自己的設定檔(例如 live_wld_long.yaml,
 # live_*.yaml 都已 gitignore),用 --config 指定,斷線重啟用同一行指令:
 #   python3 -m strategy_lab.live.main --config live_wld_long.yaml
+# 建議先跑啟動前確認(顯示掛單計畫/每輪損益/風險,輸入 yes 才在背景啟動):
+#   python3 -m strategy_lab.live.preflight --config live_wld_long.yaml
+# 實盤建議在背景跑(關掉終端機/PyCharm 不會影響它,停止時一樣會收尾):
+#   python3 -m strategy_lab.live.daemon start  --config live_wld_long.yaml
+#   python3 -m strategy_lab.live.daemon stop   --config live_wld_long.yaml
+#   python3 -m strategy_lab.live.daemon status --config live_wld_long.yaml
 # 不同策略要用不同的 symbol——同一個 symbol 在 Bybit 單向持倉模式下共用
 # 一個部位,會互相平掉對方的倉位。
 
-strategy_path: strategies/weekend_mean_reversion.yaml  # 要跑哪個策略;也可以用 live/select_strategy.py 互動選擇
+strategy_path: strategies/weekend_band_reversion.yaml  # 要跑哪個策略;也可以用 live/select_strategy.py 互動選擇
 symbol_override: null  # 不設就從策略 YAML 的 symbol 轉換成 Bybit 格式(如 "BTCUSDT")
 origin_price: null  # 起點價格:填數字 = 手動指定(例如週六 04:00 的價格);null = 用啟動當下的即時價格
 
@@ -25,7 +31,7 @@ category: linear   # linear(USDT 永續,預設)/ spot(現貨)/ inverse(幣本位
 order_type: limit  # limit 或 market;kill_switch/收攤平倉永遠是 market,不受這裡影響。weekend_mean_reversion(一啟動就掛單)只能用 limit
 position_sizing:
   mode: fixed_qty       # fixed_qty(直接給數量) / fixed_quote_amount(給報價貨幣金額,如 USDT) / account_percentage(帳戶權益百分比)
-  value: 1.0            # 對應上面 mode 的數字
+  value: 0.001            # 對應上面 mode 的數字
 # account_percentage 模式:留 null 就會自動查真實帳戶權益
 # (BybitClient.get_account_equity(),需要真實 API key);想用比真實權益
 # 更保守的假設值算 qty,才自己填一個數字覆蓋掉真實查詢結果。

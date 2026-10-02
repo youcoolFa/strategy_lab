@@ -22,11 +22,17 @@ live/main.py
     /opt/anaconda3/bin/python3 -m strategy_lab.live.main --config live_wld_long.yaml  # 每個策略一份設定檔
 同時跑多個策略時,每個策略用自己的設定檔、而且要是不同的 symbol(同一個
 symbol 在 Bybit 單向持倉模式下共用一個部位,會互相平掉對方的倉位)。
+
+實盤建議用 live/daemon.py 在背景跑,不要直接跑在 IDE 的終端機裡:
+    /opt/anaconda3/bin/python3 -m strategy_lab.live.daemon start --config live_btc_band.yaml
+直接在終端機跑時,Ctrl+C / 關掉終端機(SIGHUP)/ kill(SIGTERM)都會走收尾;
+但 IDE 如果強制砍掉整個 process,任何程式都來不及收尾。
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import time
 from datetime import datetime
@@ -39,6 +45,7 @@ from loguru import logger
 
 from strategy_lab.dsl.loader import load_strategy
 from strategy_lab.dsl.order_config import OrderConfig, compute_qty
+from strategy_lab.engine.events import Event, summarize
 from strategy_lab.engine.runner import RunState, StrategyRunner
 from strategy_lab.live.broker import LiveBroker
 from strategy_lab.live.bybit_client import BybitClient
@@ -46,6 +53,39 @@ from strategy_lab.live.config import ExecutionConfig, load_execution_config
 from strategy_lab.live.market_feed import ticker_feed
 
 HKT = ZoneInfo("Asia/Hong_Kong")
+LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
+
+
+def setup_file_logging(name: str, log_dir: Optional[Path] = None) -> Tuple[Path, int]:
+    """除了終端機,log 也寫一份到 logs/<設定檔名>_<啟動時間>.log。終端機
+    一關 log 就沒了(2026-09-27 事故只能靠 PyCharm/zsh 的紀錄反推原因)。"""
+    directory = log_dir if log_dir is not None else LOG_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}_{datetime.now(HKT).strftime('%Y%m%d_%H%M%S')}.log"
+    sink_id = logger.add(path, level="INFO", encoding="utf-8", rotation="20 MB", backtrace=True, diagnose=False)
+    return path, sink_id
+
+
+def _detach_from_closed_terminal() -> None:
+    # 終端機已經關掉,之後寫 stdout/stderr 會出錯;導到 /dev/null,log 檔照寫。
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+
+
+def install_stop_signal_handlers(runner: StrategyRunner) -> None:
+    """SIGINT(Ctrl+C)、SIGTERM(kill / daemon stop)、SIGHUP(關掉終端機或
+    PyCharm)都走同一個收尾:下一次 tick() 取消掛單、平倉。原本漏了 SIGHUP,
+    2026-09-27 關掉 PyCharm 時程式被直接砍掉,WLD 掛單留在交易所上沒人管。"""
+
+    def handle_stop_signal(signum, frame):
+        if signum == signal.SIGHUP:
+            _detach_from_closed_terminal()
+        logger.warning(f"收到停止訊號({signal.Signals(signum).name}),準備清理後結束")
+        runner.request_stop()
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, handle_stop_signal)
 
 
 def to_bybit_symbol(yaml_symbol: str) -> str:
@@ -104,8 +144,19 @@ def build_runner_and_symbol(config: ExecutionConfig) -> Tuple[StrategyRunner, st
         kill_switch=strategy.kill_switch,
         order_type=config.order_type,
         direction=strategy.direction,
+        loop=strategy.loop,
+        on_event=log_event,
     )
     return runner, symbol
+
+
+def log_event(event: Event) -> None:
+    how = "強制平倉" if event.forced else "正常平倉"
+    logger.info(
+        f"event #{event.index} 完成({how}):{event.direction} 均價 {event.avg_entry} → {event.avg_exit},"
+        f"成交 {event.fills} 次,最大部位 {event.max_position},損益 {event.realized_pnl:+.4f} USDT(未扣手續費),"
+        f"期間最大回撤 {event.max_drawdown:+.4f} USDT,持倉 {event.end_time - event.start_time}"
+    )
 
 
 def get_current_price(runner: StrategyRunner, config: ExecutionConfig, symbol: str) -> float:
@@ -165,12 +216,7 @@ def run_forever(
     if config.use_live_ticker_feed:
         ticker_feed.start()
 
-    def handle_stop_signal(signum, frame):
-        logger.warning(f"收到停止訊號({signum}),準備清理後結束")
-        runner.request_stop()
-
-    signal.signal(signal.SIGTERM, handle_stop_signal)
-    signal.signal(signal.SIGINT, handle_stop_signal)
+    install_stop_signal_handlers(runner)
 
     now = now_fn()
     price = get_current_price(runner, config, symbol)
@@ -191,7 +237,11 @@ def run_forever(
 
     if config.use_live_ticker_feed:
         ticker_feed.stop()
-    logger.info(f"strategy_lab live runner 結束,共完成 {len(runner.trades)} 筆交易")
+    summary = summarize(runner.events)
+    logger.info(
+        f"strategy_lab live runner 結束:event {summary.count} 個(其中強制平倉 {summary.forced} 個,獲利 {summary.wins} 個),"
+        f"合計損益 {summary.total_pnl:+.4f} USDT(未扣手續費),最大回撤 {summary.max_drawdown:+.4f} USDT"
+    )
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -209,6 +259,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         if not config_path.exists():
             raise FileNotFoundError(f"找不到設定檔 {config_path}(不會退回預設值,避免跑錯策略)")
 
+    log_name = config_path.stem if config_path is not None else "live_execution_config"
+    log_path, _ = setup_file_logging(log_name)
+    logger.info(f"log 檔: {log_path}")
+
     load_dotenv()
     config = load_execution_config(config_path=config_path)
     logger.info(f"載入執行參數: {config.to_dict()}")
@@ -220,8 +274,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     else:
         logger.warning("=== 使用 Bybit 正式環境,將動用真實資金! ===")
 
-    runner, symbol = build_runner_and_symbol(config)
-    run_forever(runner, config, symbol)
+    try:
+        runner, symbol = build_runner_and_symbol(config)
+        run_forever(runner, config, symbol)
+    except Exception:
+        logger.exception("live runner 異常結束(沒有走收尾流程,請檢查交易所上的掛單/持倉)")
+        raise
 
 
 if __name__ == "__main__":

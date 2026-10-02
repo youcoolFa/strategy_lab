@@ -12,6 +12,10 @@ live_execution_config.yaml
 live_*.yaml
 !live_execution_config.example.yaml
 
+# live 執行時的 log 檔與背景執行的 pid 檔(live/main.py、live/daemon.py)。
+logs/
+run/
+
 # 說明用的工程圖(architecture 討論過程中畫的 SVG)——不上傳,只留在本機。
 docs/*.svg
 

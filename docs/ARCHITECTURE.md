@@ -427,6 +427,11 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | `category`(Bybit V5 商品類型)從寫死改成可設定 | `BybitClient` 原本模組常數 `CATEGORY = "linear"` 改成建構子參數 `category`,存進 `self._category`,7 處 API 呼叫都換掉;`ExecutionConfig` 新增 `category: Literal["linear","spot","inverse","option"] = "linear"`;`live/main.py` 建構 `BybitClient` 時多傳 `category=config.category` | 新增 §6.13 | 已完成,預設值不變,對既有部署零行為影響 |
 | `weekend_mean_reversion` 改回 sat_strategy 機制(一啟動就掛單)+ 雙向 + 手動 origin | 新增 `AlwaysTrue` 條件;新增 plugin `resting_deviation_from_reference`/`resting_return_to_reference`(rule 永遠成立,掛單價就是觸發條件,方向讀 `ctx.direction`,不再 `round(…, 2)`);`StrategyContext` 新增 `direction`;`StrategyRunner` 拒絕 resting plugin + `order_type=market`;`ExecutionConfig.origin_price`(手動起點)+ `live/main.py` 的 `resolve_origin_price()`;`LiveBroker` dry-run 限價單改成價格碰到才成交;`weekend_mean_reversion.yaml`/`mean_reversion_breakout_guard.yaml`/`demo_weekend_phase1.py` 改用新 plugin | 新增 §6.14 | 已完成;舊的 `deviation_from_reference`(先看價格越過門檻才下單)保留給其他策略 |
 | `--config` + 啟動殘留檢查 + 空單正負號修正 | `live/main.py`/`live/select_strategy.py` 新增 `--config`(每個策略一份設定檔,檔案不存在直接報錯);`live_*.yaml` gitignore;`ensure_clean_start()`:非 dry-run 時交易所上該 symbol 有掛單或持倉就拒絕啟動;`BybitClient.get_open_orders()`;`get_position_qty()` 依 `side` 回傳正負號(原本空單是正數) | 新增 §6.15 | 已完成,啟動檢查已對真實 mainnet 掛單驗證 |
+| `weekend_band_reversion` 策略 | 新增平倉 plugin `resting_offset_from_reference`(`offset_pct`,long 在 origin 上方、short 在下方平倉,0 = 回到 origin);新增 `strategies/weekend_band_reversion.yaml` | 新增 §6.16 | 已完成 |
+| 修正:已成交的單被當成未成交(真實 mainnet 事故) | `BybitClient.get_order_status()` 改看 `orderStatus`,不再把 `/v5/order/realtime` 回傳的單一律當 open | 新增 §6.17 | 已完成,用真實已成交單驗證 |
+| 修正:關掉 PyCharm 時程式沒收尾(真實 mainnet 事故) | `install_stop_signal_handlers()` 加處理 SIGHUP;`setup_file_logging()` log 寫檔 + 異常結束寫 traceback;新增 `live/daemon.py`(背景 start/stop/status,`start_new_session`) | 新增 §6.18 | 已完成 |
+| 啟動前確認(preflight)+ 估算元件化 | `interfaces.PlannedExit` + 出場 plugin 的 `planned_exit()`(各自描述止盈/停損);新增 `estimates/`(`OrderPlan`/`MarketSnapshot`/`build_order_plan()`,計算元件以 `@register("metric", ...)` 註冊:`order_plan`/`cycle_pnl`/`risk`/`time_window`);`BybitClient` 新增 `get_fee_rates()`/`get_leverage()`/`get_margin_mode()`;新增 `live/preflight.py`(顯示估算,實盤要輸入 `yes` 才用 daemon 啟動) | 新增 §6.19 | 已完成,用真實設定唯讀預覽過 |
+| event + loop | 新增 `engine/events.py`(`EventTracker`:由成交自動切出 event=部位 0→0,帶正負號部位會計、加碼更新均價、每 tick 量期間最大回撤;`summarize()`:跨 event 權益曲線的最大回撤);runner 新增 `loop`/`on_event`/`events`,強制平倉也記成 event(`forced=True`);策略 YAML 新增 `loop`(重複次數,總 event = loop+1,預設 0,null 不限),既有策略都明確寫 `loop: null`;main 每個 event 寫 log、結束時寫總結;preflight 顯示 event 次數 | 新增 §6.20 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1098,3 +1103,115 @@ reduceOnly 賣單,交易所拒單,空單永遠平不掉。§6.11 的空單支援
 和 dry-run 下正確,只有真實模式有這個問題,§6.14 開放 `direction: short`
 後才會真的被踩到。
 
+### 6.16 `weekend_band_reversion`:平倉點穿過 origin 再往獲利方向偏
+
+`weekend_mean_reversion` 的進階版,使用者提出。進場不變(long 掛買在
+`origin × (1 − deviation_pct%)`),平倉不是回到 origin,而是
+`origin × (1 + offset_pct%)`;short 鏡像。新增平倉 plugin
+`resting_offset_from_reference`(`offset_pct` 獨立於進場的
+`deviation_pct`,設 0 就等於 `resting_return_to_reference`)。每輪價差約
+兩倍,但要多走一段才平倉,完成輪數變少、週一被市價收尾的機率變高;這個
+組合不在 sat_strategy 的回測表裡。
+
+### 6.17 事故:買單已成交,程式卻一直當成未成交,平倉單從未掛出
+
+2026-09-27 21:37 在真實 mainnet 跑 `weekend_band_reversion`(BTCUSDT
+0.001):買單 21:37:25 成交(均價 84,880.1),但程式卡在 ENTRY_PENDING,
+平倉單一直沒掛。原因:`get_order_status()` 先帶 `orderId` 查
+`/v5/order/realtime`,**有回傳就一律當 open**;但 Bybit 這個端點帶
+`orderId` 時連剛成交/取消的單也會回傳(實測 `orderStatus: 'Filled'`)。
+修正:不論哪個端點回傳,一律依 `orderStatus` 判斷(New/PartiallyFilled/
+Untriggered 等 → open,Filled → closed,其餘 → canceled)。dry-run 和
+PaperBroker 不經過這個端點,之前從未真的成交過,所以一直沒被發現。
+
+### 6.18 事故:關掉 PyCharm,程式被砍掉沒收尾,WLD 掛單留在交易所上
+
+WLD 實盤(2026-09-26 19:31 在 PyCharm 終端機啟動)不明原因消失,留下
+Buy 0.4764 × 41.1 掛單沒人管。調查(程式的 log 只印在終端機,已經沒了,
+只能靠其他紀錄反推):
+- PyCharm `idea.log`:09-27 02:41 正常關閉(存設定 → 依序關掉 3 個專案
+  → `IDE SHUTDOWN` 02:42:18),20:44 才重新開啟。
+- `~/.zsh_history` 修改時間 02:42(PyCharm 終端機的 zsh 結束時寫入),
+  最後幾行正是 WLD 的啟動指令。
+- `pmset` log:這段期間 Mac 沒有睡眠;`kern.boottime` 09-11,沒有重開機。
+- `main.py` 只處理 SIGINT/SIGTERM。關掉終端機送的是 SIGHUP,沒處理的
+  SIGHUP 預設直接結束,收尾不會跑。用同樣只處理 SIGINT/SIGTERM 的程式
+  送 SIGHUP 重現,收尾確實沒跑。
+
+修正三件事:
+1. `install_stop_signal_handlers()`:SIGHUP 也走 `request_stop()` 收尾;
+   收到 SIGHUP 時把 stdout/stderr 導到 /dev/null(終端機已關,繼續寫會
+   出錯)。`tests/integration/test_live_signal_cleanup.py` 對真的 process
+   送 SIGHUP 驗證收尾有跑。
+2. `setup_file_logging()`:log 另寫一份到 `logs/<設定檔名>_<時間>.log`;
+   `main()` 異常結束時把 traceback 寫進 log(以前一當掉只剩終端機畫面)。
+3. `live/daemon.py`:`start/stop/status`,用 `start_new_session=True`
+   在背景跑,沒有控制終端機,關終端機/PyCharm 都影響不到;也跟啟動它的
+   程式不同 process group(避開 sat_strategy launchd 排程被整組砍掉的
+   問題)。`stop` 送 SIGTERM 並等收尾完成,等不到也不自動 SIGKILL;會先
+   確認 PID 真的是這個策略的程式才送訊號(防 PID 重用)。`start` 會等幾秒
+   確認沒有立刻結束(例如啟動檢查擋下),有的話回報 log 最後幾行。
+
+限制:SIGHUP 處理只保護「正常關閉終端機」;如果 IDE 對程式送 SIGKILL,
+任何程式都來不及收尾——這就是為什麼實盤要用 daemon 在背景跑。
+
+### 6.19 啟動前確認(preflight)與估算元件化
+
+**為什麼**:`main.py` 一執行就下單,沒有任何預估或確認。2026-09-27 兩次
+實盤都因為 origin 過期,進場單一掛出去就吃單成交,事前沒有任何東西提醒。
+
+**設計:plugin 描述事實,計算元件只讀事實**
+- 出場 plugin 選擇性實作 `planned_exit(ctx) -> PlannedExit(take_profit,
+  stop_loss)`;進場 plugin 的 `entry_price()` + `resting` 本來就足以描述
+  進場。`estimates/plan.py` 的 `build_order_plan()` 只問 plugin,不重複
+  任何進出場公式,並判斷進場單會不會越過現價(會 → 吃單、警告)。
+- 計算元件像 plugin 一樣註冊(`@register("metric", name)`),輸入都是
+  `Estimate(plan, market)`,不寫死任何策略。每個策略的 PnL/最大虧損公式
+  由它的 plugin 組合自動決定:`bracket_tp_sl` 回報停損 → 最大虧損有上限;
+  `weekend_*` 沒有停損 → 標示沒有上限並列出不利 1/3/5/10% 情境。
+- `cycle_pnl`/`risk` 都用 runner 的 `Trade.pnl`,多空公式跟實際記帳同一套。
+- 手續費用 `get_fee_rates()` 查這個帳戶的真實費率;掛單/吃單依「是否越過
+  現價」與 plugin 的 `resting` 判斷。
+- 新增一種計算 = `estimates/metrics/` 新增一個檔案 + 在 `__init__` 加一行
+  import + 加進 `DEFAULT_METRICS`。
+
+**最大回撤**:啟動前沒有交易紀錄,只能給情境虧損。真正的 max drawdown 要
+用實際交易紀錄的權益曲線計算——等交易資料寫進資料庫之後,同一套 metric
+元件可以換成吃交易紀錄的輸入。
+
+**`live/preflight.py`**:讀設定 → 唯讀查現價/權益/費率/槓桿/保證金模式 →
+修正數量精度(低於最小下單量直接擋)→ 印出四個元件的結果 → 實盤檢查交易所
+殘留(有就擋)→ 實盤要輸入完整 `yes`、dry-run 輸入 `y` → 呼叫
+`daemon.start()` 在背景啟動。跟 `main.py` 分開,`main.py` 仍可無人值守啟動。
+
+### 6.20 event 與 loop
+
+**event 的定義**:部位從 0 開始、回到 0 結束。由成交自動切出來
+(`engine/events.py` 的 `EventTracker`),不用每個策略自己定義——單筆進出
+(mean_reversion:1 買 1 平)跟之後的分注法(多次加碼、多次減碼,回到 0
+才算一個)是同一套。帶正負號的部位會計:同方向成交更新平均成本,反方向
+成交實現損益,多空同一條公式。
+
+**每個 event 記錄**:方向、開始/結束時間、成交次數、最大部位、進出場均價、
+已實現損益(價差毛利,未扣手續費和資金費)、期間最大回撤、是否強制平倉。
+期間最大回撤 = event 期間每個 tick 的(已實現 + 未實現)最低點。沒有停損
+不代表回撤是 0——沙盒 seed=42 第 1 個 event 最後 +450,期間帳面最低 -1152。
+
+**跨 event 的最大回撤**:`summarize()` 把 event 串成權益曲線(每個 event
+期間的最低點也算進去),取高點到低點的最大跌幅。這才是真正的 max drawdown,
+啟動前的 preflight 只能給情境。
+
+**loop**(策略 YAML,策略邏輯的一部分):重複次數,總 event 數 = loop + 1。
+`loop: 0`(沒寫時的預設)只做 1 個 event;`loop: null` 不限次數,做到時間窗
+結束。最後一個 event 平倉成交後,runner 直接收尾(STOPPED),不會再掛下一張
+進場單;時間窗先到也一樣收尾,先到的為準。既有策略全部明確寫 `loop: null`,
+維持原本不限次數的行為。直接建構 `StrategyRunner`(測試/demo)時 `loop`
+預設 None,行為不變。
+
+**強制平倉也是 event**:時間窗收尾、停止訊號時的市價平倉記成 `forced=True`
+的 event,成交價優先用交易所回報,查不到才用最後一個 tick 估算。`trades`
+仍不含強制平倉(既有設計),event 才是完整紀錄。
+
+**輸出**:`live/main.py` 每個 event 完成時寫 log(`on_event` callback),
+結束時寫總結(event 數、強制平倉數、獲利數、合計損益、最大回撤);preflight
+的時間窗區塊顯示 event 次數上限。寫進資料庫是下一步(見 TODO)。

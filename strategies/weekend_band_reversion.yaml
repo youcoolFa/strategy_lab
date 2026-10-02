@@ -1,0 +1,38 @@
+# weekend_mean_reversion 的進階版:平倉點不是回到 origin,而是穿過 origin
+# 再往獲利方向走 offset_pct%——在 origin 上下各劃一條帶,下緣買、上緣賣。
+#   long  -> 一啟動就掛買單在 origin × (1 − deviation_pct%)
+#            成交後馬上掛 reduceOnly 賣單在 origin × (1 + offset_pct%)
+#   short -> 一啟動就掛賣單在 origin × (1 + deviation_pct%)
+#            成交後馬上掛 reduceOnly 買單在 origin × (1 − offset_pct%)
+# 其餘機制跟 weekend_mean_reversion 完全一樣(平倉成交後補回同價位進場單、
+# 窗口結束前取消掛單並市價平倉、只能用 order_type: limit)。
+#
+# 取捨:每一輪賺的價差約是 weekend_mean_reversion 的兩倍,但價格要多走一段
+# (long 要從 −0.75% 漲到 +0.75%)才平倉,完成的輪數會變少,週一收尾時還
+# 持倉、被市價平掉的機率也變高。這個組合不在 sat_strategy_result.xlsx 的
+# 回測裡。
+#
+# 下單數量(qty)不在這裡設定,見 live_execution_config.yaml 的 position_sizing。
+name: weekend_band_reversion
+symbol: BTC/USDT
+direction: long   # long(下緣買入,上緣賣出平倉)/ short(上緣賣出放空,下緣買回平倉)
+loop: null   # 重複次數:總 event 數 = loop + 1;0 = 只做 1 個 event;null = 不限次數(做到時間窗結束)
+
+entry:
+  type: resting_deviation_from_reference
+  params:
+    deviation_pct: 0.1   # 進場:離 origin 多少 %
+
+exit:
+  type: resting_offset_from_reference
+  params:
+    offset_pct: 0.1      # 平倉:穿過 origin 後再往獲利方向多少 %(0 = 回到 origin 就平倉)
+
+time_window:
+  type: weekly_window
+  params:
+    start_weekday: 5   # 5 = 星期六(星期一 = 0)HKT
+    start_time: "04:00"
+    end_weekday: 0     # 0 = 星期一 HKT
+    end_time: "06:00"
+    cleanup_buffer_minutes: 5

@@ -1,6 +1,9 @@
-"""sat_strategy/app/bot.py 的出場機制:進場單一成交就馬上掛 reduceOnly
-限價平倉單在 origin_price,不先等價格回到 origin 才下單。long/short 的
-平倉價都是 origin,方向由 StrategyRunner 決定是賣出平多還是買回平空。"""
+"""weekend_band_reversion 的平倉機制:跟 resting_return_to_reference 一樣,
+進場一成交就馬上掛 reduceOnly 限價平倉單,差別在平倉點不是 origin,而是
+往獲利方向再偏 offset_pct%:
+    long  -> 賣出平倉在 origin × (1 + offset_pct%)
+    short -> 買回平倉在 origin × (1 − offset_pct%)
+offset_pct = 0 等同 resting_return_to_reference。"""
 
 from __future__ import annotations
 
@@ -13,9 +16,10 @@ from strategy_lab.rules.base import Condition
 from strategy_lab.rules.conditions import AlwaysTrue
 
 
-@register("exit", "resting_return_to_reference")
+@register("exit", "resting_offset_from_reference")
 @dataclass
-class RestingReturnToReferenceExit:
+class RestingOffsetFromReferenceExit:
+    offset_pct: float
     rule: Condition = field(init=False)
     resting: ClassVar[bool] = True
 
@@ -24,7 +28,9 @@ class RestingReturnToReferenceExit:
 
     def exit_price(self, ctx: StrategyContext) -> float:
         assert ctx.origin_price is not None, "出場前必須先設定 origin_price"
-        return ctx.origin_price
+        if ctx.direction == "short":
+            return ctx.origin_price * (1 - self.offset_pct / 100)
+        return ctx.origin_price * (1 + self.offset_pct / 100)
 
     def planned_exit(self, ctx: StrategyContext) -> PlannedExit:
         return PlannedExit(take_profit=self.exit_price(ctx), stop_loss=None)

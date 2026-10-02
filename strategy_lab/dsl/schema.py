@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, conint
 
 
 class PluginSpec(BaseModel):
@@ -34,6 +34,9 @@ class StrategyDefinition(BaseModel):
     # ShortDeviationFromReferenceEntry 沒道理),不是單純「怎麼下單」的
     # 選擇,見 docs/ARCHITECTURE.md §6.11。
     direction: Literal["long", "short"] = "long"
+    # 重複次數:總 event 數 = loop + 1,做完 bot 就收尾結束;0 = 只做 1 個 event;
+    # null = 不限次數(做到時間窗結束)。event = 部位從 0 開始、回到 0 結束。
+    loop: Optional[conint(ge=0)] = 0
 
     class Config:
         extra = "forbid"

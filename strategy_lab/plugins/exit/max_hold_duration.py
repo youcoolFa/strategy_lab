@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from strategy_lab.interfaces import StrategyContext
+from strategy_lab.interfaces import PlannedExit, StrategyContext
 from strategy_lab.registry import register
 from strategy_lab.rules.base import Condition
 from strategy_lab.rules.conditions import MaxDurationElapsed
@@ -23,3 +23,6 @@ class MaxHoldDurationExit:
 
     def exit_price(self, ctx: StrategyContext) -> float:
         return ctx.price
+
+    def planned_exit(self, ctx: StrategyContext) -> PlannedExit:
+        return PlannedExit(take_profit=None, stop_loss=None)  # 依持倉時間出場,沒有預定價位

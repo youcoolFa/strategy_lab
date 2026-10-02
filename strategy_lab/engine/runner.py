@@ -33,9 +33,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum, auto
-from typing import Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 from strategy_lab.broker.paper_broker import PaperBroker
+from strategy_lab.engine.events import Event, EventTracker
 from strategy_lab.interfaces import Broker, EntrySignal, ExitSignal, KillSwitch, OrderLike, StrategyContext, TimeWindow
 
 
@@ -74,6 +75,10 @@ class StrategyRunner:
     kill_switch: Optional[KillSwitch] = None
     order_type: str = "limit"  # "limit" 或 "market"——見 dsl/order_config.py
     direction: str = "long"  # "long" 或 "short"——見 docs/ARCHITECTURE.md §6.11
+    # 重複次數:總 event 數 = loop + 1,做完就收尾結束;None = 不限次數(做到時間窗結束)。
+    # 策略 YAML 沒寫時預設 0(dsl/schema.py);直接建構 runner 時預設不限,維持既有行為。
+    loop: Optional[int] = None
+    on_event: Optional[Callable[[Event], None]] = None
 
     state: RunState = field(default=RunState.IDLE, init=False)
     window_end: Optional[datetime] = field(default=None, init=False)
@@ -85,8 +90,12 @@ class StrategyRunner:
     trades: List[Trade] = field(default_factory=list, init=False)
     entry_time: Optional[datetime] = field(default=None, init=False)
     _stop_requested: bool = field(default=False, init=False)
+    events: List[Event] = field(default_factory=list, init=False)
+    _tracker: EventTracker = field(default_factory=EventTracker, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.loop is not None and self.loop < 0:
+            raise ValueError(f"loop 必須是 0 以上的整數或 None(不限次數),目前是 {self.loop}")
         # resting plugin 的 rule 永遠成立,掛單價本身就是觸發條件;市價單
         # 會變成一啟動就市價進場、一成交就市價平倉。
         resting = getattr(self.entry, "resting", False) or getattr(self.exit, "resting", False)
@@ -118,18 +127,19 @@ class StrategyRunner:
 
         self.price_history.append(price)
         self.broker.tick(price)
+        self._tracker.on_price(now, price)
 
         assert self.window_end is not None, "呼叫 tick() 前必須先呼叫 start()"
         if self.time_window.should_cleanup(now, self.window_end):
-            self._cleanup()
+            self._cleanup(now)
             return
 
         if self.kill_switch is not None and self.kill_switch.rule.evaluate(self._ctx(now, price)):
-            self._cleanup()
+            self._cleanup(now)
             return
 
         if self._stop_requested:
-            self._cleanup()
+            self._cleanup(now)
             return
 
         if self.state == RunState.IDLE:
@@ -139,7 +149,7 @@ class StrategyRunner:
         elif self.state == RunState.IN_POSITION:
             self._try_exit(now, price)
         elif self.state == RunState.EXIT_PENDING:
-            self._check_exit_fill()
+            self._check_exit_fill(now)
 
     def run(
         self,
@@ -202,6 +212,7 @@ class StrategyRunner:
             self.active_entry_price = order.price
             self.entry_time = now
             self.state = RunState.IN_POSITION
+            self._record_fill(now, self._entry_sign(), order.filled_qty, order.price)
         elif order.status == "canceled":
             self.state = RunState.IDLE
 
@@ -225,7 +236,7 @@ class StrategyRunner:
                     self.exit_order = self.broker.place_limit_sell(price=self.exit.exit_price(ctx), qty=qty)
             self.state = RunState.EXIT_PENDING
 
-    def _check_exit_fill(self) -> None:
+    def _check_exit_fill(self, now: datetime) -> None:
         """檢查出場單是否已成交或被取消。"""
         assert self.exit_order is not None
         order = self.broker.fetch_order(self.exit_order.id)
@@ -242,10 +253,27 @@ class StrategyRunner:
             self.active_entry_price = None
             self.entry_time = None
             self.state = RunState.IDLE
+            self._record_fill(now, -self._entry_sign(), order.filled_qty, order.price)
+            if self._loop_exhausted():
+                self._cleanup(now)
         elif order.status == "canceled":
             self.state = RunState.IN_POSITION
 
-    def _cleanup(self) -> None:
+    def _entry_sign(self) -> int:
+        return -1 if self.direction == "short" else 1
+
+    def _loop_exhausted(self) -> bool:
+        return self.loop is not None and len(self.events) >= self.loop + 1
+
+    def _record_fill(self, now: datetime, sign: int, qty: float, price: float, forced: bool = False) -> None:
+        event = self._tracker.on_fill(now, sign * qty, price, forced=forced)
+        if event is None:
+            return
+        self.events.append(event)
+        if self.on_event is not None:
+            self.on_event(event)
+
+    def _cleanup(self, now: datetime) -> None:
         """時間窗口結束時，取消所有未成交單並強制平倉。改用
         market_flat_buy()/market_flat_sell()(不是舊的 market_close())
         是刻意的:`position_qty()` 對空倉會回傳負數,`market_close()`
@@ -259,8 +287,21 @@ class StrategyRunner:
             if order is not None:
                 self.broker.cancel_order(order.id)
         remaining = self.broker.position_qty()
-        if remaining > 0:
-            self.broker.market_flat_buy(remaining)
-        elif remaining < 0:
-            self.broker.market_flat_sell(abs(remaining))
+        if remaining != 0:
+            if remaining > 0:
+                close_order = self.broker.market_flat_buy(remaining)
+            else:
+                close_order = self.broker.market_flat_sell(abs(remaining))
+            self._record_fill(now, -1 if remaining > 0 else 1, abs(remaining), self._forced_fill_price(close_order), forced=True)
         self.state = RunState.STOPPED
+
+    def _forced_fill_price(self, close_order: OrderLike) -> float:
+        """強制平倉的成交價:能查到就用交易所回報的,查不到(還沒成交回報)
+        就用最後一個 tick 的價格估算,只影響 event 紀錄,不影響平倉本身。"""
+        last = self.price_history[-1] if self.price_history else 0.0
+        if close_order is None:
+            return last
+        fetched = self.broker.fetch_order(close_order.id)
+        if fetched.status == "closed" and fetched.price:
+            return fetched.price
+        return last

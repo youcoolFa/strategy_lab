@@ -55,6 +55,16 @@ class StrategyContext:
     direction: str = "long"  # "long" 或 "short",來自策略 YAML 的 direction
 
 
+@dataclass(frozen=True)
+class PlannedExit:
+    """出場 plugin 自己描述的價位,給啟動前估算用(見 estimates/)。None 代表
+    事前無法決定(依訊號/時間出場)或沒有這一項(例如沒有停損)。出場 plugin
+    可以選擇性實作 `planned_exit(ctx) -> PlannedExit`,不實作就當成兩者都 None。"""
+
+    take_profit: Optional[float]
+    stop_loss: Optional[float]
+
+
 @runtime_checkable
 class EntrySignal(Protocol):
     rule: "Condition"

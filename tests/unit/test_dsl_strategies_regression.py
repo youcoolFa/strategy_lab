@@ -49,3 +49,29 @@ class TestMeanReversionBreakoutGuardYaml:
         assert strategy.kill_switch == SustainedBreakoutKillSwitch(
             threshold_price=62000.0, reference_price=60000.0, hours=24.0, margin_pct=3.0
         )
+
+
+class TestWeekendBandReversionYaml:
+    def test_entry_below_origin_exit_offset_above_origin(self):
+        from strategy_lab.plugins.exit.resting_offset_from_reference import RestingOffsetFromReferenceExit
+
+        # deviation_pct/offset_pct/direction 是使用者會實際調的參數,只驗證結構。
+        strategy = load_strategy(STRATEGIES_DIR / "weekend_band_reversion.yaml")
+        assert isinstance(strategy.entry, RestingDeviationFromReferenceEntry)
+        assert isinstance(strategy.exit, RestingOffsetFromReferenceExit)
+        assert strategy.time_window == WeeklyWindow()
+        assert strategy.direction in ("long", "short")
+
+
+class TestEveryStrategyDeclaresLoop:
+    """loop 預設 0(只做 1 個 event),既有策略都要明確寫出來,不能默默從
+    「不限次數」變成「做一輪就停」。"""
+
+    def test_each_yaml_has_an_explicit_loop_key(self):
+        import yaml
+
+        for path in sorted(STRATEGIES_DIR.glob("*.yaml")):
+            assert "loop" in yaml.safe_load(path.read_text()), path.name
+
+    def test_weekend_mean_reversion_loops_without_limit(self):
+        assert load_strategy(STRATEGIES_DIR / "weekend_mean_reversion.yaml").loop is None

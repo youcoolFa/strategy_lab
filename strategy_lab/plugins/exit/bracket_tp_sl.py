@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from strategy_lab.interfaces import StrategyContext
+from strategy_lab.interfaces import PlannedExit, StrategyContext
 from strategy_lab.registry import register
 from strategy_lab.rules.base import Condition
 from strategy_lab.rules.composite import Or
@@ -28,3 +28,11 @@ class BracketTPSLExit:
 
     def exit_price(self, ctx: StrategyContext) -> float:
         return ctx.price
+
+    def planned_exit(self, ctx: StrategyContext) -> PlannedExit:
+        # 條件樹是 PriceChangeFromEntry up/down,只描述做多:止盈在上、停損在下。
+        entry = ctx.entry_price if ctx.entry_price is not None else ctx.price
+        return PlannedExit(
+            take_profit=entry * (1 + self.take_profit_pct / 100),
+            stop_loss=entry * (1 - self.stop_loss_pct / 100),
+        )

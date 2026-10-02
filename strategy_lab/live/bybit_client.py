@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 from pybit.exceptions import FailedRequestError, InvalidRequestError
 from pybit.unified_trading import HTTP
@@ -53,6 +53,24 @@ class OrderResult:
     status: str  # "open" | "closed" | "canceled"
     price: float = 0.0
     filled_qty: float = 0.0
+
+
+_OPEN_ORDER_STATUSES = {"Created", "New", "PartiallyFilled", "Untriggered", "Triggered", "Active"}
+
+
+def _to_order_result(order: dict) -> OrderResult:
+    order_status = order.get("orderStatus", "New")
+    if order_status in _OPEN_ORDER_STATUSES:
+        return OrderResult(
+            order_id=order["orderId"],
+            status="open",
+            price=float(order.get("price") or 0.0),
+            filled_qty=float(order["cumExecQty"]),
+        )
+    status = "closed" if order_status == "Filled" else "canceled"
+    # 優先用 avgPrice(實際成交均價);avgPrice 是 "0"(沒成交就被取消)才退回用 price。
+    price = float(order.get("avgPrice") or 0.0) or float(order.get("price") or 0.0)
+    return OrderResult(order_id=order["orderId"], status=status, price=price, filled_qty=float(order["cumExecQty"]))
 
 
 class BybitClient:
@@ -116,16 +134,13 @@ class BybitClient:
         return OrderResult(order_id=resp["result"]["orderId"], status="open")
 
     def get_order_status(self, symbol: str, order_id: str) -> OrderResult:
+        # 帶 orderId 查 /v5/order/realtime 時,剛成交/取消的單也會回傳,不能
+        # 看到就當 open,一定要看 orderStatus(2026-09-27 真實 mainnet 踩到:
+        # 買單已成交卻一直被當成未成交,平倉單從未掛出)。
         open_resp = self._call_with_retry(self._http.get_open_orders, category=self._category, symbol=symbol, orderId=order_id)
         open_list = open_resp["result"]["list"]
         if open_list:
-            order = open_list[0]
-            return OrderResult(
-                order_id=order["orderId"],
-                status="open",
-                price=float(order.get("price") or 0.0),
-                filled_qty=float(order["cumExecQty"]),
-            )
+            return _to_order_result(open_list[0])
 
         history_resp = self._call_with_retry(
             self._http.get_order_history, category=self._category, symbol=symbol, orderId=order_id
@@ -133,14 +148,7 @@ class BybitClient:
         history_list = history_resp["result"]["list"]
         if not history_list:
             raise BybitAPIError(f"訂單 {order_id} 在未成交跟歷史清單都找不到")
-
-        order = history_list[0]
-        status = "closed" if order["orderStatus"] == "Filled" else "canceled"
-        # 優先用 avgPrice(實際成交均價),不是 price(掛單當初的限價)——
-        # 損益該用真正成交的價格算。avgPrice 是 "0" 的情況(例如訂單根本
-        # 沒成交就被取消)才退回用 price。
-        price = float(order.get("avgPrice") or 0.0) or float(order.get("price") or 0.0)
-        return OrderResult(order_id=order["orderId"], status=status, price=price, filled_qty=float(order["cumExecQty"]))
+        return _to_order_result(history_list[0])
 
     def cancel_order(self, symbol: str, order_id: str) -> None:
         try:
@@ -160,6 +168,21 @@ class BybitClient:
             size = float(p.get("size") or 0.0)
             total += -size if p.get("side") == "Sell" else size
         return total
+
+    def get_fee_rates(self, symbol: str) -> Tuple[float, float]:
+        """(maker, taker) 手續費率,這個帳戶在這個交易對的真實費率。"""
+        resp = self._call_with_retry(self._http.get_fee_rates, category=self._category, symbol=symbol)
+        row = resp["result"]["list"][0]
+        return float(row["makerFeeRate"]), float(row["takerFeeRate"])
+
+    def get_leverage(self, symbol: str) -> Optional[float]:
+        resp = self._call_with_retry(self._http.get_positions, category=self._category, symbol=symbol)
+        positions = resp["result"]["list"]
+        return float(positions[0]["leverage"]) if positions and positions[0].get("leverage") else None
+
+    def get_margin_mode(self) -> Optional[str]:
+        resp = self._call_with_retry(self._http.get_account_info)
+        return resp["result"].get("marginMode")
 
     def get_open_orders(self, symbol: str) -> list:
         resp = self._call_with_retry(self._http.get_open_orders, category=self._category, symbol=symbol)

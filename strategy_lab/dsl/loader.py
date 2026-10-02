@@ -41,6 +41,7 @@ class ComposedStrategy:
     time_window: TimeWindow
     kill_switch: Optional[KillSwitch] = None
     direction: Literal["long", "short"] = "long"
+    loop: Optional[int] = 0
 
 
 def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
@@ -63,6 +64,7 @@ def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
         time_window=time_window,
         kill_switch=kill_switch,
         direction=definition.direction,
+        loop=definition.loop,
     )
 
 

@@ -9,6 +9,7 @@
 name: weekend_short_breakout
 symbol: BTC/USDT
 direction: short
+loop: null   # 重複次數:總 event 數 = loop + 1;0 = 只做 1 個 event;null = 不限次數(做到時間窗結束)
 
 entry:
   type: deviation_from_reference_short

@@ -63,3 +63,34 @@ class TestStrategyDefinition:
     def test_unknown_top_level_field_raises(self):
         with pytest.raises(ValidationError):
             StrategyDefinition(**VALID_DEFINITION, typo_field="oops")
+
+
+class TestLoop:
+    """loop = 重複次數:沒寫 → 0(做 1 個 event 就結束);null → 不限次數。"""
+
+    def _definition(self, **extra):
+        from strategy_lab.dsl.schema import StrategyDefinition
+
+        base = dict(
+            name="x", symbol="BTC/USDT",
+            entry={"type": "resting_deviation_from_reference", "params": {"deviation_pct": 0.75}},
+            exit={"type": "resting_return_to_reference"},
+            time_window={"type": "weekly_window"},
+        )
+        base.update(extra)
+        return StrategyDefinition(**base)
+
+    def test_defaults_to_zero(self):
+        assert self._definition().loop == 0
+
+    def test_null_means_unlimited(self):
+        assert self._definition(loop=None).loop is None
+
+    def test_positive_number(self):
+        assert self._definition(loop=3).loop == 3
+
+    def test_negative_is_rejected(self):
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            self._definition(loop=-1)
