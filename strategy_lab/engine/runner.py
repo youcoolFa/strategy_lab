@@ -35,6 +35,8 @@ from datetime import datetime, timedelta
 from enum import Enum, auto
 from typing import Callable, Dict, Iterator, List, Optional
 
+from loguru import logger
+
 from strategy_lab.broker.paper_broker import PaperBroker
 from strategy_lab.engine.events import Event, EventTracker
 from strategy_lab.interfaces import Broker, EntrySignal, ExitSignal, KillSwitch, OrderLike, StrategyContext, TimeWindow
@@ -82,6 +84,23 @@ class OrderRecord:
     filled_qty: float
     time: datetime
     lot: Optional[int] = None  # 分注策略的第幾注(1 起算);非分注策略為 None
+
+
+_ORDER_STATUS_LABEL = {"open": "下單", "closed": "成交", "canceled": "取消"}
+
+
+def _log_order(rec: OrderRecord) -> None:
+    """每張單的下單/成交/取消都寫進 log——實盤原本只有 dry-run 會記,2026-09-27
+    那一輪只能靠 Bybit 成交紀錄還原。"""
+    lot = f" 第{rec.lot}注" if rec.lot is not None else ""
+    head = f"[{_ORDER_STATUS_LABEL.get(rec.status, rec.status)}] event #{rec.event_index}{lot} {rec.purpose} {rec.side} {rec.order_type}"
+    if rec.status == "open":
+        price = f"@ {rec.price}" if rec.price is not None else "市價"
+        logger.info(f"{head} {price} qty={rec.qty:g} reduce_only={rec.reduce_only} id={rec.order_id}")
+    elif rec.status == "closed":
+        logger.info(f"{head} 均價 {rec.avg_price} 成交量 {rec.filled_qty:g} id={rec.order_id}")
+    else:
+        logger.info(f"{head} id={rec.order_id}")
 
 
 @dataclass
@@ -168,14 +187,17 @@ class StrategyRunner:
         self._tracker.on_price(now, price)
 
         assert self.window_end is not None, "呼叫 tick() 前必須先呼叫 start()"
-        if self.time_window.should_cleanup(now, self.window_end):
-            self.stop_reason = "window_cleanup"
-        elif self.kill_switch is not None and self.kill_switch.rule.evaluate(self._ctx(now, price)):
-            self.stop_reason = "kill_switch"
-        elif self._stop_requested:
-            self.stop_reason = "stop_requested"
-        else:
-            return True
+        # stop_reason 已經有值 = 上一輪收尾做到一半(例如網路失敗)就中斷了,
+        # 這一輪直接再收尾一次,不重新判斷——kill switch 的條件可能已經不成立了。
+        if self.stop_reason is None:
+            if self.time_window.should_cleanup(now, self.window_end):
+                self.stop_reason = "window_cleanup"
+            elif self.kill_switch is not None and self.kill_switch.rule.evaluate(self._ctx(now, price)):
+                self.stop_reason = "kill_switch"
+            elif self._stop_requested:
+                self.stop_reason = "stop_requested"
+            else:
+                return True
         self._cleanup(now)
         return False
 
@@ -323,6 +345,7 @@ class StrategyRunner:
             self._open_records[rec.order_id] = rec
         else:
             self._open_records.pop(rec.order_id, None)
+        _log_order(rec)
         if self.on_order is not None:
             self.on_order(rec)
 
@@ -350,6 +373,7 @@ class StrategyRunner:
         真的有沒有倉位」的唯一事實來源。附帶好處:market_flat_buy()/
         market_flat_sell() 會套用 §6.9 的下單精度修正,market_close()
         原本沒有。"""
+        logger.warning(f"開始收尾({self.stop_reason}):取消未成交掛單,市價平掉未平倉部位")
         self._cancel_open_orders(now)
         self._flatten(now)
         self.state = RunState.STOPPED

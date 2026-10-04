@@ -433,6 +433,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 啟動前確認(preflight)+ 估算元件化 | `interfaces.PlannedExit` + 出場 plugin 的 `planned_exit()`(各自描述止盈/停損);新增 `estimates/`(`OrderPlan`/`MarketSnapshot`/`build_order_plan()`,計算元件以 `@register("metric", ...)` 註冊:`order_plan`/`cycle_pnl`/`risk`/`time_window`);`BybitClient` 新增 `get_fee_rates()`/`get_leverage()`/`get_margin_mode()`;新增 `live/preflight.py`(顯示估算,實盤要輸入 `yes` 才用 daemon 啟動) | 新增 §6.19 | 已完成,用真實設定唯讀預覽過 |
 | event + loop | 新增 `engine/events.py`(`EventTracker`:由成交自動切出 event=部位 0→0,帶正負號部位會計、加碼更新均價、每 tick 量期間最大回撤;`summarize()`:跨 event 權益曲線的最大回撤);runner 新增 `loop`/`on_event`/`events`,強制平倉也記成 event(`forced=True`);策略 YAML 新增 `loop`(重複次數,總 event = loop+1,預設 0,null 不限),既有策略都明確寫 `loop: null`;main 每個 event 寫 log、結束時寫總結;preflight 顯示 event 次數 | 新增 §6.20 | 已完成 |
 | 交易紀錄資料庫 | 新增 `storage/`(`models.py` 四張表 `sl_run`/`sl_order`/`sl_fill`/`sl_event`、`recorder.py` `TradeRecorder`、`backfill.py`、`setup_db.py`);runner 新增 `OrderRecord`/`on_order`/`stop_reason`;`BybitClient.get_executions()`(翻頁);`live/main.py` 實盤才建 recorder(dry-run 不存),run 開始/結束/被擋/當掉都有紀錄;preflight 確認時存估算給 `sl_run.preflight` | 新增 §6.21 | 已完成;用 09-27 真實成交重播,淨損益與 Bybit closedPnl 完全一致 |
+| 網路錯誤韌性 + 實盤 log | `BybitClient` 補接 requests 例外、預設 10 次/60 秒、下單帶 `orderLinkId` 防重複、取消不放棄;`run_forever` 網路失敗這一輪放棄下一輪再試;runner 收尾中斷後續做、分注只補掛缺的單;每張單下單/成交/取消寫 log;`select_strategy.py` 改成只替換 `strategy_path` 那一行(保留註解) | 新增 §6.23 | 已完成;521 passed |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1309,3 +1310,33 @@ exit 一定是 `scale_out`,其他策略不能用這兩個,混搭在載入時就�
 **驗證**:PaperBroker 整合測試涵蓋建 1/2/3 平 1/2/3 各算 1 個 loop、loop 結束取消並重掛、
 `loop: 0` 收尾、做空、時間窗收尾;沙盒多個 seed 跑過多輪;用真實行情唯讀預覽 preflight
 (dry-run、回答 no,沒有啟動)。
+
+### 6.23 網路錯誤韌性與實盤 log(2026-10-05)
+
+**問題**:主迴圈沒有錯誤處理,API 重試用完就整個當掉,掛單/部位留在交易所上沒人管。而且
+pybit 遇到斷線/DNS 失敗/逾時直接拋 `requests.exceptions.*`(`force_retry` 預設關閉),原本
+`_call_with_retry` 只接 `FailedRequestError`,這類錯誤**連一次都不會重試**。sat_strategy
+2026-08-02 踩過同一個雷,改成「查單、取消、收尾都不放棄」——這裡照搬。
+
+| 層 | 做法 |
+|---|---|
+| `BybitClient` | `NETWORK_ERRORS = (FailedRequestError, requests.RequestException)`;預設 10 次、backoff 上限 60 秒;重試時寫 warning |
+| 下單 | 帶 `orderLinkId`。網路失敗時「不知道交易所有沒有收到」:先用 orderLinkId 查(查詢不放棄),查到就用那張,沒有才用同一個 orderLinkId 重送(交易所會擋重複)。重試用完時已確認交易所上沒有這張單,才往上拋 |
+| 取消 | 網路失敗不放棄,每 `poll_interval_seconds` 重試到成功 |
+| `run_forever` | 查價或 `tick()` 遇到 `NETWORK_ERRORS`:這一輪放棄、寫 warning、下一輪再試,不當掉。業務錯誤(`InvalidRequestError`,例如餘額不足)照樣往上拋 |
+| `StrategyRunner` | `stop_reason` 有值 = 收尾做到一半中斷 → 下一輪直接再收尾,不重新判斷(kill switch 條件可能已經不成立) |
+| `ScaleInRunner` | 只補掛還沒掛上的建倉/平倉單(`Lot.done` 取代「`exit_order is None` 代表完成」);loop 結束用「跟 loop 開始時比 event 數」判斷,上一輪記完成交就中斷也能結束 loop |
+
+**實盤 log**:`StrategyRunner._remember()` 每張單的下單/成交/取消都寫 log
+(`[下單] event #1 第2注 entry Buy limit @ 84500 qty=0.003 ... id=...`),實盤和 dry-run 都有;
+收尾開始時寫原因;啟動時記錄 Python 直譯器路徑與版本。
+
+**設定檔**:`live_execution_config.yaml` 原本明確寫 5 次/30 秒,會蓋掉新預設,已一併改成 10/60。
+
+**`select_strategy.py`**:原本 `yaml.load` → `yaml.dump` 重寫整份設定檔,註解全部消失;改成只替換
+頂層 `strategy_path:` 那一行(保留行尾註解),寫入前用 `yaml.safe_load` 確認結果正確。
+
+**驗證**:新增 `tests/integration/test_network_resilience.py`(分注下單中途斷線不重複、平倉單補掛、
+收尾中斷後續做、`run_forever` 查價/tick 斷線不當掉)、`test_order_logging.py`、`BybitClient`
+orderLinkId 去重/取消不放棄/requests 例外重試、`select_strategy` 保留註解;全部 521 passed。
+用真實設定唯讀跑 preflight(回答 no)確認實盤路徑能組起來。

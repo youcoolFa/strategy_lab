@@ -37,16 +37,19 @@ class Lot:
     entry_order: Optional[OrderLike] = None
     exit_order: Optional[OrderLike] = None
     filled_price: Optional[float] = None  # 建倉成交價;None = 還沒建倉
+    done: bool = False  # 這一注本 loop 已經平倉完成
 
     @property
     def holding(self) -> bool:
-        return self.filled_price is not None and self.exit_order is not None
+        # 建倉成交、還沒平倉;exit_order 可能是 None(平倉單網路失敗沒掛上,下一輪補掛)
+        return self.filled_price is not None and not self.done
 
 
 @dataclass
 class ScaleInRunner(StrategyRunner):
     entry_prices: List[float] = field(default_factory=list)
     lots: List[Lot] = field(default_factory=list, init=False)
+    _loop_event_base: int = field(default=0, init=False, repr=False)  # 這個 loop 開始時已完成的 event 數
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -67,23 +70,29 @@ class ScaleInRunner(StrategyRunner):
         if self.state == RunState.IDLE:
             self._place_entries(now)
             return
-        events_before = len(self.events)
         self._sync_entries(now)
         self._sync_exits(now)
-        if len(self.events) > events_before:
+        # 跟 loop 開始時比,不跟這一輪開始時比:上一輪若在記完成交後網路失敗中斷,
+        # event 已經多了一個,這一輪仍要能結束 loop。
+        if len(self.events) > self._loop_event_base:
             self._end_loop(now)
         else:
             self._update_state()
 
     # --- 一個 loop 的流程 ---
+    # 每一步失敗(網路)後,下一輪 tick 重做都是安全的:只補掛還沒掛上的單,
+    # 不會重複掛已經掛上的(live/main.py 的 _tick_tolerating_network_errors)。
 
     def _place_entries(self, now: datetime) -> None:
-        self.lots = [
-            Lot(index=i + 1, entry_price=p, qty=q)
-            for i, (p, q) in enumerate(zip(self.entry_prices, self.lot_qtys))
-        ]
+        if not self.lots:
+            self.lots = [
+                Lot(index=i + 1, entry_price=p, qty=q)
+                for i, (p, q) in enumerate(zip(self.entry_prices, self.lot_qtys))
+            ]
+            self._loop_event_base = len(self.events)
         for lot in self.lots:
-            self._place_entry(now, lot)
+            if lot.entry_order is None:
+                self._place_entry(now, lot)
         self.state = RunState.ENTRY_PENDING
 
     def _place_entry(self, now: datetime, lot: Lot) -> None:
@@ -105,7 +114,10 @@ class ScaleInRunner(StrategyRunner):
 
     def _sync_entries(self, now: datetime) -> None:
         for lot in self.lots:
-            if lot.entry_order is None or lot.filled_price is not None:
+            if lot.filled_price is not None:
+                continue
+            if lot.entry_order is None:
+                self._place_entry(now, lot)  # 上一輪網路失敗沒掛上,補掛
                 continue
             order = self.broker.fetch_order(lot.entry_order.id)
             if order.status == "closed":
@@ -126,13 +138,17 @@ class ScaleInRunner(StrategyRunner):
         for lot in self.lots:
             if not lot.holding:
                 continue
+            if lot.exit_order is None:
+                self._place_exit(now, lot)  # 建倉成交後平倉單網路失敗沒掛上,補掛
+                continue
             order = self.broker.fetch_order(lot.exit_order.id)
             if order.status == "closed":
                 self.trades.append(Trade(entry_price=lot.filled_price, exit_price=order.price,
                                          qty=order.filled_qty, direction=self.direction))
                 self._update_order(now, order.id, "closed", order.price, order.filled_qty)
+                lot.done = True  # 這一注本 loop 已完成;filled_price 保留 → 不會再掛建倉
+                lot.exit_order = None  # 已成交,收尾時不用再取消
                 self._record_fill(now, -self._entry_sign(), order.filled_qty, order.price)
-                lot.exit_order = None  # 這一注本 loop 已完成;filled_price 保留 → 不會再掛建倉
             elif order.status == "canceled":
                 self._update_order(now, order.id, "canceled", None, order.filled_qty)
                 self._place_exit(now, lot)

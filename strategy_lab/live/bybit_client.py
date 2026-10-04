@@ -24,24 +24,44 @@ sat_strategy 原本的假設)——2026-09-26 改成可設定,因為使用者實
 自己決定要用 `spot`/`linear`/`inverse`/`option` 哪一種 Bybit V5 商品
 類型。
 
-重試邏輯對應 bot.py 的 `_call_with_retry`:只重試 `FailedRequestError`
-(網路層失敗,通常是暫時性的);`InvalidRequestError`(Bybit 回傳明確
-的業務錯誤,例如餘額不足)不重試,直接往上拋——重試一個確定會再次失敗
-的請求沒有意義。
+重試邏輯對應 bot.py 的 `_call_with_retry`:只重試網路層失敗(`NETWORK_ERRORS`,
+通常是暫時性的);`InvalidRequestError`(Bybit 回傳明確的業務錯誤,例如餘額
+不足)不重試,直接往上拋——重試一個確定會再次失敗的請求沒有意義。
+
+2026-10-05 對齊 sat_strategy「不放棄」的做法(見 docs/ARCHITECTURE.md §6.23):
+- `NETWORK_ERRORS` 補上 `requests.exceptions.RequestException`:pybit 遇到斷線/
+  DNS 失敗/逾時直接拋 requests 的例外(`force_retry` 預設關閉),原本完全不在
+  重試範圍內,一斷線就整個當掉。
+- 預設重試 10 次、backoff 上限 60 秒(sat_strategy 2026-08-02 踩過 5 次/30 秒
+  撐不過幾分鐘等級的阻擋)。
+- 下單帶 `orderLinkId`:網路失敗時不知道交易所到底有沒有收到,先用 orderLinkId
+  查(查詢本身不放棄),查到就當成功,查不到才重送——重送不會變成兩張單。
+- `cancel_order()` 網路失敗不放棄,一直重試到成功:不能就這樣丟下一張真實掛單。
 """
 
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
+import requests
+from loguru import logger
 from pybit.exceptions import FailedRequestError, InvalidRequestError
 from pybit.unified_trading import HTTP
 
 _ORDER_NOT_FOUND_PHRASES = ("order does not exist", "order not exists", "order not found")
+
+# 網路層失敗:值得重試、而且「不知道交易所有沒有收到」的錯誤。
+NETWORK_ERRORS = (FailedRequestError, requests.exceptions.RequestException)
+
+
+def _new_order_link_id() -> str:
+    # Bybit orderLinkId 上限 36 字元
+    return f"sl-{uuid.uuid4().hex}"
 
 
 class BybitAPIError(Exception):
@@ -80,13 +100,18 @@ class BybitClient:
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
         testnet: bool = True,
-        max_retries: int = 5,
-        retry_backoff_cap_seconds: float = 30.0,
+        max_retries: int = 10,
+        retry_backoff_cap_seconds: float = 60.0,
         category: str = "linear",
         http_client: Optional[HTTP] = None,
+        persist_retry_seconds: float = 5.0,
+        link_id_factory: Callable[[], str] = _new_order_link_id,
     ) -> None:
         self._max_retries = max_retries
         self._retry_backoff_cap_seconds = retry_backoff_cap_seconds
+        # 「不放棄」的查詢/取消,每次失敗後等多久再試(sat_strategy 用 poll_interval_seconds)
+        self._persist_retry_seconds = persist_retry_seconds
+        self._link_id_factory = link_id_factory
         self._category = category
         self._http = http_client or HTTP(
             testnet=testnet,
@@ -94,23 +119,77 @@ class BybitClient:
             api_secret=api_secret or os.getenv("BYBIT_API_SECRET", ""),
         )
 
+    def _backoff(self, attempt: int) -> float:
+        return min(2**attempt, self._retry_backoff_cap_seconds)
+
     def _call_with_retry(self, func, **kwargs) -> dict:
+        name = getattr(func, "__name__", "API")
         for attempt in range(self._max_retries):
             try:
-                return func(**kwargs)
-            except FailedRequestError:
+                result = func(**kwargs)
+                if attempt > 0:
+                    # 只有「重試過才成功」才印,正常第一次就成功不用洗版
+                    logger.info(f"Bybit {name} 重試後成功(第 {attempt + 1} 次嘗試)")
+                return result
+            except NETWORK_ERRORS as e:
                 if attempt == self._max_retries - 1:
                     raise
-                wait = min(2**attempt, self._retry_backoff_cap_seconds)
+                wait = self._backoff(attempt)
+                logger.warning(f"Bybit {name} 網路錯誤,第 {attempt + 1} 次重試,等待 {wait}s: {e}")
                 time.sleep(wait)
 
     def get_last_price(self, symbol: str) -> float:
         resp = self._call_with_retry(self._http.get_tickers, category=self._category, symbol=symbol)
         return float(resp["result"]["list"][0]["lastPrice"])
 
+    def _find_order_id_by_link_id(self, symbol: str, link_id: str) -> Optional[str]:
+        """用 orderLinkId 查這張單到底有沒有送到交易所。查詢本身不放棄——
+        答不出「有/沒有」就不能決定要不要重送。"""
+        while True:
+            try:
+                for func in (self._http.get_open_orders, self._http.get_order_history):
+                    found = func(category=self._category, symbol=symbol, orderLinkId=link_id)["result"]["list"]
+                    if found:
+                        return found[0]["orderId"]
+                return None
+            except NETWORK_ERRORS as e:
+                logger.warning(
+                    f"查詢訂單 {link_id} 是否已送達時網路失敗,{self._persist_retry_seconds} 秒後重試,不放棄: {e}"
+                )
+                time.sleep(self._persist_retry_seconds)
+
+    def _place_order(self, **params) -> str:
+        """送出訂單並回傳 orderId。網路失敗時先用 orderLinkId 確認交易所有沒有
+        收到:收到了就直接用那張,沒收到才重送(同一個 orderLinkId,交易所會擋
+        重複)。重試次數用完時已確認交易所上沒有這張單,才往上拋。"""
+        link_id = self._link_id_factory()
+        symbol = params["symbol"]
+        for attempt in range(self._max_retries):
+            try:
+                resp = self._http.place_order(orderLinkId=link_id, **params)
+                if attempt > 0:
+                    logger.info(f"下單 {link_id} 重試後成功(第 {attempt + 1} 次嘗試)")
+                return resp["result"]["orderId"]
+            except InvalidRequestError as e:
+                # 前一次其實已送達、這次被當成重複的 orderLinkId 擋下
+                if attempt > 0 and "duplicate" in str(e).lower():
+                    order_id = self._find_order_id_by_link_id(symbol, link_id)
+                    if order_id is not None:
+                        return order_id
+                raise
+            except NETWORK_ERRORS as e:
+                order_id = self._find_order_id_by_link_id(symbol, link_id)
+                if order_id is not None:
+                    logger.warning(f"下單 {link_id} 回應遺失,但交易所已收到(orderId={order_id}),不重送")
+                    return order_id
+                if attempt == self._max_retries - 1:
+                    raise
+                wait = self._backoff(attempt)
+                logger.warning(f"下單 {link_id} 網路錯誤、交易所沒收到,第 {attempt + 1} 次重試,等待 {wait}s: {e}")
+                time.sleep(wait)
+
     def place_limit_order(self, symbol: str, side: str, qty: float, price: float, reduce_only: bool = False) -> OrderResult:
-        resp = self._call_with_retry(
-            self._http.place_order,
+        order_id = self._place_order(
             category=self._category,
             symbol=symbol,
             side=side,
@@ -120,11 +199,10 @@ class BybitClient:
             reduceOnly=reduce_only,
             timeInForce="GTC",
         )
-        return OrderResult(order_id=resp["result"]["orderId"], status="open", price=price)
+        return OrderResult(order_id=order_id, status="open", price=price)
 
     def place_market_order(self, symbol: str, side: str, qty: float, reduce_only: bool = False) -> OrderResult:
-        resp = self._call_with_retry(
-            self._http.place_order,
+        order_id = self._place_order(
             category=self._category,
             symbol=symbol,
             side=side,
@@ -132,7 +210,7 @@ class BybitClient:
             qty=str(qty),
             reduceOnly=reduce_only,
         )
-        return OrderResult(order_id=resp["result"]["orderId"], status="open")
+        return OrderResult(order_id=order_id, status="open")
 
     def get_order_status(self, symbol: str, order_id: str) -> OrderResult:
         # 帶 orderId 查 /v5/order/realtime 時,剛成交/取消的單也會回傳,不能
@@ -152,12 +230,19 @@ class BybitClient:
         return _to_order_result(history_list[0])
 
     def cancel_order(self, symbol: str, order_id: str) -> None:
-        try:
-            self._call_with_retry(self._http.cancel_order, category=self._category, symbol=symbol, orderId=order_id)
-        except InvalidRequestError as e:
-            if not any(phrase in str(e).lower() for phrase in _ORDER_NOT_FOUND_PHRASES):
-                raise
-            # 訂單已經不存在(已成交/已取消)——視為成功,呼叫端不用分辨這種差異。
+        while True:
+            try:
+                self._call_with_retry(self._http.cancel_order, category=self._category, symbol=symbol, orderId=order_id)
+                return
+            except InvalidRequestError as e:
+                if not any(phrase in str(e).lower() for phrase in _ORDER_NOT_FOUND_PHRASES):
+                    raise
+                # 訂單已經不存在(已成交/已取消)——視為成功,呼叫端不用分辨這種差異。
+                return
+            except NETWORK_ERRORS as e:
+                # 網路持續失敗不能就這樣放棄一張真實訂單,寧可一直重試到成功。
+                logger.warning(f"取消訂單 {order_id} 網路持續失敗,{self._persist_retry_seconds} 秒後重試,不放棄: {e}")
+                time.sleep(self._persist_retry_seconds)
 
     def get_position_qty(self, symbol: str) -> float:
         """多單正數、空單負數。Bybit 的 size 永遠是正數,方向在 side

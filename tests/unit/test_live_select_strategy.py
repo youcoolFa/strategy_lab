@@ -80,3 +80,55 @@ class TestSelectStrategyConfigArgument:
         assert data["strategy_path"] == "strategies/weekend_mean_reversion.yaml"
         assert data["dry_run"] is True  # 新檔從 example 範本建立,安全預設值
         assert not (module.CONFIG_PATH == target)
+
+
+class TestPreservesComments:
+    """原本用 yaml.dump 重寫整份檔案,註解全部消失。"""
+
+    def test_comments_and_other_lines_are_untouched(self, tmp_path):
+        original = (
+            "# 執行設定\n"
+            "#   這段說明要留著\n"
+            "strategy_path: strategies/weekend_mean_reversion.yaml\n"
+            "origin_price: 84967.50   # 2026-09-26 你指定\n"
+            "dry_run: false   # 真實下單開關\n"
+        )
+        config_path = tmp_path / "live_execution_config.yaml"
+        config_path.write_text(original, encoding="utf-8")
+
+        update_strategy_path_in_config(config_path, tmp_path / "unused.yaml", "strategies/scale_in_ladder.yaml")
+
+        assert config_path.read_text(encoding="utf-8") == original.replace(
+            "strategies/weekend_mean_reversion.yaml", "strategies/scale_in_ladder.yaml"
+        )
+
+    def test_trailing_comment_on_strategy_path_line_is_kept(self, tmp_path):
+        config_path = tmp_path / "live_execution_config.yaml"
+        config_path.write_text("strategy_path: strategies/a.yaml  # 要跑哪個策略\ndry_run: true\n", encoding="utf-8")
+
+        update_strategy_path_in_config(config_path, tmp_path / "unused.yaml", "strategies/b.yaml")
+
+        assert config_path.read_text(encoding="utf-8") == "strategy_path: strategies/b.yaml  # 要跑哪個策略\ndry_run: true\n"
+
+    def test_indented_or_commented_mentions_are_not_touched(self, tmp_path):
+        config_path = tmp_path / "live_execution_config.yaml"
+        config_path.write_text(
+            "#   strategy_path: 註解裡提到的不要改\n"
+            "strategy_path: strategies/a.yaml\n",
+            encoding="utf-8",
+        )
+
+        update_strategy_path_in_config(config_path, tmp_path / "unused.yaml", "strategies/b.yaml")
+
+        assert config_path.read_text(encoding="utf-8") == (
+            "#   strategy_path: 註解裡提到的不要改\n"
+            "strategy_path: strategies/b.yaml\n"
+        )
+
+    def test_missing_key_is_appended(self, tmp_path):
+        config_path = tmp_path / "live_execution_config.yaml"
+        config_path.write_text("# 只有註解\ndry_run: true", encoding="utf-8")
+
+        update_strategy_path_in_config(config_path, tmp_path / "unused.yaml", "strategies/b.yaml")
+
+        assert config_path.read_text(encoding="utf-8") == "# 只有註解\ndry_run: true\nstrategy_path: strategies/b.yaml\n"

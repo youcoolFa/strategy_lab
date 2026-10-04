@@ -17,6 +17,7 @@ live/main.py 的無人值守定位是兩件事,分開成兩個檔案。
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 from typing import List, Optional
 
@@ -30,18 +31,36 @@ CONFIG_PATH = PROJECT_ROOT / "live_execution_config.yaml"
 EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "live_execution_config.example.yaml"
 
 
+# 頂層的 strategy_path 那一行:值 + 可能有的行尾註解
+_STRATEGY_PATH_LINE = re.compile(r"^strategy_path:[ \t]*[^#\n]*?(?P<comment>[ \t]+#[^\n]*)?$", re.MULTILINE)
+
+
 def update_strategy_path_in_config(config_path: Path, example_path: Path, new_strategy_path: str) -> None:
-    """config_path 存在就讀它、疊加 strategy_path 覆蓋值;不存在就用
+    """config_path 存在就讀它、只改 strategy_path 那一行;不存在就用
     example_path 當起點(而不是無中生有一份空的),確保其他欄位
-    (dry_run/testnet 等)有安全預設值,不會漏欄位。"""
+    (dry_run/testnet 等)有安全預設值,不會漏欄位。
+
+    逐行替換而不是 yaml.load → yaml.dump:dump 會把整份檔案重寫,所有註解
+    (每個欄位的說明、「2026-09-26 你的明確指示」這類紀錄)全部消失。那一行
+    的行尾註解也保留。"""
     source = config_path if config_path.exists() else example_path
-    with open(source, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    text = source.read_text(encoding="utf-8")
 
-    data["strategy_path"] = new_strategy_path
+    new_line = f"strategy_path: {new_strategy_path}"
+    match = _STRATEGY_PATH_LINE.search(text)
+    if match:
+        text = text[: match.start()] + new_line + (match.group("comment") or "") + text[match.end():]
+    else:
+        text = (text if not text or text.endswith("\n") else text + "\n") + new_line + "\n"
+    if not text.endswith("\n"):
+        text += "\n"
 
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, allow_unicode=True, sort_keys=False)
+    # 寫入前確認改出來的還是合法 YAML、值也對,不對就不寫,不弄壞設定檔
+    data = yaml.safe_load(text) or {}
+    if data.get("strategy_path") != new_strategy_path:
+        raise ValueError(f"無法安全地改寫 {source} 的 strategy_path,請手動修改")
+
+    config_path.write_text(text, encoding="utf-8")
 
 
 def main(argv: Optional[List[str]] = None) -> None:

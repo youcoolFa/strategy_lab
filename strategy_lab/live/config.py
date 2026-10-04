@@ -63,8 +63,10 @@ class ExecutionConfig:
     dry_run: bool = True
     testnet: bool = True
     poll_interval_seconds: int = 5
-    max_api_retries: int = 5
-    retry_backoff_cap_seconds: float = 30.0
+    # 2026-10-05 對齊 sat_strategy(2026-08-02 踩過 5 次/30 秒撐不過幾分鐘等級的
+    # 交易所/CDN 阻擋):10 次、backoff 上限 60 秒,總重試視窗拉長到幾分鐘等級。
+    max_api_retries: int = 10
+    retry_backoff_cap_seconds: float = 60.0
     # Bybit V5 商品類型:"linear"(USDT 永續)/"spot"(現貨)/"inverse"(幣本位)/
     # "option"(期權)。原本寫死在 BybitClient 內部,2026-09-26 改成可設定
     # ——預設維持 linear,對齊之前的行為不變。

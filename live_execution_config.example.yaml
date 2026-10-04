@@ -25,8 +25,8 @@ entry_prices: null  # 分注策略每注的建倉價,依第一注、第二注、
 dry_run: true   # 先觀察 log,不真的下單;確認邏輯沒問題後才考慮改 false
 testnet: true   # 先用 Bybit 測試網;確認沒問題後才考慮改 false 接正式環境
 poll_interval_seconds: 5   # run_forever() 每隔幾秒查一次價、跑一次 tick()
-max_api_retries: 5   # 呼叫 Bybit API 失敗時最多重試幾次(用指數退避)
-retry_backoff_cap_seconds: 30.0   # 指數退避(2^次數 秒)最多等這麼久,不會無限拉長
+max_api_retries: 10   # 呼叫 Bybit API 失敗時最多重試幾次(用指數退避);重試用完這一輪放棄、下一輪再試,不會當掉
+retry_backoff_cap_seconds: 60.0   # 指數退避(2^次數 秒)最多等這麼久,不會無限拉長
 category: linear   # linear(USDT 永續,預設)/ spot(現貨)/ inverse(幣本位)/ option(期權)
 
 # 下單方式——「下多大單」不是策略邏輯,是這裡的事(見 dsl/order_config.py)。

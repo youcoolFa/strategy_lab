@@ -88,8 +88,9 @@ class FakeHTTP:
         return self.account_info_response
 
 
-def make_client(http=None) -> BybitClient:
-    return BybitClient(api_key="test", api_secret="test", http_client=http or FakeHTTP())
+def make_client(http=None, **kwargs) -> BybitClient:
+    kwargs.setdefault("link_id_factory", lambda: "link-1")
+    return BybitClient(api_key="test", api_secret="test", http_client=http or FakeHTTP(), **kwargs)
 
 
 class TestGetLastPrice:
@@ -139,6 +140,7 @@ class TestPlaceLimitOrder:
             (
                 "place_order",
                 {
+                    "orderLinkId": "link-1",
                     "category": "linear",
                     "symbol": "BTCUSDT",
                     "side": "Buy",
@@ -174,6 +176,7 @@ class TestPlaceMarketOrder:
             (
                 "place_order",
                 {
+                    "orderLinkId": "link-1",
                     "category": "linear",
                     "symbol": "BTCUSDT",
                     "side": "Sell",
@@ -510,3 +513,112 @@ class TestGetExecutions:
         first, second = http.calls[0][1], http.calls[1][1]
         assert first["startTime"] == int(start.timestamp() * 1000) and first["endTime"] == int(end.timestamp() * 1000)
         assert "cursor" not in first and second["cursor"] == "c2"
+
+
+class TestNeverGiveUpOnNetworkErrors:
+    """2026-10-05 對齊 sat_strategy(docs/ARCHITECTURE.md §6.23)。"""
+
+    @staticmethod
+    def _fast_client(http, **kwargs):
+        return make_client(http, retry_backoff_cap_seconds=0, persist_retry_seconds=0, **kwargs)
+
+    def test_requests_connection_error_is_retried(self):
+        # pybit 遇到斷線直接拋 requests 的例外,原本不在重試範圍內,一斷線就當掉
+        import requests
+
+        http = FakeHTTP()
+        http.tickers_response = {"result": {"list": [{"lastPrice": "100.0"}]}}
+        http.raise_on_next_call = requests.exceptions.ConnectionError("DNS 失敗")
+        client = self._fast_client(http)
+
+        assert client.get_last_price("BTCUSDT") == 100.0
+
+    def test_default_retry_budget_matches_sat_strategy(self):
+        import inspect
+
+        sig = inspect.signature(BybitClient.__init__)
+        assert sig.parameters["max_retries"].default == 10
+        assert sig.parameters["retry_backoff_cap_seconds"].default == 60.0
+
+    def test_lost_place_response_uses_the_order_that_reached_the_exchange(self):
+        http = FakeHTTP()
+        http.raise_on_next_call = FailedRequestError(request="req", message="timeout", status_code=None, time="t", resp_headers=None)
+        http.open_orders_response = {"result": {"list": [{"orderId": "already-there"}]}}
+        client = self._fast_client(http)
+
+        result = client.place_limit_order("BTCUSDT", "Buy", 0.01, 60000.0)
+
+        assert result.order_id == "already-there"
+        assert [name for name, _ in http.calls].count("place_order") == 1  # 沒有重送
+        assert http.calls[1] == ("get_open_orders", {"category": "linear", "symbol": "BTCUSDT", "orderLinkId": "link-1"})
+
+    def test_place_is_resent_with_same_link_id_when_exchange_never_got_it(self):
+        http = FakeHTTP()
+        http.raise_on_next_call = FailedRequestError(request="req", message="timeout", status_code=None, time="t", resp_headers=None)
+        http.place_order_response = {"result": {"orderId": "order-9"}}
+        client = self._fast_client(http)
+
+        result = client.place_market_order("BTCUSDT", "Sell", 0.01, reduce_only=True)
+
+        assert result.order_id == "order-9"
+        sends = [kw for name, kw in http.calls if name == "place_order"]
+        assert len(sends) == 2 and {kw["orderLinkId"] for kw in sends} == {"link-1"}
+
+    def test_duplicate_link_id_on_resend_resolves_to_existing_order(self):
+        http = FakeHTTP()
+        attempts = {"n": 0}
+
+        def place_order(**kwargs):
+            http.calls.append(("place_order", kwargs))
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise FailedRequestError(request="req", message="timeout", status_code=None, time="t", resp_headers=None)
+            raise InvalidRequestError(request="req", message="OrderLinkedID is duplicate", status_code=110072, time="t", resp_headers=None)
+
+        lookups = {"n": 0}
+
+        def get_order_history(**kwargs):
+            http.calls.append(("get_order_history", kwargs))
+            lookups["n"] += 1
+            # 第一次查還沒出現,重送被擋下後再查就找到了
+            return {"result": {"list": [{"orderId": "late"}] if lookups["n"] > 1 else []}}
+
+        http.place_order = place_order
+        http.get_order_history = get_order_history
+        client = self._fast_client(http)
+
+        assert client.place_limit_order("BTCUSDT", "Buy", 0.01, 60000.0).order_id == "late"
+
+    def test_place_gives_up_only_after_retries_and_confirming_nothing_was_placed(self):
+        http = FakeHTTP()
+
+        def always_fails(**kwargs):
+            http.calls.append(("place_order", kwargs))
+            raise FailedRequestError(request="req", message="down", status_code=None, time="t", resp_headers=None)
+
+        http.place_order = always_fails
+        client = self._fast_client(http, max_retries=3)
+
+        with pytest.raises(FailedRequestError):
+            client.place_limit_order("BTCUSDT", "Buy", 0.01, 60000.0)
+        names = [name for name, _ in http.calls]
+        assert names.count("place_order") == 3
+        assert names[-2:] == ["get_open_orders", "get_order_history"]  # 最後一次失敗後也確認過交易所沒收到
+
+    def test_cancel_keeps_retrying_past_max_retries_until_it_succeeds(self):
+        http = FakeHTTP()
+        failures = {"left": 7}
+
+        def flaky_cancel(**kwargs):
+            http.calls.append(("cancel_order", kwargs))
+            if failures["left"]:
+                failures["left"] -= 1
+                raise FailedRequestError(request="req", message="down", status_code=None, time="t", resp_headers=None)
+            return {"result": {}}
+
+        http.cancel_order = flaky_cancel
+        client = self._fast_client(http, max_retries=2)
+
+        client.cancel_order("BTCUSDT", "o1")  # 不應該 raise
+
+        assert len(http.calls) == 8

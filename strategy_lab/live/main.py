@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import signal
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -49,7 +51,7 @@ from strategy_lab.engine.events import Event, summarize
 from strategy_lab.engine.runner import RunState, StrategyRunner
 from strategy_lab.engine.scale_in_runner import ScaleInRunner
 from strategy_lab.live.broker import LiveBroker
-from strategy_lab.live.bybit_client import BybitClient
+from strategy_lab.live.bybit_client import NETWORK_ERRORS, BybitClient
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
 from strategy_lab.live.market_feed import ticker_feed
 from strategy_lab.storage.recorder import RunInfo, TradeRecorder
@@ -146,6 +148,7 @@ def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = N
         max_retries=config.max_api_retries,
         retry_backoff_cap_seconds=config.retry_backoff_cap_seconds,
         category=config.category,
+        persist_retry_seconds=config.poll_interval_seconds,
     )
     live_broker = LiveBroker(client=bybit_client, symbol=symbol, dry_run=config.dry_run)
     common = dict(
@@ -261,6 +264,25 @@ def resolve_origin_price(config: ExecutionConfig, current_price: float) -> float
     return config.origin_price
 
 
+def _warn_tick_network_error(config: ExecutionConfig, error: Exception) -> None:
+    logger.warning(
+        f"這一輪網路持續失敗(重試已用完),{config.poll_interval_seconds} 秒後下一輪再試,不放棄"
+        f"(掛單/部位還在交易所上,不能就這樣當掉): {error}"
+    )
+
+
+def _tick_tolerating_network_errors(runner: StrategyRunner, now: datetime, price: float, config: ExecutionConfig) -> None:
+    """網路持續失敗時不讓整個程式當掉(對齊 sat_strategy「不放棄」):這一輪
+    放棄,下一輪重來。runner 的每一步都設計成失敗後下一輪重做是安全的——
+    下單有 orderLinkId 防重複、收尾一旦開始每一輪都會重跑到完成(見
+    docs/ARCHITECTURE.md §6.23)。業務錯誤(InvalidRequestError,例如餘額不足)
+    不在此列,照樣往上拋。"""
+    try:
+        runner.tick(now, price)
+    except NETWORK_ERRORS as e:
+        _warn_tick_network_error(config, e)
+
+
 def run_forever(
     runner: StrategyRunner,
     config: ExecutionConfig,
@@ -302,13 +324,17 @@ def run_forever(
         recorder.start_run(_run_info(runner, config, symbol, origin, source, now, log_path, preflight))
     try:
         runner.start(now, origin if origin is not None else price)
-        runner.tick(now, price)
+        _tick_tolerating_network_errors(runner, now, price, config)
 
         while runner.state != RunState.STOPPED:
             time.sleep(config.poll_interval_seconds)
             now = now_fn()
-            price = get_current_price(runner, config, symbol)
-            runner.tick(now, price)
+            try:
+                price = get_current_price(runner, config, symbol)
+            except NETWORK_ERRORS as e:
+                _warn_tick_network_error(config, e)
+                continue
+            _tick_tolerating_network_errors(runner, now, price, config)
     except Exception:
         if recorder is not None:
             recorder.end_run(now_fn(), "crash")
@@ -343,6 +369,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     log_name = config_path.stem if config_path is not None else "live_execution_config"
     log_path, _ = setup_file_logging(log_name)
     logger.info(f"log 檔: {log_path}")
+    logger.info(f"Python 直譯器: {sys.executable}({platform.python_version()})")
 
     load_dotenv()
     config = load_execution_config(config_path=config_path)
