@@ -5,7 +5,7 @@
 
     cd /Users/mac/fa_trade/Fa_Successful_trade && docker compose up -d trading-postgres
 
-    /opt/anaconda3/bin/python3 -m strategy_lab.storage.setup_db
+    .venv/bin/python -m strategy_lab.storage.setup_db
 """
 
 from __future__ import annotations

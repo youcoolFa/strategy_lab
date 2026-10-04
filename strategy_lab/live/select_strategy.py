@@ -11,7 +11,7 @@ input() 會讓它卡死在那裡等一個永遠不會來的輸入。這個工具
 成「人在電腦前,先跑一次選好策略」,選完就結束,不會常駐——跟
 live/main.py 的無人值守定位是兩件事,分開成兩個檔案。
 
-執行方式:/opt/anaconda3/bin/python3 -m strategy_lab.live.select_strategy
+執行方式:.venv/bin/python -m strategy_lab.live.select_strategy
 """
 
 from __future__ import annotations

@@ -8,7 +8,7 @@
 記錄 now,才能判斷最後是被 time_window 還是 kill_switch 停下來的),
 驗證整個系統疊起來之後行為跟單獨測試時預期的一致。
 
-執行方式:/opt/anaconda3/bin/python3 -m demo.demo_kill_switch_sandbox
+執行方式:.venv/bin/python -m demo.demo_kill_switch_sandbox
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@ Phase 1 demo:週末均值回歸策略,純粹用 Python 手動組裝——還沒�
 engine,也還沒有 DSL,就是把 plugin 物件直接接進 runner。只跟記憶體內的
 PaperBroker + SyntheticFeed 交易。
 
-執行方式:/opt/anaconda3/bin/python3 -m demo.demo_weekend_phase1
+執行方式:.venv/bin/python -m demo.demo_weekend_phase1
 """
 
 from __future__ import annotations

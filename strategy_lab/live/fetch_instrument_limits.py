@@ -11,7 +11,7 @@ live/fetch_instrument_limits.py
 只抓 strategies/*.yaml 實際會用到的 symbol,不是抓全部商品清單(Bybit
 一次有幾百個交易對,抓全部沒有意義,只會讓這份檔案肥大)。
 
-執行方式:/opt/anaconda3/bin/python3 -m strategy_lab.live.fetch_instrument_limits
+執行方式:.venv/bin/python -m strategy_lab.live.fetch_instrument_limits
 """
 
 from __future__ import annotations

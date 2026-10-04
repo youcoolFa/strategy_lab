@@ -36,16 +36,16 @@
 ## 安裝
 
 ```bash
-/opt/anaconda3/bin/python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/pytest -v
+/usr/local/bin/python3.11 -m venv .venv          # 專案專用環境,不跟 anaconda 或其他專案共用套件
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q
 ```
 
 ## 執行 YAML 策略(Phase 3)
 
 ```bash
-/opt/anaconda3/bin/python3 -m demo.run_from_yaml --strategy strategies/weekend_mean_reversion.yaml
-/opt/anaconda3/bin/python3 -m demo.run_from_yaml --strategy strategies/ma_crossover_bracket.yaml
+.venv/bin/python -m demo.run_from_yaml --strategy strategies/weekend_mean_reversion.yaml
+.venv/bin/python -m demo.run_from_yaml --strategy strategies/ma_crossover_bracket.yaml
 ```
 
 `strategies/*.yaml` 只需要 `{type, params}` 就能組出完整的策略——每個
@@ -69,7 +69,7 @@ Condition 樹。
    明確的動作,程式碼本身的預設值永遠是安全的。
 4. 執行:
    ```bash
-   /opt/anaconda3/bin/python3 -m strategy_lab.live.main
+   .venv/bin/python -m strategy_lab.live.main
    ```
    `Ctrl+C`(SIGINT)或 `kill`(SIGTERM)會觸發 `StrategyRunner.request_stop()`,
    讓它正常收攤(取消未成交單、平掉未平倉部位)再結束,不是直接砍掉

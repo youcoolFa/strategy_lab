@@ -4,7 +4,7 @@ live/preflight.py
 啟動前確認:讀設定檔和策略,查真實市場資料(唯讀),顯示掛單計畫、每輪
 損益、風險、時間窗,輸入確認才用 live/daemon.py 在背景啟動。
 
-    /opt/anaconda3/bin/python3 -m strategy_lab.live.preflight --config live_execution_config.yaml
+    .venv/bin/python -m strategy_lab.live.preflight --config live_execution_config.yaml
 
 刻意跟 live/main.py 分開:main.py 要能無人值守啟動,不能停下來等輸入。
 實盤要輸入完整的 `yes` 才啟動;dry-run 輸入 `y` 即可。
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -188,7 +189,7 @@ def main(
         print_fn(f"✗ 啟動失敗:{e}")
         return 1
     print_fn(f"已在背景啟動(PID {info.pid}),終端機輸出: {info.console_log}")
-    print_fn(f"停止: /opt/anaconda3/bin/python3 -m strategy_lab.live.daemon stop --config {config_path}")
+    print_fn(f"停止: {sys.executable} -m strategy_lab.live.daemon stop --config {config_path}")
     return 0
 
 

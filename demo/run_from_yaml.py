@@ -14,9 +14,9 @@ demo/sandbox_order.yaml 的 position_sizing,用 dsl.order_config 換算出
 裡,算好的數字才傳進 StrategyRunner,runner.py/PaperBroker 完全不用改。
 
 執行方式:
-  /opt/anaconda3/bin/python3 -m demo.run_from_yaml --strategy strategies/weekend_mean_reversion.yaml
-  /opt/anaconda3/bin/python3 -m demo.run_from_yaml --strategy strategies/ma_crossover_bracket.yaml
-  /opt/anaconda3/bin/python3 -m demo.run_from_yaml                      # 互動式選單
+  .venv/bin/python -m demo.run_from_yaml --strategy strategies/weekend_mean_reversion.yaml
+  .venv/bin/python -m demo.run_from_yaml --strategy strategies/ma_crossover_bracket.yaml
+  .venv/bin/python -m demo.run_from_yaml                      # 互動式選單
 """
 
 from __future__ import annotations

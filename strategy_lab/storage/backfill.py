@@ -1,7 +1,7 @@
 """把資料庫掛掉時寫在本機的紀錄(`logs/db_pending/*.jsonl`)補進資料庫。
 寫入是 upsert,重跑不會重複;補完的檔案改名成 `.jsonl.done`。
 
-    /opt/anaconda3/bin/python3 -m strategy_lab.storage.backfill
+    .venv/bin/python -m strategy_lab.storage.backfill
 """
 
 from __future__ import annotations

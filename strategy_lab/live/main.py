@@ -18,13 +18,13 @@ live/main.py
        真實掛單或部位
 
 執行方式:
-    /opt/anaconda3/bin/python3 -m strategy_lab.live.main                            # 讀 live_execution_config.yaml
-    /opt/anaconda3/bin/python3 -m strategy_lab.live.main --config live_wld_long.yaml  # 每個策略一份設定檔
+    .venv/bin/python -m strategy_lab.live.main                            # 讀 live_execution_config.yaml
+    .venv/bin/python -m strategy_lab.live.main --config live_wld_long.yaml  # 每個策略一份設定檔
 同時跑多個策略時,每個策略用自己的設定檔、而且要是不同的 symbol(同一個
 symbol 在 Bybit 單向持倉模式下共用一個部位,會互相平掉對方的倉位)。
 
 實盤建議用 live/daemon.py 在背景跑,不要直接跑在 IDE 的終端機裡:
-    /opt/anaconda3/bin/python3 -m strategy_lab.live.daemon start --config live_btc_band.yaml
+    .venv/bin/python -m strategy_lab.live.daemon start --config live_btc_band.yaml
 直接在終端機跑時,Ctrl+C / 關掉終端機(SIGHUP)/ kill(SIGTERM)都會走收尾;
 但 IDE 如果強制砍掉整個 process,任何程式都來不及收尾。
 """

@@ -4,7 +4,7 @@ demo_weekend_phase1.py 用同一個 runner、同一套 PaperBroker/SyntheticFeed
 但進場/出場/時間窗的 plugin 物件完全不同,runner 裡也沒有任何共用的
 分支邏輯。
 
-執行方式:/opt/anaconda3/bin/python3 -m demo.demo_crossover_phase1
+執行方式:.venv/bin/python -m demo.demo_crossover_phase1
 """
 
 from __future__ import annotations

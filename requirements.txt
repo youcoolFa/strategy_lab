@@ -6,6 +6,8 @@ pydantic>=1.10,<2.0
 redis>=5.0
 loguru>=0.7
 pybit>=5.8
+# bybit_client.py 直接接 requests 的例外(pybit 斷線時原樣拋出),不能只靠 pybit 間接裝進來
+requests>=2.28
 python-dotenv>=1.0
 # 交易紀錄資料庫(storage/):
 sqlalchemy>=1.4,<2.1
