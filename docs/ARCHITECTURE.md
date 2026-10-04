@@ -432,6 +432,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 修正:關掉 PyCharm 時程式沒收尾(真實 mainnet 事故) | `install_stop_signal_handlers()` 加處理 SIGHUP;`setup_file_logging()` log 寫檔 + 異常結束寫 traceback;新增 `live/daemon.py`(背景 start/stop/status,`start_new_session`) | 新增 §6.18 | 已完成 |
 | 啟動前確認(preflight)+ 估算元件化 | `interfaces.PlannedExit` + 出場 plugin 的 `planned_exit()`(各自描述止盈/停損);新增 `estimates/`(`OrderPlan`/`MarketSnapshot`/`build_order_plan()`,計算元件以 `@register("metric", ...)` 註冊:`order_plan`/`cycle_pnl`/`risk`/`time_window`);`BybitClient` 新增 `get_fee_rates()`/`get_leverage()`/`get_margin_mode()`;新增 `live/preflight.py`(顯示估算,實盤要輸入 `yes` 才用 daemon 啟動) | 新增 §6.19 | 已完成,用真實設定唯讀預覽過 |
 | event + loop | 新增 `engine/events.py`(`EventTracker`:由成交自動切出 event=部位 0→0,帶正負號部位會計、加碼更新均價、每 tick 量期間最大回撤;`summarize()`:跨 event 權益曲線的最大回撤);runner 新增 `loop`/`on_event`/`events`,強制平倉也記成 event(`forced=True`);策略 YAML 新增 `loop`(重複次數,總 event = loop+1,預設 0,null 不限),既有策略都明確寫 `loop: null`;main 每個 event 寫 log、結束時寫總結;preflight 顯示 event 次數 | 新增 §6.20 | 已完成 |
+| 交易紀錄資料庫 | 新增 `storage/`(`models.py` 四張表 `sl_run`/`sl_order`/`sl_fill`/`sl_event`、`recorder.py` `TradeRecorder`、`backfill.py`、`setup_db.py`);runner 新增 `OrderRecord`/`on_order`/`stop_reason`;`BybitClient.get_executions()`(翻頁);`live/main.py` 實盤才建 recorder(dry-run 不存),run 開始/結束/被擋/當掉都有紀錄;preflight 確認時存估算給 `sl_run.preflight` | 新增 §6.21 | 已完成;用 09-27 真實成交重播,淨損益與 Bybit closedPnl 完全一致 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1215,3 +1216,53 @@ Buy 0.4764 × 41.1 掛單沒人管。調查(程式的 log 只印在終端機,已
 **輸出**:`live/main.py` 每個 event 完成時寫 log(`on_event` callback),
 結束時寫總結(event 數、強制平倉數、獲利數、合計損益、最大回撤);preflight
 的時間窗區塊顯示 event 次數上限。寫進資料庫是下一步(見 TODO)。
+
+### 6.21 交易紀錄資料庫
+
+**放哪裡**:原本 Fa_Successful_trade 的 `DATABASE_URL` 指向 Superset 自己的
+Postgres(`superset` 資料庫),`bybit_wallet_snapshot` 跟 Superset 系統表混在
+一起。只「另開一個資料庫」不夠:同一個容器的所有資料庫都在同一個 Docker volume,
+`docker compose down -v` 或重建 Superset 的 Postgres 會全部一起消失。所以
+2026-10-04 改成**交易系統專用的 Postgres 容器** `trading-postgres`(寫在
+Fa_Successful_trade 的 `docker-compose.yml`,port 5434,資料存在
+`postgres/trading/data/` 專案資料夾),跟 `bybit-redis` 不共用 Superset Redis
+是同一個道理。兩個專案共用裡面的 `trading` 資料庫:
+- Fa_Successful_trade:`bybit_wallet_snapshot`(用 `pg_dump` 原樣搬過來,12 筆,
+  序號接續;舊表仍留在 Superset 的資料庫當備份)
+- strategy_lab:`sl_run` / `sl_order` / `sl_fill` / `sl_event`
+帳號:`trading`(兩個專案寫入用)、`superset_reader`(只有 SELECT,包含之後新建的
+表)。Superset 用唯讀帳號新增連線 `trading`(`host.docker.internal:5434`),
+dataset 30(`bybit_wallet_snapshot`)改指向它,另外新增 dataset 31–34(四張 `sl_` 表)。
+
+**四張表**(`sl_` 前綴:strategy_lab;另外 `order` 是 SQL 保留字):
+
+| 表 | 一列 | 主鍵 | 寫入時機 |
+|---|---|---|---|
+| `sl_run` | 每次啟動 | `run_id`(uuid) | 啟動;結束時補結束原因與總結。被啟動檢查擋下(`refused_leftover`)、當掉(`crash`)也有一列 |
+| `sl_order` | 每張單 | Bybit `orderId` | 下單、偵測到成交/取消時;runner 標出用途(entry/exit/forced_close)與所屬 event |
+| `sl_fill` | 每筆成交/資金費 | Bybit `execId` | 每個 event 完成時同步該期間成交明細;收尾時整段再同步一次 |
+| `sl_event` | 部位 0 → 0 一輪 | `run_id` + `event_index` | event 完成時;收尾同步後重算 |
+
+`sl_run` 另外記下策略 YAML 全文、執行設定快照(去掉任何含 key/secret/
+password/token 的欄位)、啟動前 preflight 確認過的估算、Python 直譯器路徑與
+版本、git commit(含 `-dirty`)、log 檔路徑。
+
+**手續費與資金費以 Bybit 成交明細為準**(`get_executions`,含
+`execType=Funding`)。只收這次執行下的單的成交;資金費依時間歸到對應的
+event。`sl_event.net_pnl = realized_pnl − fees − funding`。
+
+**寫入一律 upsert**(自然主鍵 + `session.merge`),重送不會重複。
+
+**dry-run 不寫**;資料庫掛掉不影響交易:啟動時連不上或寫入中途失敗,這次執行
+剩下的紀錄改寫 `logs/db_pending/<run_id>.jsonl`,不再嘗試連線(避免拖慢交易
+迴圈);之後 `python -m strategy_lab.storage.backfill` 補進去(補完改名
+`.jsonl.done`)。
+
+**驗證**:用 2026-09-27 22:41 那一輪的真實 Bybit 訂單與成交明細重播進
+recorder(唯讀、寫臨時 SQLite):兩筆吃單手續費 + 00:00 資金費都正確歸到
+event 1,淨損益 −0.13971185 USDT,與 Bybit closedPnl 完全一致。
+
+**部署狀態**:2026-10-04 已完成——`trading-postgres` 啟動、資料搬移、
+兩個專案的 `.env` 切換(密碼隨機產生,只存在各自 gitignored 的 `.env`)、
+Superset 連線與 dataset。Fa_Successful_trade 的真實資料庫整合測試、strategy_lab
+recorder 的寫入/唯讀讀回都對新資料庫驗證過。

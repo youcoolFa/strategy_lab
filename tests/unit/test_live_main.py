@@ -34,6 +34,9 @@ def _log_dir_in_tmp(tmp_path, monkeypatch):
     import strategy_lab.live.main as main_module
 
     monkeypatch.setattr(main_module, "LOG_DIR", tmp_path / "logs")
+    import strategy_lab.live.preflight as preflight_module
+
+    monkeypatch.setattr(preflight_module, "SNAPSHOT_DIR", tmp_path / "run")
 
 
 class TestToBybitSymbol:
@@ -385,7 +388,7 @@ class TestMainConfigArgument:
         captured = {}
         monkeypatch.setattr(main_module, "load_dotenv", lambda: None)
         monkeypatch.setattr(main_module, "build_runner_and_symbol", lambda config: captured.setdefault("config", config) and (None, "X"))
-        monkeypatch.setattr(main_module, "run_forever", lambda runner, config, symbol: None)
+        monkeypatch.setattr(main_module, "run_forever", lambda runner, config, symbol, **kwargs: None)
         return captured
 
     def test_config_argument_loads_that_file(self, monkeypatch, tmp_path):
@@ -484,7 +487,7 @@ class TestFileLogging:
         monkeypatch.setattr(main_module, "load_dotenv", lambda: None)
         monkeypatch.setattr(main_module, "build_runner_and_symbol", lambda config: (None, "X"))
 
-        def boom(runner, config, symbol):
+        def boom(runner, config, symbol, **kwargs):
             raise RuntimeError("network-boom")
 
         monkeypatch.setattr(main_module, "run_forever", boom)
@@ -510,3 +513,69 @@ class TestLoopWiring:
 
         assert runner.loop == load_strategy(config.strategy_path).loop
         assert runner.on_event is not None
+
+
+class RecorderSpy:
+    def __init__(self):
+        self.started, self.ended, self.orders, self.events = [], [], [], []
+
+    def start_run(self, info):
+        self.started.append(info)
+        return "run-1"
+
+    def record_order(self, rec):
+        self.orders.append(rec)
+
+    def record_event(self, event):
+        self.events.append(event)
+
+    def end_run(self, now, reason, summary=None):
+        self.ended.append(reason)
+
+
+class TestRecorderWiring:
+    def _runner(self, monkeypatch, recorder, dry_run=False):
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=dry_run, testnet=True, poll_interval_seconds=0)
+        runner, symbol = build_runner_and_symbol(config, recorder=recorder)
+        return config, runner, symbol
+
+    def test_refused_start_is_recorded_as_a_run_with_reason(self, monkeypatch):
+        spy = RecorderSpy()
+        config, runner, symbol = self._runner(monkeypatch, spy)
+        runner.broker.client = FakeExchangeClient(open_orders=[{"orderId": "old", "side": "Buy", "price": "1", "qty": "1"}])
+
+        with pytest.raises(LeftoverExchangeStateError):
+            run_forever(runner, config, symbol, now_fn=lambda: datetime(2026, 8, 1, 4, 0, tzinfo=HKT), recorder=spy)
+
+        assert len(spy.started) == 1 and spy.ended == ["refused_leftover"]
+
+    def test_normal_stop_records_runner_stop_reason(self, monkeypatch):
+        import strategy_lab.live.main as main_module
+
+        spy = RecorderSpy()
+        config, runner, symbol = self._runner(monkeypatch, spy)
+        runner.broker.client = FakeExchangeClient()
+
+        def price(runner, config, symbol):
+            runner.request_stop()
+            return 1000.0
+
+        monkeypatch.setattr(main_module, "get_current_price", price)
+        monkeypatch.setattr(main_module.time, "sleep", lambda s: None)
+        run_forever(runner, config, symbol, now_fn=lambda: datetime(2026, 8, 1, 4, 0, tzinfo=HKT), recorder=spy)
+
+        assert spy.ended == ["stop_requested"]
+        assert spy.started[0].strategy_name == "weekend_mean_reversion"
+        assert spy.started[0].origin_price == 1000.0
+
+    def test_runner_orders_and_events_flow_into_recorder(self, monkeypatch):
+        spy = RecorderSpy()
+        _, runner, _ = self._runner(monkeypatch, spy)
+        assert runner.on_order == spy.record_order
+
+    def test_dry_run_never_builds_a_recorder(self, monkeypatch):
+        import strategy_lab.live.main as main_module
+
+        assert main_module.make_recorder(ExecutionConfig(dry_run=True), client=None) is None

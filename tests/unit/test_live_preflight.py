@@ -11,6 +11,12 @@ from strategy_lab.live import preflight
 HKT = ZoneInfo("Asia/Hong_Kong")
 
 
+@pytest.fixture(autouse=True)
+def _snapshot_dir_in_tmp(tmp_path, monkeypatch):
+    # 確認啟動時會寫 run/<設定檔>.preflight.json;測試寫到 tmp,不碰專案的 run/。
+    monkeypatch.setattr(preflight, "SNAPSHOT_DIR", tmp_path / "run")
+
+
 class FakeClient:
     def __init__(self, price=84650.0, equity=59.5, open_orders=None, position=0.0):
         self.price, self.equity = price, equity
@@ -113,3 +119,23 @@ class TestPreflight:
         monkeypatch.setattr(preflight, "load_dotenv", lambda: None)
         with pytest.raises(FileNotFoundError):
             preflight.main(["--config", str(tmp_path / "typo.yaml")], client_factory=lambda cfg: FakeClient())
+
+
+class TestPreflightSnapshotHandoff:
+    def test_confirmed_preflight_saves_estimate_for_the_run_record(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(preflight, "SNAPSHOT_DIR", tmp_path / "run")
+        run(tmp_path, FakeClient(price=84950.0), "yes", monkeypatch)
+
+        from strategy_lab.live.preflight import load_snapshot
+
+        snap = load_snapshot(tmp_path / "live_btc_band.yaml", snapshot_dir=tmp_path / "run")
+        assert snap["metrics"]["每輪損益(完成一輪才實現)"]["net_pnl"] is not None
+        assert load_snapshot(tmp_path / "live_btc_band.yaml", snapshot_dir=tmp_path / "run") is None  # 讀一次就刪
+
+    def test_cancelled_preflight_saves_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(preflight, "SNAPSHOT_DIR", tmp_path / "run")
+        run(tmp_path, FakeClient(price=84950.0), "no", monkeypatch)
+
+        from strategy_lab.live.preflight import load_snapshot
+
+        assert load_snapshot(tmp_path / "live_btc_band.yaml", snapshot_dir=tmp_path / "run") is None

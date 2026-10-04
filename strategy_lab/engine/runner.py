@@ -33,7 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum, auto
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional
 
 from strategy_lab.broker.paper_broker import PaperBroker
 from strategy_lab.engine.events import Event, EventTracker
@@ -66,6 +66,24 @@ class Trade:
 
 
 @dataclass
+class OrderRecord:
+    """每張單的下單/成交/取消,經 on_order 回報(寫進 sl_order 用)。"""
+
+    order_id: str
+    purpose: str  # "entry" / "exit" / "forced_close"
+    event_index: int  # 屬於第幾個 event(部位 0 → 0 一輪)
+    side: str  # "Buy" / "Sell"
+    order_type: str  # "limit" / "market"
+    price: Optional[float]  # 限價;市價單為 None
+    qty: float
+    reduce_only: bool
+    status: str  # "open" / "closed" / "canceled"
+    avg_price: Optional[float]
+    filled_qty: float
+    time: datetime
+
+
+@dataclass
 class StrategyRunner:
     entry: EntrySignal
     exit: ExitSignal
@@ -79,6 +97,7 @@ class StrategyRunner:
     # 策略 YAML 沒寫時預設 0(dsl/schema.py);直接建構 runner 時預設不限,維持既有行為。
     loop: Optional[int] = None
     on_event: Optional[Callable[[Event], None]] = None
+    on_order: Optional[Callable[[OrderRecord], None]] = None
 
     state: RunState = field(default=RunState.IDLE, init=False)
     window_end: Optional[datetime] = field(default=None, init=False)
@@ -92,6 +111,9 @@ class StrategyRunner:
     _stop_requested: bool = field(default=False, init=False)
     events: List[Event] = field(default_factory=list, init=False)
     _tracker: EventTracker = field(default_factory=EventTracker, init=False, repr=False)
+    # 停止原因:window_cleanup / kill_switch / stop_requested / loop_done;還在跑時是 None
+    stop_reason: Optional[str] = field(default=None, init=False)
+    _open_records: Dict[str, OrderRecord] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.loop is not None and self.loop < 0:
@@ -131,14 +153,17 @@ class StrategyRunner:
 
         assert self.window_end is not None, "呼叫 tick() 前必須先呼叫 start()"
         if self.time_window.should_cleanup(now, self.window_end):
+            self.stop_reason = "window_cleanup"
             self._cleanup(now)
             return
 
         if self.kill_switch is not None and self.kill_switch.rule.evaluate(self._ctx(now, price)):
+            self.stop_reason = "kill_switch"
             self._cleanup(now)
             return
 
         if self._stop_requested:
+            self.stop_reason = "stop_requested"
             self._cleanup(now)
             return
 
@@ -201,6 +226,9 @@ class StrategyRunner:
                     self.entry_order = self.broker.market_buy(qty=self.order_qty)
                 else:
                     self.entry_order = self.broker.place_limit_buy(price=self.entry.entry_price(ctx), qty=self.order_qty)
+            limit_price = self.entry.entry_price(ctx) if self.order_type != "market" else None
+            self._emit_order(now, "entry", self.entry_order, self._side(entry=True), self.order_type, limit_price,
+                             self.order_qty, reduce_only=False, status="open")
             self.state = RunState.ENTRY_PENDING
 
     def _check_entry_fill(self, now: datetime) -> None:
@@ -212,8 +240,10 @@ class StrategyRunner:
             self.active_entry_price = order.price
             self.entry_time = now
             self.state = RunState.IN_POSITION
+            self._update_order(now, order.id, "closed", order.price, order.filled_qty)
             self._record_fill(now, self._entry_sign(), order.filled_qty, order.price)
         elif order.status == "canceled":
+            self._update_order(now, order.id, "canceled", None, order.filled_qty)
             self.state = RunState.IDLE
 
     def _try_exit(self, now: datetime, price: float) -> None:
@@ -234,6 +264,9 @@ class StrategyRunner:
                     self.exit_order = self.broker.market_flat_buy(qty=qty)
                 else:
                     self.exit_order = self.broker.place_limit_sell(price=self.exit.exit_price(ctx), qty=qty)
+            limit_price = self.exit.exit_price(ctx) if self.order_type != "market" else None
+            self._emit_order(now, "exit", self.exit_order, self._side(entry=False), self.order_type, limit_price,
+                             qty, reduce_only=True, status="open")
             self.state = RunState.EXIT_PENDING
 
     def _check_exit_fill(self, now: datetime) -> None:
@@ -253,11 +286,42 @@ class StrategyRunner:
             self.active_entry_price = None
             self.entry_time = None
             self.state = RunState.IDLE
+            self._update_order(now, order.id, "closed", order.price, order.filled_qty)
             self._record_fill(now, -self._entry_sign(), order.filled_qty, order.price)
             if self._loop_exhausted():
+                self.stop_reason = "loop_done"
                 self._cleanup(now)
         elif order.status == "canceled":
+            self._update_order(now, order.id, "canceled", None, order.filled_qty)
             self.state = RunState.IN_POSITION
+
+    def _side(self, entry: bool) -> str:
+        buys_on_entry = self.direction != "short"
+        return "Buy" if buys_on_entry == entry else "Sell"
+
+    def _emit_order(self, now, purpose, order, side, order_type, price, qty, reduce_only, status,
+                    avg_price=None, filled_qty=0.0) -> None:
+        rec = OrderRecord(
+            order_id=order.id, purpose=purpose, event_index=self._tracker.completed + 1, side=side,
+            order_type=order_type, price=price, qty=qty, reduce_only=reduce_only, status=status,
+            avg_price=avg_price, filled_qty=filled_qty, time=now,
+        )
+        self._remember(rec)
+
+    def _update_order(self, now, order_id, status, avg_price, filled_qty) -> None:
+        prev = self._open_records.get(order_id)
+        if prev is None:
+            return
+        rec = OrderRecord(**{**prev.__dict__, "status": status, "avg_price": avg_price, "filled_qty": filled_qty, "time": now})
+        self._remember(rec)
+
+    def _remember(self, rec: OrderRecord) -> None:
+        if rec.status == "open":
+            self._open_records[rec.order_id] = rec
+        else:
+            self._open_records.pop(rec.order_id, None)
+        if self.on_order is not None:
+            self.on_order(rec)
 
     def _entry_sign(self) -> int:
         return -1 if self.direction == "short" else 1
@@ -286,22 +350,30 @@ class StrategyRunner:
         for order in (self.entry_order, self.exit_order):
             if order is not None:
                 self.broker.cancel_order(order.id)
+                self._update_order(now, order.id, "canceled", None, 0.0)
         remaining = self.broker.position_qty()
         if remaining != 0:
+            qty = abs(remaining)
+            side = "Sell" if remaining > 0 else "Buy"
             if remaining > 0:
-                close_order = self.broker.market_flat_buy(remaining)
+                close_order = self.broker.market_flat_buy(qty)
             else:
-                close_order = self.broker.market_flat_sell(abs(remaining))
-            self._record_fill(now, -1 if remaining > 0 else 1, abs(remaining), self._forced_fill_price(close_order), forced=True)
+                close_order = self.broker.market_flat_sell(qty)
+            if close_order is not None:
+                self._emit_order(now, "forced_close", close_order, side, "market", None, qty, reduce_only=True, status="open")
+            price, filled = self._forced_fill(close_order)
+            if filled and close_order is not None:
+                self._update_order(now, close_order.id, "closed", price, qty)
+            self._record_fill(now, -1 if remaining > 0 else 1, qty, price, forced=True)
         self.state = RunState.STOPPED
 
-    def _forced_fill_price(self, close_order: OrderLike) -> float:
-        """強制平倉的成交價:能查到就用交易所回報的,查不到(還沒成交回報)
-        就用最後一個 tick 的價格估算,只影響 event 紀錄,不影響平倉本身。"""
+    def _forced_fill(self, close_order: Optional[OrderLike]):
+        """強制平倉的成交價:能查到就用交易所回報的;查不到(還沒成交回報)
+        就用最後一個 tick 的價格估算,只影響紀錄,不影響平倉本身。"""
         last = self.price_history[-1] if self.price_history else 0.0
         if close_order is None:
-            return last
+            return last, False
         fetched = self.broker.fetch_order(close_order.id)
         if fetched.status == "closed" and fetched.price:
-            return fetched.price
-        return last
+            return fetched.price, True
+        return last, False

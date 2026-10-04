@@ -13,9 +13,10 @@ live/preflight.py
 from __future__ import annotations
 
 import argparse
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -31,6 +32,37 @@ from strategy_lab.live.instrument_limits import UnknownSymbolError, fix_qty, loa
 from strategy_lab.live.main import _resolve_order_qty, resolve_origin_price, to_bybit_symbol
 
 HKT = ZoneInfo("Asia/Hong_Kong")
+SNAPSHOT_DIR = daemon.RUN_DIR
+SNAPSHOT_MAX_AGE = timedelta(minutes=30)
+
+
+def _snapshot_path(config_path: Path, snapshot_dir: Optional[Path]) -> Path:
+    return Path(snapshot_dir or SNAPSHOT_DIR) / f"{Path(config_path).stem}.preflight.json"
+
+
+def save_snapshot(config_path: Path, results, snapshot_dir: Optional[Path] = None) -> None:
+    """確認啟動時把剛顯示的估算存起來,live/main.py 啟動後讀進 sl_run.preflight。"""
+    data = {
+        "saved_at": datetime.now(HKT).isoformat(),
+        "config": str(config_path),
+        "metrics": {r.title: {row.key: row.value for row in r.rows} for r in results},
+        "texts": {r.title: {row.key: row.text for row in r.rows} for r in results},
+    }
+    path = _snapshot_path(config_path, snapshot_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def load_snapshot(config_path: Path, snapshot_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """讀一次就刪;超過 30 分鐘的視為過期(不是這次 preflight 確認的)。"""
+    path = _snapshot_path(config_path, snapshot_dir)
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    path.unlink()
+    if datetime.now(HKT) - datetime.fromisoformat(data["saved_at"]) > SNAPSHOT_MAX_AGE:
+        return None
+    return data
 
 
 def _default_client(config: ExecutionConfig) -> BybitClient:
@@ -104,7 +136,8 @@ def main(
         qty=qty, market=market, cleanup_at=cleanup_at, limits=limits, loop=strategy.loop,
     )
 
-    for result in run_metrics(Estimate(plan=plan, market=market)):
+    results = run_metrics(Estimate(plan=plan, market=market))
+    for result in results:
         print_fn(f"\n【{result.title}】")
         for row in result.rows:
             print_fn(f"  {row.label:<10} {row.text}")
@@ -121,6 +154,7 @@ def main(
         print_fn("已取消,沒有啟動。")
         return 0
 
+    save_snapshot(config_path, results)
     try:
         info = (start_fn or daemon.start)(config_path)
     except daemon.DaemonError as e:

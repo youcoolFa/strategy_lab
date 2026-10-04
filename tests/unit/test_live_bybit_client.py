@@ -26,6 +26,7 @@ class FakeHTTP:
         self.wallet_balance_response = None
         self.raise_on_next_call = None
         self.fee_rates_response = None
+        self.executions_pages = []
         self.account_info_response = None
 
     def _maybe_raise(self):
@@ -77,6 +78,10 @@ class FakeHTTP:
     def get_fee_rates(self, **kwargs):
         self.calls.append(("get_fee_rates", kwargs))
         return self.fee_rates_response
+
+    def get_executions(self, **kwargs):
+        self.calls.append(("get_executions", kwargs))
+        return self.executions_pages.pop(0)
 
     def get_account_info(self, **kwargs):
         self.calls.append(("get_account_info", kwargs))
@@ -485,3 +490,23 @@ class TestPreflightQueries:
         http = FakeHTTP()
         http.account_info_response = {"result": {"marginMode": "REGULAR_MARGIN"}}
         assert make_client(http).get_margin_mode() == "REGULAR_MARGIN"
+
+
+class TestGetExecutions:
+    def test_follows_cursor_pagination_and_returns_all_rows(self):
+        from datetime import datetime, timezone
+
+        http = FakeHTTP()
+        http.executions_pages = [
+            {"result": {"list": [{"execId": "a"}], "nextPageCursor": "c2"}},
+            {"result": {"list": [{"execId": "b"}], "nextPageCursor": ""}},
+        ]
+        start = datetime(2026, 10, 4, 4, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 10, 4, 5, 0, tzinfo=timezone.utc)
+
+        rows = make_client(http).get_executions("BTCUSDT", start, end)
+
+        assert [r["execId"] for r in rows] == ["a", "b"]
+        first, second = http.calls[0][1], http.calls[1][1]
+        assert first["startTime"] == int(start.timestamp() * 1000) and first["endTime"] == int(end.timestamp() * 1000)
+        assert "cursor" not in first and second["cursor"] == "c2"

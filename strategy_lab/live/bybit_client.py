@@ -33,6 +33,7 @@ sat_strategy 原本的假設)——2026-09-26 改成可設定,因為使用者實
 from __future__ import annotations
 
 import os
+from datetime import datetime
 import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -183,6 +184,22 @@ class BybitClient:
     def get_margin_mode(self) -> Optional[str]:
         resp = self._call_with_retry(self._http.get_account_info)
         return resp["result"].get("marginMode")
+
+    def get_executions(self, symbol: str, start: datetime, end: datetime) -> list:
+        """成交明細(含 execType=Funding 的資金費),以交易所回報的手續費為準。
+        Bybit 一次最多回 100 筆,用 nextPageCursor 翻頁;查詢區間上限 7 天。"""
+        params = dict(
+            category=self._category, symbol=symbol, limit=100,
+            startTime=int(start.timestamp() * 1000), endTime=int(end.timestamp() * 1000),
+        )
+        rows: list = []
+        while True:
+            resp = self._call_with_retry(self._http.get_executions, **params)
+            rows.extend(resp["result"]["list"])
+            cursor = resp["result"].get("nextPageCursor")
+            if not cursor:
+                return rows
+            params["cursor"] = cursor
 
     def get_open_orders(self, symbol: str) -> list:
         resp = self._call_with_retry(self._http.get_open_orders, category=self._category, symbol=symbol)

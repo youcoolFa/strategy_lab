@@ -37,7 +37,7 @@ import signal
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -51,9 +51,11 @@ from strategy_lab.live.broker import LiveBroker
 from strategy_lab.live.bybit_client import BybitClient
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
 from strategy_lab.live.market_feed import ticker_feed
+from strategy_lab.storage.recorder import RunInfo, TradeRecorder
 
 HKT = ZoneInfo("Asia/Hong_Kong")
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
+PENDING_DIR = LOG_DIR / "db_pending"
 
 
 def setup_file_logging(name: str, log_dir: Optional[Path] = None) -> Tuple[Path, int]:
@@ -122,7 +124,7 @@ def _resolve_order_qty(config: ExecutionConfig, bybit_client: BybitClient, symbo
     return compute_qty(order_config, current_price=current_price)
 
 
-def build_runner_and_symbol(config: ExecutionConfig) -> Tuple[StrategyRunner, str]:
+def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = None) -> Tuple[StrategyRunner, str]:
     strategy = load_strategy(config.strategy_path)
     symbol = config.symbol_override or to_bybit_symbol(strategy.symbol)
 
@@ -147,7 +149,44 @@ def build_runner_and_symbol(config: ExecutionConfig) -> Tuple[StrategyRunner, st
         loop=strategy.loop,
         on_event=log_event,
     )
+    attach_recorder(runner, recorder)
     return runner, symbol
+
+
+def make_recorder(config: ExecutionConfig, client: Any) -> Optional[TradeRecorder]:
+    """實盤才記錄(dry-run 不存)。TRADING_DB_URL 沒設或連不上時,紀錄寫本機
+    `logs/db_pending/`,之後用 storage/backfill.py 補進資料庫。"""
+    if config.dry_run:
+        return None
+    return TradeRecorder(db_url=os.getenv("TRADING_DB_URL"), pending_dir=PENDING_DIR, fetch_executions=client.get_executions)
+
+
+def attach_recorder(runner: StrategyRunner, recorder: Optional[Any]) -> None:
+    if recorder is None:
+        return
+
+    def on_event(event: Event) -> None:
+        log_event(event)
+        recorder.record_event(event)
+
+    runner.on_order = recorder.record_order
+    runner.on_event = on_event
+
+
+def _run_info(runner: StrategyRunner, config: ExecutionConfig, symbol: str, origin: Optional[float],
+              origin_source: Optional[str], started_at: datetime, log_path: Optional[Path],
+              preflight: Optional[Dict[str, Any]]) -> RunInfo:
+    import yaml
+
+    strategy_yaml = Path(config.strategy_path).read_text(encoding="utf-8")
+    params = yaml.safe_load(strategy_yaml) or {}
+    return RunInfo(
+        strategy_name=params.get("name", Path(config.strategy_path).stem), strategy_path=config.strategy_path,
+        strategy_yaml=strategy_yaml, strategy_params=params, config=config.to_dict(), symbol=symbol,
+        category=config.category, direction=runner.direction, origin_price=origin, origin_source=origin_source,
+        qty=runner.order_qty, order_type=config.order_type, loop=runner.loop, testnet=config.testnet,
+        preflight=preflight, log_path=str(log_path) if log_path else None, started_at=started_at,
+    )
 
 
 def log_event(event: Event) -> None:
@@ -209,9 +248,19 @@ def run_forever(
     config: ExecutionConfig,
     symbol: str,
     now_fn: Callable[[], datetime] = lambda: datetime.now(HKT),
+    recorder: Optional[Any] = None,
+    log_path: Optional[Path] = None,
+    preflight: Optional[Dict[str, Any]] = None,
 ) -> None:
     live_broker: LiveBroker = runner.broker  # type: ignore[assignment]
-    ensure_clean_start(live_broker.client, symbol, config.dry_run)
+    try:
+        ensure_clean_start(live_broker.client, symbol, config.dry_run)
+    except LeftoverExchangeStateError:
+        if recorder is not None:
+            now = now_fn()
+            recorder.start_run(_run_info(runner, config, symbol, None, None, now, log_path, preflight))
+            recorder.end_run(now, "refused_leftover")
+        raise
 
     if config.use_live_ticker_feed:
         ticker_feed.start()
@@ -226,14 +275,21 @@ def run_forever(
         f"啟動 strategy_lab live runner:origin_price = {origin}({source}),"
         f"目前價格 = {price},差 {(price / origin - 1) * 100:+.3f}%"
     )
-    runner.start(now, origin)
-    runner.tick(now, price)
-
-    while runner.state != RunState.STOPPED:
-        time.sleep(config.poll_interval_seconds)
-        now = now_fn()
-        price = get_current_price(runner, config, symbol)
+    if recorder is not None:
+        recorder.start_run(_run_info(runner, config, symbol, origin, source, now, log_path, preflight))
+    try:
+        runner.start(now, origin)
         runner.tick(now, price)
+
+        while runner.state != RunState.STOPPED:
+            time.sleep(config.poll_interval_seconds)
+            now = now_fn()
+            price = get_current_price(runner, config, symbol)
+            runner.tick(now, price)
+    except Exception:
+        if recorder is not None:
+            recorder.end_run(now_fn(), "crash")
+        raise
 
     if config.use_live_ticker_feed:
         ticker_feed.stop()
@@ -242,6 +298,8 @@ def run_forever(
         f"strategy_lab live runner 結束:event {summary.count} 個(其中強制平倉 {summary.forced} 個,獲利 {summary.wins} 個),"
         f"合計損益 {summary.total_pnl:+.4f} USDT(未扣手續費),最大回撤 {summary.max_drawdown:+.4f} USDT"
     )
+    if recorder is not None:
+        recorder.end_run(now_fn(), runner.stop_reason or "unknown", summary)
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -274,9 +332,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     else:
         logger.warning("=== 使用 Bybit 正式環境,將動用真實資金! ===")
 
+    from strategy_lab.live.preflight import load_snapshot  # preflight 也 import 這個模組,放在函式內避免循環 import
+
+    preflight = load_snapshot(config_path or Path(__file__).resolve().parents[2] / "live_execution_config.yaml")
     try:
         runner, symbol = build_runner_and_symbol(config)
-        run_forever(runner, config, symbol)
+        recorder = None if config.dry_run else make_recorder(config, runner.broker.client)
+        attach_recorder(runner, recorder)
+        run_forever(runner, config, symbol, recorder=recorder, log_path=log_path, preflight=preflight)
     except Exception:
         logger.exception("live runner 異常結束(沒有走收尾流程,請檢查交易所上的掛單/持倉)")
         raise

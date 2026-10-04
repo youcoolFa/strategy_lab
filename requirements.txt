@@ -6,4 +6,8 @@ pydantic>=1.10,<2.0
 redis>=5.0
 loguru>=0.7
 pybit>=5.8
+python-dotenv>=1.0
+# 交易紀錄資料庫(storage/):
+sqlalchemy>=1.4,<2.1
+psycopg2-binary>=2.9
 
