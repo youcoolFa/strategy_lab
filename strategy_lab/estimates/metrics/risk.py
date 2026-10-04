@@ -19,8 +19,10 @@ class RiskMetric:
         plan, market = est.plan, est.market
         long = plan.direction != "short"
         notional = plan.notional
+        base = plan.avg_entry_price
+        basis = f"(全部 {len(plan.levels)} 注成交、平均建倉價 {base:.2f} 為基準)" if plan.scale_in else ""
         rows = [
-            Row("effective_leverage", "實際槓桿", f"{notional / market.equity:.2f} 倍(名義價值 {notional:.2f} ÷ 權益 {market.equity:.2f})", notional / market.equity),
+            Row("effective_leverage", "實際槓桿", f"{notional / market.equity:.2f} 倍(名義價值 {notional:.2f} ÷ 權益 {market.equity:.2f}){basis}", notional / market.equity),
             Row("account_settings", "帳戶設定", f"槓桿 {market.leverage} 倍,保證金模式 {market.margin_mode}"),
         ]
 
@@ -37,14 +39,14 @@ class RiskMetric:
             )
 
         for pct in ADVERSE_MOVES_PCT:
-            price = plan.entry_price * (1 - pct / 100 if long else 1 + pct / 100)
+            price = base * (1 - pct / 100 if long else 1 + pct / 100)
             loss = self._loss_at(est, price)
             rows.append(
                 Row(f"scenario_{pct}pct", f"不利 {pct}%", f"{loss:+.4f} USDT(價格 {price:.2f},權益 {loss / market.equity * 100:+.2f}%)", loss)
             )
 
         wipeout = market.equity / notional * 100
-        wipeout_price = plan.entry_price * (1 - wipeout / 100 if long else 1 + wipeout / 100)
+        wipeout_price = base * (1 - wipeout / 100 if long else 1 + wipeout / 100)
         rows.append(
             Row(
                 "equity_wipeout_move", "權益虧光",
@@ -57,5 +59,5 @@ class RiskMetric:
     @staticmethod
     def _loss_at(est: Estimate, exit_price: float) -> float:
         plan = est.plan
-        pnl = Trade(plan.entry_price, exit_price, plan.qty, plan.direction).pnl
+        pnl = sum(Trade(l.entry_price, exit_price, l.qty, plan.direction).pnl for l in plan.lot_levels())
         return pnl - est.entry_fee() - est.exit_fee(exit_price, resting=False)

@@ -1266,3 +1266,46 @@ event 1,淨損益 −0.13971185 USDT,與 Bybit closedPnl 完全一致。
 兩個專案的 `.env` 切換(密碼隨機產生,只存在各自 gitignored 的 `.env`)、
 Superset 連線與 dataset。Fa_Successful_trade 的真實資料庫整合測試、strategy_lab
 recorder 的寫入/唯讀讀回都對新資料庫驗證過。
+
+### 6.22 分注買入法(scale-in)
+
+**規格**(2026-10-04 與使用者逐項確認):
+
+| 項目 | 決定 |
+|---|---|
+| 建倉價 | 每一注都由使用者輸入:`live_execution_config.yaml` 的 `entry_prices: [p1, p2, p3]`。不一定越跌越買,不從 origin 推算 |
+| 數量 | 策略 YAML `weights: [2, 3, 1]`(總和 6)只決定數量:第一注 = `position_sizing`,第 k 注 = 第一注 × w_k / w_1 |
+| 平倉 | 每注成交後馬上掛「這一注」的 reduceOnly 限價單:價格 = 這注建倉價 ± `distance`,數量 = 這注數量(平倉比重 = 建倉比重,不另設) |
+| 距離 | `distance: {value, unit}`,`unit` = `pct`(建倉價的 %,1000 → 1% → 1010)或 `points`(固定點數);long 加、short 減 |
+| loop | 部位 0 → 0 = 1 個 loop,建 1 平 1、建 2 平 2、建 3 平 3 都只算 1 個。跟 §6.20 的 event 是同一個定義,`EventTracker` 不用改 |
+| loop 結束 | 取消還沒成交的建倉單,下一個 tick 三注全部重新掛上(選項 A) |
+| 損益預測 | 分 level:level k = 成交到第 k 注、每注都在自己的平倉價平掉(累加)。非分注策略只有 level 1,level 2/3 顯示 null |
+| origin_price | 不使用;設定檔維持 `null`,保留日後用 |
+| 停損 / 資金上限 | 暫不做 |
+
+**`scale_in` 旗標**:每個策略 YAML 都明確寫 `scale_in: true/false`(schema 預設 false)。
+`dsl/loader.py` 檢查旗標跟 entry/exit plugin 一致——分注策略的 entry 一定是 `scale_in`、
+exit 一定是 `scale_out`,其他策略不能用這兩個,混搭在載入時就報錯。`live/main.py` 依旗標建
+`ScaleInRunner` 或 `StrategyRunner`。
+
+**`ScaleInRunner`**(`engine/scale_in_runner.py`)繼承 `StrategyRunner`,收攤條件、event
+會計、`OrderRecord`/`on_order`/`on_event` 全部共用;差別只有同時管理多注(`Lot`:建倉單、
+平倉單、建倉成交價)。為了共用,`StrategyRunner.tick` 的前置步驟抽成 `_prelude()`,`_cleanup`
+拆成 `_cancel_open_orders()` + `_flatten()`,子類只覆寫取消哪些單。同一個 tick 內**先處理建倉
+成交、再處理平倉成交**:實盤是輪詢,兩次輪詢之間可能同時有建倉和平倉成交,先記建倉可避免部位
+被誤判成短暫歸 0、提早結束 loop。平倉數量用該注實際成交量(交易所會修正精度)。被外部取消的
+單(例如在 Bybit App 手動取消)跟 `StrategyRunner` 一樣重新掛回。
+
+**估算**:`OrderPlan.levels`(`LevelPlan`:建倉價、數量、平倉價、是否越過現價);非分注策略留空,
+`lot_levels()` 把原本的單一價位當 level 1,所以 metric 不用分兩套。`cycle_pnl` 永遠輸出
+`level_1`–`level_3`(`details` 帶毛利/手續費/名義價值);`risk` 以全部注數成交的最大部位、
+平均建倉價為基準;`order_plan` 逐注列出,任一注建倉價越過現價就警告是哪一注。preflight 逐注
+修正到交易所精度,任一注低於最小下單量就拒絕啟動(例:BTC 第一注 0.001 → 第三注 0.0005)。
+
+**資料庫**:`sl_order.lot`(第幾注,非分注為 NULL)。`create_all` 不會幫既有表加欄位,
+`storage/setup_db.py` 補上「缺少的可為 NULL 欄位就 `ALTER TABLE ADD COLUMN`」,已套用到
+`trading-postgres`。
+
+**驗證**:PaperBroker 整合測試涵蓋建 1/2/3 平 1/2/3 各算 1 個 loop、loop 結束取消並重掛、
+`loop: 0` 收尾、做空、時間窗收尾;沙盒多個 seed 跑過多輪;用真實行情唯讀預覽 preflight
+(dry-run、回答 no,沒有啟動)。

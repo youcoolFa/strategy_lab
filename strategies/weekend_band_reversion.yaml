@@ -17,6 +17,7 @@ name: weekend_band_reversion
 symbol: BTC/USDT
 direction: long   # long(下緣買入,上緣賣出平倉)/ short(上緣賣出放空,下緣買回平倉)
 loop: null   # 重複次數:總 event 數 = loop + 1;0 = 只做 1 個 event;null = 不限次數(做到時間窗結束)
+scale_in: false   # 分注策略才是 true(見 strategies/scale_in_ladder.yaml)
 
 entry:
   type: resting_deviation_from_reference

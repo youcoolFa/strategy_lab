@@ -579,3 +579,27 @@ class TestRecorderWiring:
         import strategy_lab.live.main as main_module
 
         assert main_module.make_recorder(ExecutionConfig(dry_run=True), client=None) is None
+
+
+class TestScaleInWiring:
+    def test_scale_in_strategy_builds_scale_in_runner_with_entry_prices(self, monkeypatch):
+        from strategy_lab.engine.scale_in_runner import ScaleInRunner
+
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        config = ExecutionConfig(strategy_path="strategies/scale_in_ladder.yaml", dry_run=True,
+                                 entry_prices=[1000.0, 990.0, 980.0],
+                                 position_sizing=PositionSizing(mode="fixed_qty", value=0.004))
+
+        runner, _ = build_runner_and_symbol(config)
+
+        assert isinstance(runner, ScaleInRunner)
+        assert runner.entry_prices == [1000.0, 990.0, 980.0]
+        assert runner.order_qty == 0.004
+
+    def test_scale_in_without_entry_prices_is_an_error(self, monkeypatch):
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        config = ExecutionConfig(strategy_path="strategies/scale_in_ladder.yaml", dry_run=True)
+        with pytest.raises(ValueError, match="entry_prices"):
+            build_runner_and_symbol(config)

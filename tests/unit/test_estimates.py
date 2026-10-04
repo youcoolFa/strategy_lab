@@ -109,18 +109,18 @@ class TestMetricRegistry:
 class TestCyclePnl:
     def test_resting_band_long_net_after_maker_fees(self):
         r = rows(run_metrics(Estimate(plan=band_plan("long"), market=market())))
-        assert r["gross_pnl"].value == pytest.approx(20.0)  # 990 買 → 1010 賣
-        assert r["fees"].value == pytest.approx(990 * 0.0002 + 1010 * 0.0002)
-        assert r["net_pnl"].value == pytest.approx(20.0 - 0.4)
+        assert r["level_1"].details["gross"] == pytest.approx(20.0)  # 990 買 → 1010 賣
+        assert r["level_1"].details["fees"] == pytest.approx(990 * 0.0002 + 1010 * 0.0002)
+        assert r["level_1"].value == pytest.approx(20.0 - 0.4)
 
     def test_entry_crossing_market_pays_taker_fee_and_warns(self):
         r = rows(run_metrics(Estimate(plan=band_plan("long", price=980.0), market=market(price=980.0))))
-        assert r["fees"].value == pytest.approx(990 * 0.00055 + 1010 * 0.0002)
+        assert r["level_1"].details["fees"] == pytest.approx(990 * 0.00055 + 1010 * 0.0002)
         assert r["entry_crosses_market"].warning is True
 
     def test_short_profit_is_positive_when_buying_back_lower(self):
         r = rows(run_metrics(Estimate(plan=band_plan("short", price=1000.0), market=market(price=1000.0))))
-        assert r["gross_pnl"].value == pytest.approx(20.0)
+        assert r["level_1"].details["gross"] == pytest.approx(20.0)
 
 
 class TestRisk:
@@ -185,3 +185,50 @@ class TestLoopInEstimate:
         r = rows(run_metrics(Estimate(plan=plan, market=market())))
         assert r["loop"].value is None
         assert "不限" in r["loop"].text
+
+
+class TestLevels:
+    """PnL 預測分 level:level k = 成交到第 k 注、每注都平倉。沒有分注的策略
+    只有 level 1,level 2/3 為 null。"""
+
+    def test_single_lot_strategy_has_level_1_and_null_levels_2_3(self):
+        r = rows(run_metrics(Estimate(plan=band_plan("long"), market=market())))
+        assert r["level_1"].value == pytest.approx(20.0 - (990 * 0.0002 + 1010 * 0.0002))
+        assert r["level_1"].details["gross"] == pytest.approx(20.0)
+        assert r["level_1"].details["fees"] == pytest.approx(990 * 0.0002 + 1010 * 0.0002)
+        assert r["level_2"].value is None and r["level_3"].value is None
+        assert "null" in r["level_2"].text
+
+    def test_scale_in_levels_are_cumulative(self):
+        from strategy_lab.estimates.plan import build_scale_in_plan
+        from strategy_lab.plugins.entry.scale_in import ScaleInEntry
+        from strategy_lab.plugins.exit.scale_out import ScaleOutExit
+
+        plan = build_scale_in_plan(
+            strategy_name="scale_in_ladder", entry=ScaleInEntry(weights=[2, 3, 1]),
+            exit=ScaleOutExit(distance={"value": 1.0, "unit": "pct"}), direction="long",
+            entry_prices=[1000.0, 990.0, 980.0], qtys=[2.0, 3.0, 1.0], market=market(price=1005.0), cleanup_at=CLEANUP,
+        )
+        assert [l.take_profit for l in plan.levels] == pytest.approx([1010.0, 999.9, 989.8])
+        r = rows(run_metrics(Estimate(plan=plan, market=market(price=1005.0))))
+
+        lot_gross = [10.0 * 2, 9.9 * 3, 9.8 * 1]
+        lot_fees = [(1000 * 2 + 1010 * 2) * 0.0002, (990 * 3 + 999.9 * 3) * 0.0002, (980 + 989.8) * 0.0002]
+        for k in (1, 2, 3):
+            assert r[f"level_{k}"].value == pytest.approx(sum(lot_gross[:k]) - sum(lot_fees[:k]))
+        assert r["level_3"].details["exposure"] == pytest.approx(1000 * 2 + 990 * 3 + 980)
+        assert r["effective_leverage"].value == pytest.approx((1000 * 2 + 990 * 3 + 980) / 500)
+
+    def test_scale_in_warns_per_lot_when_entry_crosses_market(self):
+        from strategy_lab.estimates.plan import build_scale_in_plan
+        from strategy_lab.plugins.entry.scale_in import ScaleInEntry
+        from strategy_lab.plugins.exit.scale_out import ScaleOutExit
+
+        plan = build_scale_in_plan(
+            strategy_name="scale_in_ladder", entry=ScaleInEntry(weights=[2, 3, 1]),
+            exit=ScaleOutExit(distance={"value": 1.0, "unit": "pct"}), direction="long",
+            entry_prices=[1000.0, 990.0, 980.0], qtys=[2.0, 3.0, 1.0], market=market(price=995.0), cleanup_at=CLEANUP,
+        )
+        assert [l.crosses_market for l in plan.levels] == [True, False, False]
+        r = rows(run_metrics(Estimate(plan=plan, market=market(price=995.0))))
+        assert r["entry_crosses_market"].warning is True and "第1注" in r["entry_crosses_market"].text

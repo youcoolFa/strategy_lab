@@ -94,3 +94,23 @@ class TestLoop:
 
         with pytest.raises(pydantic.ValidationError):
             self._definition(loop=-1)
+
+
+class TestScaleInFlag:
+    def _definition(self, **extra):
+        from strategy_lab.dsl.schema import StrategyDefinition
+
+        base = dict(
+            name="x", symbol="BTC/USDT",
+            entry={"type": "resting_deviation_from_reference", "params": {"deviation_pct": 0.75}},
+            exit={"type": "resting_return_to_reference"},
+            time_window={"type": "weekly_window"},
+        )
+        base.update(extra)
+        return StrategyDefinition(**base)
+
+    def test_defaults_to_false(self):
+        assert self._definition().scale_in is False
+
+    def test_true(self):
+        assert self._definition(scale_in=True).scale_in is True

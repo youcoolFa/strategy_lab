@@ -15,7 +15,7 @@ import os
 from typing import List, Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from strategy_lab.storage.models import Base
 
@@ -23,7 +23,22 @@ from strategy_lab.storage.models import Base
 def setup(db_url: str) -> List[str]:
     engine = create_engine(db_url, future=True)
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
     return sorted(t for t in inspect(engine).get_table_names() if t.startswith("sl_"))
+
+
+def _add_missing_columns(engine) -> None:
+    """create_all 不會幫已存在的表加新欄位(例:2026-10-04 加的 sl_order.lot)。
+    只補可為 NULL 的新欄位,舊資料不用改;不刪、不改既有欄位。"""
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing or not column.nullable:
+                    continue
+                col_type = column.type.compile(dialect=engine.dialect)
+                conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {column.name} {col_type}"))
 
 
 def main(argv: Optional[List[str]] = None) -> int:

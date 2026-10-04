@@ -54,6 +54,7 @@ class SlOrder(Base):
     run_id = Column(String(36), nullable=False, index=True)
     event_index = Column(Integer, nullable=False)
     purpose = Column(String(20), nullable=False)  # entry / exit / forced_close
+    lot = Column(Integer)  # 分注策略的第幾注(1 起算);非分注策略為 NULL
     side = Column(String(4), nullable=False)
     order_type = Column(String(10), nullable=False)
     price = Column(MONEY)  # 市價單為 NULL

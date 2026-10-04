@@ -81,6 +81,7 @@ class OrderRecord:
     avg_price: Optional[float]
     filled_qty: float
     time: datetime
+    lot: Optional[int] = None  # 分注策略的第幾注(1 起算);非分注策略為 None
 
 
 @dataclass
@@ -144,27 +145,7 @@ class StrategyRunner:
     def tick(self, now: datetime, price: float) -> None:
         """每收到一個新價格就執行一次，根據目前狀態決定下一步動作。"""
 
-        if self.state == RunState.STOPPED:
-            return
-
-        self.price_history.append(price)
-        self.broker.tick(price)
-        self._tracker.on_price(now, price)
-
-        assert self.window_end is not None, "呼叫 tick() 前必須先呼叫 start()"
-        if self.time_window.should_cleanup(now, self.window_end):
-            self.stop_reason = "window_cleanup"
-            self._cleanup(now)
-            return
-
-        if self.kill_switch is not None and self.kill_switch.rule.evaluate(self._ctx(now, price)):
-            self.stop_reason = "kill_switch"
-            self._cleanup(now)
-            return
-
-        if self._stop_requested:
-            self.stop_reason = "stop_requested"
-            self._cleanup(now)
+        if not self._prelude(now, price):
             return
 
         if self.state == RunState.IDLE:
@@ -175,6 +156,28 @@ class StrategyRunner:
             self._try_exit(now, price)
         elif self.state == RunState.EXIT_PENDING:
             self._check_exit_fill(now)
+
+    def _prelude(self, now: datetime, price: float) -> bool:
+        """每個 tick 共用的前置步驟:記價格、推進 broker、檢查三種收攤條件。
+        回傳 False = 已經停止/剛收攤,這個 tick 不用再做事。"""
+        if self.state == RunState.STOPPED:
+            return False
+
+        self.price_history.append(price)
+        self.broker.tick(price)
+        self._tracker.on_price(now, price)
+
+        assert self.window_end is not None, "呼叫 tick() 前必須先呼叫 start()"
+        if self.time_window.should_cleanup(now, self.window_end):
+            self.stop_reason = "window_cleanup"
+        elif self.kill_switch is not None and self.kill_switch.rule.evaluate(self._ctx(now, price)):
+            self.stop_reason = "kill_switch"
+        elif self._stop_requested:
+            self.stop_reason = "stop_requested"
+        else:
+            return True
+        self._cleanup(now)
+        return False
 
     def run(
         self,
@@ -300,11 +303,11 @@ class StrategyRunner:
         return "Buy" if buys_on_entry == entry else "Sell"
 
     def _emit_order(self, now, purpose, order, side, order_type, price, qty, reduce_only, status,
-                    avg_price=None, filled_qty=0.0) -> None:
+                    avg_price=None, filled_qty=0.0, lot=None) -> None:
         rec = OrderRecord(
             order_id=order.id, purpose=purpose, event_index=self._tracker.completed + 1, side=side,
             order_type=order_type, price=price, qty=qty, reduce_only=reduce_only, status=status,
-            avg_price=avg_price, filled_qty=filled_qty, time=now,
+            avg_price=avg_price, filled_qty=filled_qty, time=now, lot=lot,
         )
         self._remember(rec)
 
@@ -347,10 +350,18 @@ class StrategyRunner:
         真的有沒有倉位」的唯一事實來源。附帶好處:market_flat_buy()/
         market_flat_sell() 會套用 §6.9 的下單精度修正,market_close()
         原本沒有。"""
+        self._cancel_open_orders(now)
+        self._flatten(now)
+        self.state = RunState.STOPPED
+
+    def _cancel_open_orders(self, now: datetime) -> None:
         for order in (self.entry_order, self.exit_order):
             if order is not None:
                 self.broker.cancel_order(order.id)
                 self._update_order(now, order.id, "canceled", None, 0.0)
+
+    def _flatten(self, now: datetime) -> None:
+        """依部位正負號市價平倉(見 _cleanup 的說明),並記成 forced 成交。"""
         remaining = self.broker.position_qty()
         if remaining != 0:
             qty = abs(remaining)
@@ -365,7 +376,6 @@ class StrategyRunner:
             if filled and close_order is not None:
                 self._update_order(now, close_order.id, "closed", price, qty)
             self._record_fill(now, -1 if remaining > 0 else 1, qty, price, forced=True)
-        self.state = RunState.STOPPED
 
     def _forced_fill(self, close_order: Optional[OrderLike]):
         """強制平倉的成交價:能查到就用交易所回報的;查不到(還沒成交回報)

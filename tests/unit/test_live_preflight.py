@@ -129,7 +129,7 @@ class TestPreflightSnapshotHandoff:
         from strategy_lab.live.preflight import load_snapshot
 
         snap = load_snapshot(tmp_path / "live_btc_band.yaml", snapshot_dir=tmp_path / "run")
-        assert snap["metrics"]["每輪損益(完成一輪才實現)"]["net_pnl"] is not None
+        assert snap["metrics"]["每輪損益(依 level)"]["level_1"] is not None
         assert load_snapshot(tmp_path / "live_btc_band.yaml", snapshot_dir=tmp_path / "run") is None  # 讀一次就刪
 
     def test_cancelled_preflight_saves_nothing(self, tmp_path, monkeypatch):
@@ -139,3 +139,34 @@ class TestPreflightSnapshotHandoff:
         from strategy_lab.live.preflight import load_snapshot
 
         assert load_snapshot(tmp_path / "live_btc_band.yaml", snapshot_dir=tmp_path / "run") is None
+
+
+def write_scale_config(tmp_path, entry_prices="[84900, 84800, 84700]", value="0.002"):
+    path = tmp_path / "live_btc_scale.yaml"
+    path.write_text(
+        "strategy_path: strategies/scale_in_ladder.yaml\n"
+        "symbol_override: BTCUSDT\n"
+        + (f"entry_prices: {entry_prices}\n" if entry_prices else "")
+        + "dry_run: false\ntestnet: false\n"
+        f"position_sizing:\n  mode: fixed_qty\n  value: {value}\n"
+    )
+    return path
+
+
+class TestScaleInPreflight:
+    def test_shows_each_lot_and_level_pnl(self, tmp_path, monkeypatch):
+        code, out, started = run(tmp_path, FakeClient(price=84950.0), "no", monkeypatch, config=write_scale_config(tmp_path))
+        assert code == 0 and started == []
+        assert "第1注" in out and "第2注" in out and "第3注" in out
+        assert "level 3" in out
+
+    def test_missing_entry_prices_is_refused(self, tmp_path, monkeypatch):
+        code, out, started = run(tmp_path, FakeClient(price=84950.0), "yes", monkeypatch,
+                                 config=write_scale_config(tmp_path, entry_prices=None))
+        assert code == 1 and started == [] and "entry_prices" in out
+
+    def test_lot_below_exchange_minimum_is_refused(self, tmp_path, monkeypatch):
+        # 第一注 0.001 → 第三注 = 0.001 × 1/2 = 0.0005 < BTC 最小 0.001
+        code, out, started = run(tmp_path, FakeClient(price=84950.0), "yes", monkeypatch,
+                                 config=write_scale_config(tmp_path, value="0.001"))
+        assert code == 1 and started == [] and "第3注" in out and "最小" in out

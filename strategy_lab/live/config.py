@@ -36,7 +36,7 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 import yaml
 from loguru import logger
@@ -55,6 +55,9 @@ class ExecutionConfig:
     # 04:00 的價格)。Fa_Successful_trade 的 Redis 歷史價格還沒接上前,
     # 手動輸入是唯一能讓中途啟動仍對齊 04:00 起點的方式。
     origin_price: Optional[float] = None
+    # 分注策略(scale_in: true)每一注的建倉價,依第一注、第二注…的順序;
+    # 數量照策略 YAML 的 weights,第一注 = position_sizing。非分注策略不用。
+    entry_prices: Optional[List[float]] = None
 
     # --- 執行安全設定(預設值對照 sat_strategy/app/config.py) ---
     dry_run: bool = True

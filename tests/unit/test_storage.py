@@ -195,3 +195,31 @@ class TestSetupDb:
         url = f"sqlite:///{tmp_path / 'fresh.db'}"
         assert setup(url) == ["sl_event", "sl_fill", "sl_order", "sl_run"]
         assert setup(url) == ["sl_event", "sl_fill", "sl_order", "sl_run"]
+
+
+class TestLotColumn:
+    def test_order_lot_is_stored(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path)
+        rec.start_run(run_info())
+        record = order("o9", "entry", "Buy", "open")
+        record.lot = 2
+        rec.record_order(record)
+        [o] = rows(db, SlOrder)
+        assert o.lot == 2
+
+
+class TestSetupAddsNewColumns:
+    def test_existing_sl_order_without_lot_gets_the_column(self, tmp_path):
+        from sqlalchemy import create_engine, inspect, text
+
+        from strategy_lab.storage.setup_db import setup
+
+        url = f"sqlite:///{tmp_path / 'old.db'}"
+        engine = create_engine(url, future=True)
+        with engine.begin() as conn:  # 加 lot 欄位之前建好的舊表
+            conn.execute(text("CREATE TABLE sl_order (order_id VARCHAR(64) PRIMARY KEY, purpose VARCHAR(20))"))
+
+        setup(url)
+        setup(url)  # 再跑一次不會出錯
+
+        assert "lot" in {c["name"] for c in inspect(create_engine(url)).get_columns("sl_order")}

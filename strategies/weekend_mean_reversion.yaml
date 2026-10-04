@@ -17,6 +17,7 @@ name: weekend_mean_reversion
 symbol: WLD/USDT # BTC/USDT
 direction: long   # long(跌破買入,回 origin 賣出平倉)/ short(漲破賣出放空,回 origin 買回平倉)
 loop: null   # 重複次數:總 event 數 = loop + 1;0 = 只做 1 個 event;null = 不限次數(做到時間窗結束)
+scale_in: false   # 分注策略才是 true(見 strategies/scale_in_ladder.yaml)
 
 entry:
   type: resting_deviation_from_reference

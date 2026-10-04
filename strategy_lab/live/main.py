@@ -47,6 +47,7 @@ from strategy_lab.dsl.loader import load_strategy
 from strategy_lab.dsl.order_config import OrderConfig, compute_qty
 from strategy_lab.engine.events import Event, summarize
 from strategy_lab.engine.runner import RunState, StrategyRunner
+from strategy_lab.engine.scale_in_runner import ScaleInRunner
 from strategy_lab.live.broker import LiveBroker
 from strategy_lab.live.bybit_client import BybitClient
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
@@ -97,7 +98,8 @@ def to_bybit_symbol(yaml_symbol: str) -> str:
     return yaml_symbol.split(":")[0].replace("/", "")
 
 
-def _resolve_order_qty(config: ExecutionConfig, bybit_client: BybitClient, symbol: str) -> float:
+def _resolve_order_qty(config: ExecutionConfig, bybit_client: BybitClient, symbol: str,
+                       price: Optional[float] = None) -> float:
     """把 config.position_sizing 換算成真正的下單數量。`fixed_qty` 不用
     知道價格,直接回傳,不會多打一次網路請求——這是
     test_dry_run_false_still_builds_without_real_network_call 在測的
@@ -120,8 +122,19 @@ def _resolve_order_qty(config: ExecutionConfig, bybit_client: BybitClient, symbo
     )
     if config.position_sizing.mode == "fixed_qty":
         return compute_qty(order_config, current_price=0.0)
-    current_price = bybit_client.get_last_price(symbol)
+    current_price = price if price is not None else bybit_client.get_last_price(symbol)
     return compute_qty(order_config, current_price=current_price)
+
+
+def scale_in_entry_prices(config: ExecutionConfig) -> List[float]:
+    """分注策略每一注的建倉價,只從 live_execution_config.yaml 的 entry_prices 讀
+    (不用 origin_price)。沒填就報錯,不猜價格。"""
+    if not config.entry_prices:
+        raise ValueError(
+            "分注策略(scale_in: true)要在 live_execution_config.yaml 填 entry_prices,"
+            "每注一個建倉價,例 entry_prices: [84900, 84500, 84000]"
+        )
+    return [float(p) for p in config.entry_prices]
 
 
 def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = None) -> Tuple[StrategyRunner, str]:
@@ -135,13 +148,10 @@ def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = N
         category=config.category,
     )
     live_broker = LiveBroker(client=bybit_client, symbol=symbol, dry_run=config.dry_run)
-    order_qty = _resolve_order_qty(config, bybit_client, symbol)
-
-    runner = StrategyRunner(
+    common = dict(
         entry=strategy.entry,
         exit=strategy.exit,
         time_window=strategy.time_window,
-        order_qty=order_qty,
         broker=live_broker,
         kill_switch=strategy.kill_switch,
         order_type=config.order_type,
@@ -149,6 +159,14 @@ def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = N
         loop=strategy.loop,
         on_event=log_event,
     )
+    if strategy.scale_in:
+        entry_prices = scale_in_entry_prices(config)
+        # 第一注數量:fixed_quote_amount / account_percentage 用第一注的建倉價換算
+        order_qty = _resolve_order_qty(config, bybit_client, symbol, price=entry_prices[0])
+        runner: StrategyRunner = ScaleInRunner(order_qty=order_qty, entry_prices=entry_prices, **common)
+    else:
+        order_qty = _resolve_order_qty(config, bybit_client, symbol)
+        runner = StrategyRunner(order_qty=order_qty, **common)
     attach_recorder(runner, recorder)
     return runner, symbol
 
@@ -271,14 +289,19 @@ def run_forever(
     price = get_current_price(runner, config, symbol)
     origin = resolve_origin_price(config, price)
     source = "手動輸入" if config.origin_price is not None else "啟動當下即時價"
-    logger.info(
-        f"啟動 strategy_lab live runner:origin_price = {origin}({source}),"
-        f"目前價格 = {price},差 {(price / origin - 1) * 100:+.3f}%"
-    )
+    if isinstance(runner, ScaleInRunner):
+        lots = ", ".join(f"第{i}注 {p} × {q:g}" for i, (p, q) in enumerate(zip(runner.entry_prices, runner.lot_qtys), 1))
+        logger.info(f"啟動 strategy_lab live runner(分注):{lots};目前價格 = {price}(origin_price 不使用)")
+        origin, source = None, None  # 分注策略不用 origin_price;sl_run 記 NULL
+    else:
+        logger.info(
+            f"啟動 strategy_lab live runner:origin_price = {origin}({source}),"
+            f"目前價格 = {price},差 {(price / origin - 1) * 100:+.3f}%"
+        )
     if recorder is not None:
         recorder.start_run(_run_info(runner, config, symbol, origin, source, now, log_path, preflight))
     try:
-        runner.start(now, origin)
+        runner.start(now, origin if origin is not None else price)
         runner.tick(now, price)
 
         while runner.state != RunState.STOPPED:

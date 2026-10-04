@@ -24,12 +24,12 @@ from dotenv import load_dotenv
 from strategy_lab.dsl.loader import load_strategy
 from strategy_lab.estimates.metrics import run_metrics
 from strategy_lab.estimates.model import Estimate, MarketSnapshot
-from strategy_lab.estimates.plan import build_order_plan
+from strategy_lab.estimates.plan import build_order_plan, build_scale_in_plan
 from strategy_lab.live import daemon
 from strategy_lab.live.bybit_client import BybitClient
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
 from strategy_lab.live.instrument_limits import UnknownSymbolError, fix_qty, load_instrument_limits
-from strategy_lab.live.main import _resolve_order_qty, resolve_origin_price, to_bybit_symbol
+from strategy_lab.live.main import _resolve_order_qty, resolve_origin_price, scale_in_entry_prices, to_bybit_symbol
 
 HKT = ZoneInfo("Asia/Hong_Kong")
 SNAPSHOT_DIR = daemon.RUN_DIR
@@ -72,6 +72,18 @@ def _default_client(config: ExecutionConfig) -> BybitClient:
         retry_backoff_cap_seconds=config.retry_backoff_cap_seconds,
         category=config.category,
     )
+
+
+def _fix_qty_or_report(raw_qty: float, limits, what: str, print_fn) -> Optional[float]:
+    """修正到交易所精度;低於最小下單量回傳 None(並印出原因),呼叫端就不啟動。"""
+    if limits is None:
+        return raw_qty
+    try:
+        return fix_qty(raw_qty, limits, order_type="limit")
+    except ValueError as e:
+        print_fn(f"✗ {what}數量 {raw_qty:.6f} 低於交易所最小下單量 {limits.min_qty}:{e}")
+        print_fn("請調高 position_sizing 後再試。沒有啟動。")
+        return None
 
 
 def main(
@@ -117,24 +129,39 @@ def main(
         limits = None
         print_fn(f"⚠ instrument_limits.json 沒有 {symbol} 的精度資料,價格/數量不會修正")
 
-    raw_qty = _resolve_order_qty(config, client, symbol)
-    qty = raw_qty
-    if limits is not None:
-        try:
-            qty = fix_qty(raw_qty, limits, order_type="limit")
-        except ValueError as e:
-            print_fn(f"✗ 下單數量 {raw_qty:.6f} 低於交易所最小下單量 {limits.min_qty}:{e}")
-            print_fn("請調高 position_sizing 後再試。沒有啟動。")
-            return 1
-
-    origin = resolve_origin_price(config, price)
     window_end = strategy.time_window.window_end(now)
     cleanup_at = window_end - timedelta(minutes=getattr(strategy.time_window, "cleanup_buffer_minutes", 0))
-    plan = build_order_plan(
-        strategy_name=strategy.name, entry=strategy.entry, exit=strategy.exit, direction=strategy.direction,
-        origin_price=origin, origin_source="手動輸入" if config.origin_price is not None else "啟動當下即時價",
-        qty=qty, market=market, cleanup_at=cleanup_at, limits=limits, loop=strategy.loop,
-    )
+
+    if strategy.scale_in:
+        try:
+            entry_prices = scale_in_entry_prices(config)
+            if len(entry_prices) != strategy.entry.lots:
+                raise ValueError(f"entry_prices 要有 {strategy.entry.lots} 個價格(每注一個),目前是 {entry_prices}")
+        except ValueError as e:
+            print_fn(f"✗ {e}。沒有啟動。")
+            return 1
+        raw_qtys = strategy.entry.lot_qtys(_resolve_order_qty(config, client, symbol, price=entry_prices[0]))
+        qtys = []
+        for i, raw in enumerate(raw_qtys, 1):
+            fixed = _fix_qty_or_report(raw, limits, f"第{i}注", print_fn)
+            if fixed is None:
+                return 1
+            qtys.append(fixed)
+        plan = build_scale_in_plan(
+            strategy_name=strategy.name, entry=strategy.entry, exit=strategy.exit, direction=strategy.direction,
+            entry_prices=entry_prices, qtys=qtys, market=market, cleanup_at=cleanup_at, limits=limits,
+            loop=strategy.loop,
+        )
+    else:
+        qty = _fix_qty_or_report(_resolve_order_qty(config, client, symbol), limits, "下單", print_fn)
+        if qty is None:
+            return 1
+        origin = resolve_origin_price(config, price)
+        plan = build_order_plan(
+            strategy_name=strategy.name, entry=strategy.entry, exit=strategy.exit, direction=strategy.direction,
+            origin_price=origin, origin_source="手動輸入" if config.origin_price is not None else "啟動當下即時價",
+            qty=qty, market=market, cleanup_at=cleanup_at, limits=limits, loop=strategy.loop,
+        )
 
     results = run_metrics(Estimate(plan=plan, market=market))
     for result in results:

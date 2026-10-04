@@ -158,3 +158,13 @@ class TestLoadExecutionConfigFromEnv:
         monkeypatch.setenv("STRATEGY_LAB_USE_LIVE_FEED", "yes")
         config = load_execution_config(config_path=tmp_path / "missing.yaml")
         assert config.use_live_ticker_feed is True
+
+
+class TestEntryPrices:
+    def test_defaults_to_none(self):
+        assert ExecutionConfig().entry_prices is None
+
+    def test_yaml_list_is_loaded(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(yaml.dump({"entry_prices": [1000, 990, 980]}))
+        assert load_execution_config(config_path=path).entry_prices == [1000, 990, 980]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -19,10 +19,25 @@ class MarketSnapshot:
 
 
 @dataclass
+class LevelPlan:
+    """一注:建倉價、數量、平倉價。level k 對應第 k 注。"""
+
+    index: int  # 1 起算
+    entry_price: float
+    qty: float
+    take_profit: Optional[float]
+    crosses_market: bool  # 建倉限價已經越過現價 → 一掛出去就吃單成交
+
+    @property
+    def notional(self) -> float:
+        return self.entry_price * self.qty
+
+
+@dataclass
 class OrderPlan:
     strategy_name: str
     direction: str
-    origin_price: float
+    origin_price: Optional[float]  # 分注策略不用 → None
     origin_source: str
     qty: float
     entry_price: float
@@ -33,10 +48,31 @@ class OrderPlan:
     exit_resting: bool  # 平倉單是先掛著等(maker),否則當成吃單(taker)
     cleanup_at: datetime
     loop: Optional[int] = None  # 重複次數;總 event 數 = loop + 1;None = 不限
+    # 分注策略每一注的計畫(build_scale_in_plan);非分注策略留空,lot_levels() 會把
+    # 上面的 entry_price/qty/take_profit 當成唯一的 level 1。
+    levels: List[LevelPlan] = field(default_factory=list)
+
+    @property
+    def scale_in(self) -> bool:
+        return bool(self.levels)
+
+    def lot_levels(self) -> List[LevelPlan]:
+        if self.levels:
+            return self.levels
+        return [LevelPlan(1, self.entry_price, self.qty, self.take_profit, self.entry_crosses_market)]
+
+    @property
+    def total_qty(self) -> float:
+        return sum(l.qty for l in self.lot_levels())
 
     @property
     def notional(self) -> float:
-        return self.entry_price * self.qty
+        """全部注數都成交時的名義價值(最大部位)。"""
+        return sum(l.notional for l in self.lot_levels())
+
+    @property
+    def avg_entry_price(self) -> float:
+        return self.notional / self.total_qty
 
 
 @dataclass
@@ -44,13 +80,21 @@ class Estimate:
     plan: OrderPlan
     market: MarketSnapshot
 
+    def lot_entry_fee(self, level: LevelPlan) -> float:
+        rate = self.market.taker_fee_rate if level.crosses_market else self.market.maker_fee_rate
+        return level.notional * rate
+
+    def lot_exit_fee(self, level: LevelPlan, price: float, resting: bool) -> float:
+        rate = self.market.maker_fee_rate if resting else self.market.taker_fee_rate
+        return price * level.qty * rate
+
     def entry_fee(self) -> float:
-        rate = self.market.taker_fee_rate if self.plan.entry_crosses_market else self.market.maker_fee_rate
-        return self.plan.notional * rate
+        """全部注數的建倉手續費。"""
+        return sum(self.lot_entry_fee(l) for l in self.plan.lot_levels())
 
     def exit_fee(self, price: float, resting: bool) -> float:
-        rate = self.market.maker_fee_rate if resting else self.market.taker_fee_rate
-        return price * self.plan.qty * rate
+        """全部注數都在同一個價格平倉的手續費(風險情境用)。"""
+        return sum(self.lot_exit_fee(l, price, resting) for l in self.plan.lot_levels())
 
 
 @dataclass
@@ -60,6 +104,7 @@ class Row:
     text: str
     value: Optional[float] = None
     warning: bool = False
+    details: Dict[str, float] = field(default_factory=dict)  # 組成 value 的細項(例:毛利、手續費)
 
 
 @dataclass

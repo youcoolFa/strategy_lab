@@ -42,6 +42,7 @@ class ComposedStrategy:
     kill_switch: Optional[KillSwitch] = None
     direction: Literal["long", "short"] = "long"
     loop: Optional[int] = 0
+    scale_in: bool = False
 
 
 def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
@@ -55,17 +56,32 @@ def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
         else None
     )
     _validate_kill_switch_fits_time_window(kill_switch, time_window)
+    entry = registry_get("entry", definition.entry.type)(**definition.entry.params)
+    exit = registry_get("exit", definition.exit.type)(**definition.exit.params)
+    _validate_scale_in_flag(definition.scale_in, entry, exit)
 
     return ComposedStrategy(
         name=definition.name,
         symbol=definition.symbol,
-        entry=registry_get("entry", definition.entry.type)(**definition.entry.params),
-        exit=registry_get("exit", definition.exit.type)(**definition.exit.params),
+        entry=entry,
+        exit=exit,
         time_window=time_window,
         kill_switch=kill_switch,
         direction=definition.direction,
         loop=definition.loop,
+        scale_in=definition.scale_in,
     )
+
+
+def _validate_scale_in_flag(scale_in: bool, entry: EntrySignal, exit: ExitSignal) -> None:
+    """scale_in 旗標決定 live/main.py 建哪一種 runner;entry/exit 兩個 plugin
+    也必須同時是分注版(scale_in/scale_out)或同時不是,混搭無法運作。"""
+    for kind, plugin in (("entry", entry), ("exit", exit)):
+        if getattr(plugin, "scale_in", False) != scale_in:
+            raise ValueError(
+                f"scale_in: {str(scale_in).lower()} 跟 {kind} plugin {type(plugin).__name__} 不一致"
+                "(分注策略的 entry/exit 要用 scale_in/scale_out,其他策略不能用)"
+            )
 
 
 def _validate_kill_switch_fits_time_window(kill_switch: Optional[KillSwitch], time_window: TimeWindow) -> None:

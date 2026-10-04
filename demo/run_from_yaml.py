@@ -31,6 +31,7 @@ from strategy_lab.dsl.discovery import list_strategy_files, prompt_strategy_choi
 from strategy_lab.dsl.loader import load_strategy
 from strategy_lab.dsl.order_config import compute_qty, load_order_config
 from strategy_lab.engine.runner import StrategyRunner
+from strategy_lab.engine.scale_in_runner import ScaleInRunner
 
 HKT = ZoneInfo("Asia/Hong_Kong")
 STRATEGIES_DIR = Path(__file__).resolve().parents[1] / "strategies"
@@ -73,16 +74,24 @@ def main() -> None:
     print(f"  order_qty   = {order_qty:.6f}(依 {SANDBOX_ORDER_CONFIG_PATH.name} 的 position_sizing 換算,起始價 {start_price:.2f})")
     print()
 
-    runner = StrategyRunner(
+    common = dict(
         entry=strategy.entry,
         exit=strategy.exit,
         time_window=strategy.time_window,
         order_qty=order_qty,
         kill_switch=strategy.kill_switch,
-        order_type=order_config.order_type,
+        order_type="limit" if strategy.scale_in else order_config.order_type,
         direction=strategy.direction,
         loop=strategy.loop,
     )
+    if strategy.scale_in:
+        # 沙盒沒有使用者輸入的 entry_prices:第 k 注掛在起始價往建倉方向 0.5% × k
+        sign = 1 if strategy.direction == "short" else -1
+        entry_prices = [round(start_price * (1 + sign * 0.005 * k), 2) for k in range(1, strategy.entry.lots + 1)]
+        print(f"  entry_prices = {entry_prices}(沙盒自動產生;實盤由 live_execution_config.yaml 輸入)")
+        runner = ScaleInRunner(entry_prices=entry_prices, **common)
+    else:
+        runner = StrategyRunner(**common)
 
     start = START_TIMES.get(strategy.name, datetime(2026, 8, 1, 4, 0, tzinfo=HKT))
     tick_interval = TICK_INTERVALS.get(strategy.name, timedelta(minutes=5))

@@ -1,0 +1,40 @@
+# 分注買入法(engine/scale_in_runner.py)
+#
+# 建倉價:每一注的價格由你在 live_execution_config.yaml 的 entry_prices 輸入
+#         (例 entry_prices: [84900, 84500, 84000]),不一定要越跌越買。
+# 數量:  第一注 = live_execution_config.yaml 的 position_sizing,
+#         第 k 注 = 第一注 × weights[k] / weights[0]
+#         例 weights [2, 3, 1]、第一注 0.002 → 0.002 / 0.003 / 0.001
+# 平倉:  每注成交後馬上掛自己的 reduceOnly 平倉單,
+#         平倉價 = 這注的建倉價 ± distance(long 加、short 減),數量 = 這注的數量
+#         (平倉比重 = 建倉比重,不用另外設)
+# loop:  部位 0 → 0 算 1 個 loop(建 1 平 1、建 2 平 2、建 3 平 3 都是 1 個);
+#         loop 結束時取消還沒成交的建倉單,下一輪三注重新掛上
+# 停損:  目前沒有;窗口結束前取消所有掛單並市價平倉。
+# origin_price:這個策略不用(live_execution_config.yaml 裡維持 null,保留日後用)。
+name: scale_in_ladder
+symbol: BTC/USDT
+direction: long   # long(買入建倉、往上平倉)/ short(賣出建倉、往下平倉)
+loop: 0   # 重複次數:總 loop 數 = loop + 1;0 = 只做 1 個 loop;null = 不限次數(做到時間窗結束)
+scale_in: true
+
+entry:
+  type: scale_in
+  params:
+    weights: [2, 3, 1]   # 每注數量比重:第一注 2、第二注 3、第三注 1(注數 = 個數)
+
+exit:
+  type: scale_out
+  params:
+    distance:
+      value: 1.0   # 平倉距離 = 平倉價 − 這注的建倉價
+      unit: pct    # pct(建倉價的 %)/ points(固定點數,例 value: 500 → 84000 → 84500)
+
+time_window:
+  type: weekly_window
+  params:
+    start_weekday: 5   # 5 = 星期六(星期一 = 0)HKT
+    start_time: "04:00"
+    end_weekday: 0     # 0 = 星期一 HKT
+    end_time: "06:00"
+    cleanup_buffer_minutes: 5

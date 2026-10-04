@@ -37,6 +37,9 @@ class StrategyDefinition(BaseModel):
     # 重複次數:總 event 數 = loop + 1,做完 bot 就收尾結束;0 = 只做 1 個 event;
     # null = 不限次數(做到時間窗結束)。event = 部位從 0 開始、回到 0 結束。
     loop: Optional[conint(ge=0)] = 0
+    # 分注策略(engine/scale_in_runner.py)= true;必須跟 entry/exit plugin 一致,
+    # dsl/loader.py 會檢查。每個策略 YAML 都明確寫出來,一眼看得出是哪一種。
+    scale_in: bool = False
 
     class Config:
         extra = "forbid"

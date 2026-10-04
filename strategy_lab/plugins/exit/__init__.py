@@ -5,4 +5,5 @@ from strategy_lab.plugins.exit import (  # noqa: F401
     return_to_reference_short,
     resting_offset_from_reference,
     resting_return_to_reference,
+    scale_out,
 )

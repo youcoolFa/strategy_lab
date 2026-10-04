@@ -75,3 +75,29 @@ class TestEveryStrategyDeclaresLoop:
 
     def test_weekend_mean_reversion_loops_without_limit(self):
         assert load_strategy(STRATEGIES_DIR / "weekend_mean_reversion.yaml").loop is None
+
+
+class TestScaleIn:
+    def test_every_yaml_declares_scale_in_explicitly(self):
+        import yaml
+
+        for path in sorted(STRATEGIES_DIR.glob("*.yaml")):
+            assert "scale_in" in yaml.safe_load(path.read_text()), path.name
+
+    def test_scale_in_ladder_yaml(self):
+        from strategy_lab.plugins.entry.scale_in import ScaleInEntry
+        from strategy_lab.plugins.exit.scale_out import ScaleOutExit
+
+        strategy = load_strategy(STRATEGIES_DIR / "scale_in_ladder.yaml")
+        assert strategy.scale_in is True
+        assert isinstance(strategy.entry, ScaleInEntry) and strategy.entry.weights == [2, 3, 1]
+        assert isinstance(strategy.exit, ScaleOutExit)
+
+    def test_scale_in_flag_must_match_plugins(self, tmp_path):
+        import pytest
+
+        src = (STRATEGIES_DIR / "scale_in_ladder.yaml").read_text()
+        bad = tmp_path / "bad.yaml"
+        bad.write_text(src.replace("scale_in: true", "scale_in: false"))
+        with pytest.raises(ValueError, match="scale_in"):
+            load_strategy(bad)

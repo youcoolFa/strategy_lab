@@ -138,7 +138,7 @@ class TradeRecorder:
         prev = self._orders.get(rec.order_id)
         row = {
             "order_id": rec.order_id, "run_id": self.run_id, "event_index": rec.event_index,
-            "purpose": rec.purpose, "side": rec.side, "order_type": rec.order_type, "price": rec.price,
+            "purpose": rec.purpose, "lot": getattr(rec, "lot", None), "side": rec.side, "order_type": rec.order_type, "price": rec.price,
             "qty": rec.qty, "reduce_only": rec.reduce_only, "status": rec.status, "avg_price": rec.avg_price,
             "filled_qty": rec.filled_qty, "created_at": prev["created_at"] if prev else rec.time, "updated_at": rec.time,
         }
