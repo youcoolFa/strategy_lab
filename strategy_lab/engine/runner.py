@@ -373,7 +373,7 @@ class StrategyRunner:
         真的有沒有倉位」的唯一事實來源。附帶好處:market_flat_buy()/
         market_flat_sell() 會套用 §6.9 的下單精度修正,market_close()
         原本沒有。"""
-        logger.warning(f"開始收尾({self.stop_reason}):取消未成交掛單,市價平掉未平倉部位")
+        logger.bind(telegram=False).warning(f"開始收尾({self.stop_reason}):取消未成交掛單,市價平掉未平倉部位")
         self._cancel_open_orders(now)
         self._flatten(now)
         self.state = RunState.STOPPED

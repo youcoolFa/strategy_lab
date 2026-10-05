@@ -54,6 +54,7 @@ from strategy_lab.live.broker import LiveBroker
 from strategy_lab.live.bybit_client import NETWORK_ERRORS, BybitClient
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
 from strategy_lab.live.market_feed import ticker_feed
+from strategy_lab.log.logger_setup import add_file_sink, setup_logger
 from strategy_lab.storage.recorder import RunInfo, TradeRecorder
 
 HKT = ZoneInfo("Asia/Hong_Kong")
@@ -64,11 +65,7 @@ PENDING_DIR = LOG_DIR / "db_pending"
 def setup_file_logging(name: str, log_dir: Optional[Path] = None) -> Tuple[Path, int]:
     """除了終端機,log 也寫一份到 logs/<設定檔名>_<啟動時間>.log。終端機
     一關 log 就沒了(2026-09-27 事故只能靠 PyCharm/zsh 的紀錄反推原因)。"""
-    directory = log_dir if log_dir is not None else LOG_DIR
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{name}_{datetime.now(HKT).strftime('%Y%m%d_%H%M%S')}.log"
-    sink_id = logger.add(path, level="INFO", encoding="utf-8", rotation="20 MB", backtrace=True, diagnose=False)
-    return path, sink_id
+    return add_file_sink(name, log_dir if log_dir is not None else LOG_DIR)
 
 
 def _detach_from_closed_terminal() -> None:
@@ -210,6 +207,47 @@ def _run_info(runner: StrategyRunner, config: ExecutionConfig, symbol: str, orig
     )
 
 
+def mode_label(config: ExecutionConfig) -> str:
+    if config.dry_run:
+        return "DRY RUN,不會真的下單"
+    return "測試網" if config.testnet else "實盤"
+
+
+_PURPOSE_LABELS = {"entry": "進場", "exit": "平倉", "forced_close": "強制平倉"}
+
+
+def attach_notifications(runner: Any, dry_run: bool) -> None:
+    """實盤時,每筆成交、每輪(event)完成都發一則 Telegram(包住原本的 on_order/on_event,
+    資料庫紀錄照常)。dry-run 不發——假成交每幾秒一輪,會洗版。"""
+    if dry_run:
+        return
+    prev_order, prev_event = runner.on_order, runner.on_event
+    notify = logger.bind(telegram=True)
+
+    def on_order(rec: Any) -> None:
+        if prev_order is not None:
+            prev_order(rec)
+        if rec.status == "closed":
+            lot = f"(第{rec.lot}注)" if rec.lot else ""
+            notify.info(
+                f"✅ 成交|{_PURPOSE_LABELS.get(rec.purpose, rec.purpose)}{lot} {rec.side} {rec.filled_qty:g} "
+                f"@ {rec.avg_price}|event #{rec.event_index}"
+            )
+
+    def on_event(event: Event) -> None:
+        if prev_event is not None:
+            prev_event(event)
+        how = "強制平倉" if event.forced else "正常平倉"
+        notify.info(
+            f"💰 event #{event.index} 完成({how})\n{event.direction} 均價 {event.avg_entry} → {event.avg_exit},"
+            f"成交 {event.fills} 次\n損益 {event.realized_pnl:+.4f} USDT(未扣手續費),"
+            f"期間最大回撤 {event.max_drawdown:+.4f} USDT"
+        )
+
+    runner.on_order = on_order
+    runner.on_event = on_event
+
+
 def log_event(event: Event) -> None:
     how = "強制平倉" if event.forced else "正常平倉"
     logger.info(
@@ -320,6 +358,15 @@ def run_forever(
             f"啟動 strategy_lab live runner:origin_price = {origin}({source}),"
             f"目前價格 = {price},差 {(price / origin - 1) * 100:+.3f}%"
         )
+    if isinstance(runner, ScaleInRunner):
+        plan = "\n".join(f"第{i}注 {p} × {q:g}" for i, (p, q) in enumerate(zip(runner.entry_prices, runner.lot_qtys), 1))
+    else:
+        plan = f"origin {origin}({source}),數量 {runner.order_qty:g}"
+    loop = "不限" if runner.loop is None else f"{runner.loop + 1} 個 event"
+    logger.bind(telegram=True).info(
+        f"🚀 strategy_lab 啟動({mode_label(config)})\n{Path(config.strategy_path).stem}({runner.direction})|{symbol}\n"
+        f"{plan}\n目前價格 {price}|loop {loop}"
+    )
     if recorder is not None:
         recorder.start_run(_run_info(runner, config, symbol, origin, source, now, log_path, preflight))
     try:
@@ -347,6 +394,11 @@ def run_forever(
         f"strategy_lab live runner 結束:event {summary.count} 個(其中強制平倉 {summary.forced} 個,獲利 {summary.wins} 個),"
         f"合計損益 {summary.total_pnl:+.4f} USDT(未扣手續費),最大回撤 {summary.max_drawdown:+.4f} USDT"
     )
+    logger.bind(telegram=True).info(
+        f"🏁 strategy_lab 結束({runner.stop_reason or 'unknown'})\n"
+        f"event {summary.count} 個(強制平倉 {summary.forced}、獲利 {summary.wins})\n"
+        f"合計損益 {summary.total_pnl:+.4f} USDT(未扣手續費),最大回撤 {summary.max_drawdown:+.4f} USDT"
+    )
     if recorder is not None:
         recorder.end_run(now_fn(), runner.stop_reason or "unknown", summary)
 
@@ -367,7 +419,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             raise FileNotFoundError(f"找不到設定檔 {config_path}(不會退回預設值,避免跑錯策略)")
 
     log_name = config_path.stem if config_path is not None else "live_execution_config"
-    log_path, _ = setup_file_logging(log_name)
+    log_path, _ = setup_logger(log_name, log_dir=LOG_DIR)
     logger.info(f"log 檔: {log_path}")
     logger.info(f"Python 直譯器: {sys.executable}({platform.python_version()})")
 
@@ -376,11 +428,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     logger.info(f"載入執行參數: {config.to_dict()}")
 
     if config.dry_run:
-        logger.warning("=== DRY RUN 模式:不會真的下單,只會記錄 log ===")
+        logger.bind(telegram=False).warning("=== DRY RUN 模式:不會真的下單,只會記錄 log ===")
     if config.testnet:
-        logger.warning("=== 使用 Bybit 測試網(testnet) ===")
+        logger.bind(telegram=False).warning("=== 使用 Bybit 測試網(testnet) ===")
     else:
-        logger.warning("=== 使用 Bybit 正式環境,將動用真實資金! ===")
+        logger.bind(telegram=False).warning("=== 使用 Bybit 正式環境,將動用真實資金! ===")
 
     from strategy_lab.live.preflight import load_snapshot  # preflight 也 import 這個模組,放在函式內避免循環 import
 
@@ -389,6 +441,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         runner, symbol = build_runner_and_symbol(config)
         recorder = None if config.dry_run else make_recorder(config, runner.broker.client)
         attach_recorder(runner, recorder)
+        attach_notifications(runner, config.dry_run)
         run_forever(runner, config, symbol, recorder=recorder, log_path=log_path, preflight=preflight)
     except Exception:
         logger.exception("live runner 異常結束(沒有走收尾流程,請檢查交易所上的掛單/持倉)")

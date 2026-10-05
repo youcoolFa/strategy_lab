@@ -1340,3 +1340,34 @@ pybit 遇到斷線/DNS 失敗/逾時直接拋 `requests.exceptions.*`(`force_ret
 收尾中斷後續做、`run_forever` 查價/tick 斷線不當掉)、`test_order_logging.py`、`BybitClient`
 orderLinkId 去重/取消不放棄/requests 例外重試、`select_strategy` 保留註解;全部 521 passed。
 用真實設定唯讀跑 preflight(回答 no)確認實盤路徑能組起來。
+
+
+### 6.24 Telegram 通知(2026-10-05)
+
+**三個專案同一套**(Fa_Successful_trade 是參考版,sat_strategy、strategy_lab 各放一份一樣的
+`telegram_notifier.py`——三個 repo 刻意不互相 import):
+
+| 專案 | Bot | 模組 |
+|---|---|---|
+| Fa_Successful_trade | @fa_bybit_ws_bot(Bybit WebSocket) | `app/log/telegram_notifier.py` + `app/log/logger_setup.py` |
+| sat_strategy | @sat_strategy_bot | `app/log/telegram_notifier.py` + `app/log/logger_setup.py`(取代舊的 `app/notifier.py`) |
+| strategy_lab | @fa_strategy_lab_bot(Strategy Lab) | `strategy_lab/log/telegram_notifier.py` + `strategy_lab/log/logger_setup.py` |
+
+**log 結構**(照 Fa):console INFO、檔案、Telegram sink。**發什麼**:WARNING 以上(出問題)自動發;
+`logger.bind(telegram=True).info(...)` 標記的重要事件也發;`logger.bind(telegram=False)` 讓例行的
+WARNING(模式橫幅、正常收尾)不發。strategy_lab 的事件:啟動(模式、策略、各注/origin)、實盤每筆
+成交、每個 event 完成損益、結束總結(stop_reason、合計損益、最大回撤);崩潰與啟動殘留檢查是 ERROR,
+自動發。dry-run 只發啟動/結束,不發成交(假成交幾秒一輪會洗版)。
+
+**發送器設計**:
+- 背景 thread 發送,記 log 只是丟進 queue(滿了丟掉並計數),Telegram 慢或斷線不會卡住交易迴圈。
+  舊的 sat_strategy 版本是同步發送,最壞一次卡 30 秒以上。
+- 冷卻時間:同一個發生位置(模組:函式:行)5 分鐘內只發一則,下一則附「略過 N 則」;問題持續就
+  加倍(最長 6 小時),安靜後恢復。避免斷線整個週末每 5 秒一則重試訊息。事件不受冷卻限制。
+- 不會自己觸發自己:發送失敗只用 `telegram=False` 記本地 log。
+- atexit 最多等 10 秒把 queue 送完,崩潰訊息不會遺失。
+
+**測試不會發真訊息**:`tests/conftest.py` 在模組層級把 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
+設成空字串(`load_dotenv()` 不會覆蓋已存在的變數),每個測試再把共用發送器重設。這是踩過的雷:
+sat_strategy 的 `bot.py` 一 import 就 `load_dotenv()` + 建發送器,加 conftest 之前跑測試會真的
+發到手機(測試時間 31 秒,加了之後 2 秒)。
