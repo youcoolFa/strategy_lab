@@ -1,13 +1,16 @@
 """分注買入法的 runner(建倉價由使用者輸入、數量照比重、每注各自平倉)。
 
 跟 StrategyRunner 的差別只在「同時管理多注」:
-- 一個 loop 開始時(IDLE),把每一注的建倉限價單一次掛上:
-  第 k 注價格 = entry_prices[k],數量 = ScaleInEntry.lot_qtys(order_qty)[k]
-  (order_qty 是第一注的數量,來自 position_sizing)。
-- 某一注建倉成交 → 馬上掛「這一注」的 reduceOnly 平倉限價單:
-  價格 = 這注的建倉價 ± ScaleOutExit 的距離,數量 = 這注的數量。
+- **依序掛單**(2026-10-06 使用者決定):一個 loop 開始時(IDLE)只掛第一注的建倉限價單;
+  第 k 注建倉成交,才掛第 k+1 注。第 k 注價格 = entry_prices[k],
+  數量 = ScaleInEntry.lot_qtys(order_qty)[k](order_qty 是第一注的數量,來自 position_sizing)。
+  原本是三注一起掛;改成依序掛,交易所上一次只有一張建倉單、保證金只佔一張。
+  代價:價格一口氣跌穿好幾個價位時,下一注要等偵測到前一注成交(下一個輪詢,約 5 秒)
+  才掛,掛上時價格可能已經在價位之下 → 限價買單會立刻以吃單成交(價格不差,手續費較高)。
+- 某一注建倉成交 → 同一個 tick 馬上掛「這一注」的 reduceOnly 平倉限價單(價格 = 這注的
+  建倉價 ± ScaleOutExit 的距離,數量 = 這注的數量),以及下一注的建倉單。
 - 部位 0 → 0 = 1 個 loop(建 1 平 1、建 2 平 2、建 3 平 3 都只算 1 個)。
-  loop 結束時取消還沒成交的建倉單,下一個 tick 全部重新掛上(選項 A)。
+  loop 結束時取消還沒成交的建倉單,下一個 tick 從第一注重新開始(選項 A)。
 - 收攤條件(time_window / kill_switch / request_stop / loop 用完)跟
   StrategyRunner 一樣,收攤時取消每一注的掛單並市價平倉。
 
@@ -83,6 +86,10 @@ class ScaleInRunner(StrategyRunner):
     # 每一步失敗(網路)後,下一輪 tick 重做都是安全的:只補掛還沒掛上的單,
     # 不會重複掛已經掛上的(live/main.py 的 _tick_tolerating_network_errors)。
 
+    def _ready(self, lot: Lot) -> bool:
+        """依序掛單:第一注隨時可以掛;第 k 注要等第 k−1 注建倉成交。"""
+        return lot.index == 1 or self.lots[lot.index - 2].filled_price is not None
+
     def _place_entries(self, now: datetime) -> None:
         if not self.lots:
             self.lots = [
@@ -91,7 +98,7 @@ class ScaleInRunner(StrategyRunner):
             ]
             self._loop_event_base = len(self.events)
         for lot in self.lots:
-            if lot.entry_order is None:
+            if lot.entry_order is None and self._ready(lot):
                 self._place_entry(now, lot)
         self.state = RunState.ENTRY_PENDING
 
@@ -113,11 +120,13 @@ class ScaleInRunner(StrategyRunner):
                          lot.qty, reduce_only=True, status="open", lot=lot.index)
 
     def _sync_entries(self, now: datetime) -> None:
+        # 依注數順序處理:第 k 注在這一輪成交,迴圈走到第 k+1 注時它已經 ready,同一個 tick 就掛上
         for lot in self.lots:
             if lot.filled_price is not None:
                 continue
             if lot.entry_order is None:
-                self._place_entry(now, lot)  # 上一輪網路失敗沒掛上,補掛
+                if self._ready(lot):
+                    self._place_entry(now, lot)  # 前一注剛成交,或上一輪網路失敗沒掛上 → 掛
                 continue
             order = self.broker.fetch_order(lot.entry_order.id)
             if order.status == "closed":

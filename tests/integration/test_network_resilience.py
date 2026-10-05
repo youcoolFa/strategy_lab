@@ -70,17 +70,22 @@ def open_buy_orders(broker):
 
 
 class TestScaleInRecoversFromNetworkFailure:
-    def test_entry_placement_failure_midway_does_not_duplicate_already_placed_lots(self):
+    def test_next_lot_placement_failure_does_not_duplicate_orders(self):
+        """依序掛單:第一注成交後掛平倉單、再掛第二注;第二注下單斷線 → 下一輪只補掛第二注,
+        第一注的建倉單、平倉單都不會重複。"""
         broker = FlakyBroker()
-        broker.fail_on = {"place_limit_buy": 2}  # 第二注下單斷線
+        broker.fail_on = {"place_limit_buy": 2}  # 第 2 次買單 = 第二注
         runner = make_scale_in(broker)
+        runner.tick(at(0), 1005.0)  # 只掛第一注
 
         with pytest.raises(requests.exceptions.ConnectionError):
-            runner.tick(at(0), 1005.0)
-        runner.tick(at(1), 1005.0)  # 下一輪:只補掛第二、三注
+            runner.tick(at(1), 999.0)  # 第一注成交 → 掛平倉 → 掛第二注時斷線
+        runner.tick(at(2), 999.0)  # 下一輪:補掛第二注
 
-        assert open_buy_orders(broker) == [980.0, 990.0, 1000.0]
-        assert runner.state == RunState.ENTRY_PENDING
+        assert open_buy_orders(broker) == [990.0]
+        exits = [o for o in broker._orders.values() if o.status == "open" and o.side == "sell"]
+        assert [(o.price, o.qty) for o in exits] == [(pytest.approx(1010.0), 2.0)]
+        assert runner.state == RunState.IN_POSITION
 
     def test_exit_placement_failure_after_fill_is_retried_next_tick(self):
         broker = FlakyBroker()
@@ -104,8 +109,8 @@ class TestScaleInRecoversFromNetworkFailure:
         runner.tick(at(2), 1011.0)  # 平倉成交 → event 完成 → loop 結束
         assert len(runner.events) == 1
         assert runner.state == RunState.IDLE
-        runner.tick(at(3), 1011.0)  # 下一個 loop 重新掛三注
-        assert open_buy_orders(broker) == [980.0, 990.0, 1000.0]
+        runner.tick(at(3), 1011.0)  # 下一個 loop 從第一注重新開始(依序掛單)
+        assert open_buy_orders(broker) == [1000.0]
 
 
 class TestCleanupResumesAfterNetworkFailure:

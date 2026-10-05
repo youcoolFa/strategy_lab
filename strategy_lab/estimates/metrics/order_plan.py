@@ -67,7 +67,7 @@ class OrderPlanMetric:
                     f"{'、'.join(crossed)}的建倉價已越過現價,一掛出去會立刻吃單成交", warning=True)
             )
         else:
-            rows.append(Row("entry_crosses_market", "建倉", "每注都會掛在交易所上等價格碰到(maker)"))
+            rows.append(Row("entry_crosses_market", "建倉", "依序掛單:先掛第1注,前一注成交才掛下一注;都在交易所上等價格碰到(maker)"))
         rows.append(Row("stop_loss", "停損", "無停損"))
         rows.append(Row("notional", "全部成交時", f"數量 {plan.total_qty:g} / 名義價值 {plan.notional:.2f} USDT", plan.notional))
         return rows

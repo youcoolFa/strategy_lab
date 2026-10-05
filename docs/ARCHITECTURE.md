@@ -1277,10 +1277,11 @@ recorder 的寫入/唯讀讀回都對新資料庫驗證過。
 |---|---|
 | 建倉價 | 每一注都由使用者輸入:`live_execution_config.yaml` 的 `entry_prices: [p1, p2, p3]`。不一定越跌越買,不從 origin 推算 |
 | 數量 | 策略 YAML `weights: [2, 3, 1]`(總和 6)只決定數量:第一注 = `position_sizing`,第 k 注 = 第一注 × w_k / w_1 |
+| 掛單順序 | **依序掛**(2026-10-06 改):loop 開始只掛第一注;第 k 注建倉成交,同一個 tick 掛它的平倉單和第 k+1 注的建倉單。原本三注一起掛;改成依序後交易所上一次只有一張建倉單、只佔一張的保證金。代價:價格一口氣跌穿好幾個價位時,下一注要等下一次輪詢(約 5 秒)才掛,掛上時可能已在價位之下 → 立刻吃單成交(價格不差、手續費較高)。`ScaleInRunner._ready()`;斷網沒掛上的注下一輪補掛,同樣要前一注已成交 |
 | 平倉 | 每注成交後馬上掛「這一注」的 reduceOnly 限價單:價格 = 這注建倉價 ± `distance`,數量 = 這注數量(平倉比重 = 建倉比重,不另設) |
 | 距離 | `distance: {value, unit}`,`unit` = `pct`(建倉價的 %,1000 → 1% → 1010)或 `points`(固定點數);long 加、short 減 |
 | loop | 部位 0 → 0 = 1 個 loop,建 1 平 1、建 2 平 2、建 3 平 3 都只算 1 個。跟 §6.20 的 event 是同一個定義,`EventTracker` 不用改 |
-| loop 結束 | 取消還沒成交的建倉單,下一個 tick 三注全部重新掛上(選項 A) |
+| loop 結束 | 取消還沒成交的建倉單,下一個 tick 從第一注重新開始(選項 A) |
 | 損益預測 | 分 level:level k = 成交到第 k 注、每注都在自己的平倉價平掉(累加)。非分注策略只有 level 1,level 2/3 顯示 null |
 | origin_price | 不使用;設定檔維持 `null`,保留日後用 |
 | 停損 / 資金上限 | 暫不做 |
@@ -1372,6 +1373,30 @@ WARNING(模式橫幅、正常收尾)不發。strategy_lab 的事件:啟動(模�
 設成空字串(`load_dotenv()` 不會覆蓋已存在的變數),每個測試再把共用發送器重設。這是踩過的雷:
 sat_strategy 的 `bot.py` 一 import 就 `load_dotenv()` + 建發送器,加 conftest 之前跑測試會真的
 發到手機(測試時間 31 秒,加了之後 2 秒)。
+
+**訊息類別樣式**:Telegram 文字不能上色,每則訊息用「彩色圓點 + hashtag」當粗體標題,點 hashtag
+可以篩出同一類訊息。事件用 `logger.bind(telegram=True, category=...)` 指定,出問題依等級;HTML 模式,
+內容一律轉義,Telegram 拒絕(400)就改純文字重送。三個專案同一套:
+
+| 樣式 | category | 這個專案用在 |
+|---|---|---|
+| 🔵 #系統 | `system`(事件預設) | 啟動 |
+| 🟢 #成交 | `fill` | 實盤每筆成交(`attach_notifications` 的 `on_order`) |
+| 🟣 #損益 | `pnl` | 每個 event 完成、結束總結 |
+| ⚪ #狀態 | `status` | 每小時狀態回報(心跳) |
+| 🟠 #持倉 / 🟤 #權益 | `position` / `equity` | Fa_Successful_trade 的帳戶監控(這裡不用) |
+| 🟡 #警告 / 🔴 #錯誤 / 🆘 #嚴重 | — | WARNING / ERROR / CRITICAL |
+
+**看得懂現在在幹嘛**(`live/status.py`,2026-10-06):
+- 用語統一叫 **loop**(runner 裡的 event = 部位 0 → 0 一整輪 = 一個 loop)。成交訊息帶「第 k 個 loop(共 N 個 /
+  不限次數)」;loop 完成訊息帶這輪損益、期間最大回撤、**累計損益**;結束訊息的原因翻成中文。
+- **啟動訊息**在 `runner.start()` 之後發(才知道收尾時間):策略 YAML 的進出場參數、各注價格 × 數量 → 平倉價
+  (或 origin)、最大部位與名義價值、loop 次數、收尾時間、狀態回報間隔。
+- **每小時狀態回報**(`StatusReporter`,⚪ #狀態):運行多久、現價、狀態(等待進場 / 持倉中)、部位與未實現
+  盈虧、每張掛單與距現價、第幾個 loop、已完成幾個與累計損益、離收尾多久。`run_forever()` 每個 tick 呼叫
+  `maybe_report()`;間隔 `.env` 的 `STATUS_INTERVAL_MINUTES`(預設 60,0 = 關閉);電腦睡著醒來不補發;
+  已停止就不發(緊接著有結束訊息)。**收到 = 還活著,超過時間沒收到 = 出事了。**只讀 runner 自己的狀態
+  (EventTracker 的部位/均價、還開著的單),不另外打交易所 API。sat_strategy 同樣有。
 
 **log 結構與大小限制**(`strategy_lab/log/logger_setup.py`、`strategy_lab/log/log_limit.py`):
 

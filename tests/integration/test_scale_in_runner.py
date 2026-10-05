@@ -1,5 +1,6 @@
 """分注 runner(PaperBroker,不碰網路):
-- 每注建倉價由使用者輸入;數量照比重(2:3:1);一啟動就把各注建倉單掛上
+- 每注建倉價由使用者輸入;數量照比重(2:3:1)
+- 依序掛單(2026-10-06):一開始只掛第一注;第 k 注建倉成交才掛第 k+1 注
 - 每注成交後馬上掛該注的平倉單:建倉價 ± 距離,數量 = 該注數量
 - 部位 0 → 0 = 1 個 loop(建 1 平 1、建 2 平 2、建 3 平 3 都是 1 個)
 - loop 結束時取消還沒成交的建倉單,下一個 loop 三注重新掛上
@@ -46,16 +47,26 @@ def open_orders(records, purpose):
 
 
 class TestPlacement:
-    def test_first_tick_places_all_lots_at_user_prices_with_weighted_qty(self):
+    def test_first_tick_places_only_the_first_lot(self):
         records = []
         runner = make(records=records)
         runner.tick(at(0), 1005.0)
 
         entries = open_orders(records, "entry")
-        assert [(r.lot, r.side, r.price, r.qty) for r in entries] == [
-            (1, "Buy", 1000.0, 2.0), (2, "Buy", 990.0, 3.0), (3, "Buy", 980.0, 1.0),
-        ]
+        assert [(r.lot, r.side, r.price, r.qty) for r in entries] == [(1, "Buy", 1000.0, 2.0)]
         assert runner.state == RunState.ENTRY_PENDING
+
+    def test_each_fill_places_the_next_lot_with_weighted_qty(self):
+        records = []
+        runner = make(records=records)
+        runner.tick(at(0), 1005.0)
+        runner.tick(at(1), 999.0)  # 第一注成交 → 同一個 tick 掛第二注
+        assert [(r.lot, r.price, r.qty) for r in open_orders(records, "entry")] == [(2, 990.0, 3.0)]
+        runner.tick(at(2), 989.0)  # 第二注成交 → 掛第三注
+        assert [(r.lot, r.price, r.qty) for r in open_orders(records, "entry")] == [(3, 980.0, 1.0)]
+        runner.tick(at(3), 979.0)  # 第三注成交 → 沒有下一注
+        assert open_orders(records, "entry") == []
+        assert [r.lot for r in open_orders(records, "exit")] == [1, 2, 3]
 
     def test_lot_fill_places_its_own_exit_at_entry_plus_distance(self):
         records = []
@@ -89,21 +100,23 @@ class TestLoopDefinition:
 
         assert len(runner.events) == 1
         assert runner.events[0].realized_pnl == pytest.approx((1010 - 1000) * 2.0)
-        assert open_orders(records, "entry") == []  # 第二、三注建倉單已取消
+        assert open_orders(records, "entry") == []  # 第二注建倉單已取消(第三注還沒掛過)
         cancelled = {r.lot for r in records if r.purpose == "entry" and r.status == "canceled"}
-        assert cancelled == {2, 3}
+        assert cancelled == {2}
+        assert 3 not in {r.lot for r in records if r.purpose == "entry"}
 
-        runner.tick(at(3), 1011.0)  # 新 loop:三注重新掛上
-        assert [r.lot for r in open_orders(records, "entry")] == [1, 2, 3]
+        runner.tick(at(3), 1011.0)  # 新 loop:從第一注重新開始
+        assert [r.lot for r in open_orders(records, "entry")] == [1]
         assert all(r.event_index == 2 for r in open_orders(records, "entry"))
 
     def test_build_two_close_two_is_one_loop(self):
         runner = make()
         runner.tick(at(0), 1005.0)
-        runner.tick(at(1), 989.0)  # 第一、二注成交(1000、990)
-        runner.tick(at(2), 1000.0)  # 第二注平倉 @999.9 成交;部位還有第一注 → 不算 loop
+        runner.tick(at(1), 999.0)  # 第一注成交 @1000,掛第二注
+        runner.tick(at(2), 989.0)  # 第二注成交 @990,掛第三注
+        runner.tick(at(3), 1000.0)  # 第二注平倉 @999.9 成交;部位還有第一注 → 不算 loop
         assert runner.events == []
-        runner.tick(at(3), 1011.0)  # 第一注平倉 @1010 → 部位 0
+        runner.tick(at(4), 1011.0)  # 第一注平倉 @1010 → 部位 0
 
         assert len(runner.events) == 1
         event = runner.events[0]
@@ -114,8 +127,12 @@ class TestLoopDefinition:
     def test_build_three_close_three_is_one_loop(self):
         runner = make()
         runner.tick(at(0), 1005.0)
-        runner.tick(at(1), 979.0)  # 三注都成交
-        runner.tick(at(2), 1011.0)  # 三注的平倉價(1010、999.9、989.8)都碰到
+        runner.tick(at(1), 979.0)  # 價格一口氣跌破三個價位:這時只有第一注掛著 → 只有第一注成交
+        assert [l.filled_price is not None for l in runner.lots] == [True, False, False]
+        runner.tick(at(2), 979.0)  # 第二注剛掛上,已經在價位之下 → 成交,掛第三注
+        runner.tick(at(3), 979.0)  # 第三注成交
+        assert all(l.filled_price is not None for l in runner.lots)
+        runner.tick(at(4), 1011.0)  # 三注的平倉價(1010、999.9、989.8)都碰到
         assert len(runner.events) == 1
         assert runner.events[0].fills == 6
         assert len(runner.trades) == 3
@@ -134,8 +151,9 @@ class TestShortAndCleanup:
         records = []
         runner = make(direction="short", entry_prices=[1000.0, 1010.0, 1020.0], records=records)
         runner.tick(at(0), 995.0)
-        assert [r.side for r in open_orders(records, "entry")] == ["Sell", "Sell", "Sell"]
-        runner.tick(at(1), 1001.0)  # 第一注賣出成交
+        assert [(r.lot, r.side) for r in open_orders(records, "entry")] == [(1, "Sell")]
+        runner.tick(at(1), 1001.0)  # 第一注賣出成交 → 掛第二注賣單 @1010
+        assert [(r.lot, r.side, r.price) for r in open_orders(records, "entry")] == [(2, "Sell", 1010.0)]
         [exit_order] = open_orders(records, "exit")
         assert (exit_order.side, exit_order.price) == ("Buy", pytest.approx(990.0))
         runner.tick(at(2), 989.0)
@@ -145,7 +163,8 @@ class TestShortAndCleanup:
         records = []
         runner = make(records=records)
         runner.tick(at(0), 1005.0)
-        runner.tick(at(1), 989.0)  # 第一、二注成交
+        runner.tick(at(1), 999.0)  # 第一注成交
+        runner.tick(at(2), 989.0)  # 第二注成交,第三注掛著
 
         runner.tick(runner.window_end - timedelta(minutes=1), 985.0)
 

@@ -56,7 +56,7 @@ class TestRunForeverStartAndEnd:
 
         start, end = telegram[0], telegram[-1]
         assert "啟動" in start and "DRY RUN" in start and "weekend_mean_reversion" in start and symbol in start
-        assert "結束" in end and "stop_requested" in end and "event 1 個" in end
+        assert "結束" in end and "stop_requested" in end and "完成 1 個 loop" in end
         # 收尾時的「開始收尾」WARNING 不另外發(結束訊息已經有原因)
         assert not any("開始收尾" in m for m in telegram)
 
@@ -77,6 +77,8 @@ class FakeRunner:
     def __init__(self):
         self.on_order = None
         self.on_event = None
+        self.loop = 2
+        self.events = []
 
 
 class TestAttachNotifications:
@@ -94,7 +96,9 @@ class TestAttachNotifications:
         assert seen == [("order", "open"), ("order", "closed"), ("event", 1)]  # 原本的紀錄照常
         assert len(telegram) == 2  # 掛單不發;成交、event 完成各一則
         assert "成交" in telegram[0] and "進場" in telegram[0] and "第2注" in telegram[0] and "84643.5" in telegram[0]
-        assert "event #1 完成" in telegram[1] and "+1.2792" in telegram[1]
+        assert "第 1 個 loop(共 3 個)" in telegram[0]
+        assert "第 1 個 loop(共 3 個) 完成" in telegram[1] and "這輪損益 +1.2792" in telegram[1]
+        assert "累計 +1.2792 USDT(1 個 loop)" in telegram[1]
 
     def test_dry_run_does_not_send_trade_events(self, telegram):
         runner = FakeRunner()
@@ -104,3 +108,44 @@ class TestAttachNotifications:
         if runner.on_event:
             runner.on_event(event())
         assert telegram == []
+
+
+class TestCategories:
+    def test_fills_and_event_results_have_their_own_categories(self):
+        records = []
+        sink = logger.add(lambda m: records.append(m.record["extra"].get("category")), level="DEBUG", filter=telegram_filter)
+        try:
+            runner = FakeRunner()
+            attach_notifications(runner, dry_run=False)
+            runner.on_order(record("closed"))
+            runner.on_event(event())
+        finally:
+            logger.remove(sink)
+        assert records == ["fill", "pnl"]
+
+
+class TestHeartbeatInRunForever:
+    def test_status_is_reported_every_interval_while_running(self, monkeypatch, telegram):
+        import strategy_lab.live.main as main_module
+
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        monkeypatch.setenv("STATUS_INTERVAL_MINUTES", "60")
+        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=True, poll_interval_seconds=0)
+        runner, symbol = build_runner_and_symbol(config)
+        clock = {"now": NOW, "ticks": 0}
+
+        def fake_get_price(runner, config, symbol):
+            clock["now"] += timedelta(minutes=30)
+            clock["ticks"] += 1
+            if clock["ticks"] > 5:  # 約 2.5 小時後停止
+                runner.request_stop()
+            return 1000.0
+
+        monkeypatch.setattr(main_module.time, "sleep", lambda s: None)
+        monkeypatch.setattr(main_module, "get_current_price", fake_get_price)
+        run_forever(runner, config, symbol, now_fn=lambda: clock["now"])
+
+        statuses = [m for m in telegram if m.startswith("⏱")]
+        assert len(statuses) == 2  # 第 60、120 分鐘
+        assert "運作中" in statuses[0] and "第 1 個 loop" in statuses[0]

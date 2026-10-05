@@ -54,6 +54,7 @@ from strategy_lab.live.broker import LiveBroker
 from strategy_lab.live.bybit_client import NETWORK_ERRORS, BybitClient
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
 from strategy_lab.live.market_feed import ticker_feed
+from strategy_lab.live.status import StatusReporter, loop_progress, mode_label, start_message, stop_reason_label
 from strategy_lab.log.logger_setup import add_file_sink, setup_logger
 from strategy_lab.storage.recorder import RunInfo, TradeRecorder
 
@@ -207,12 +208,6 @@ def _run_info(runner: StrategyRunner, config: ExecutionConfig, symbol: str, orig
     )
 
 
-def mode_label(config: ExecutionConfig) -> str:
-    if config.dry_run:
-        return "DRY RUN,不會真的下單"
-    return "測試網" if config.testnet else "實盤"
-
-
 _PURPOSE_LABELS = {"entry": "進場", "exit": "平倉", "forced_close": "強制平倉"}
 
 
@@ -222,26 +217,31 @@ def attach_notifications(runner: Any, dry_run: bool) -> None:
     if dry_run:
         return
     prev_order, prev_event = runner.on_order, runner.on_event
-    notify = logger.bind(telegram=True)
+    fills = logger.bind(telegram=True, category="fill")  # 🟢 #成交
+    pnl = logger.bind(telegram=True, category="pnl")  # 🟣 #損益
 
     def on_order(rec: Any) -> None:
         if prev_order is not None:
             prev_order(rec)
         if rec.status == "closed":
             lot = f"(第{rec.lot}注)" if rec.lot else ""
-            notify.info(
+            fills.info(
                 f"✅ 成交|{_PURPOSE_LABELS.get(rec.purpose, rec.purpose)}{lot} {rec.side} {rec.filled_qty:g} "
-                f"@ {rec.avg_price}|event #{rec.event_index}"
+                f"@ {rec.avg_price}|{loop_progress(rec.event_index, getattr(runner, 'loop', None))}"
             )
 
     def on_event(event: Event) -> None:
         if prev_event is not None:
             prev_event(event)
         how = "強制平倉" if event.forced else "正常平倉"
-        notify.info(
-            f"💰 event #{event.index} 完成({how})\n{event.direction} 均價 {event.avg_entry} → {event.avg_exit},"
-            f"成交 {event.fills} 次\n損益 {event.realized_pnl:+.4f} USDT(未扣手續費),"
-            f"期間最大回撤 {event.max_drawdown:+.4f} USDT"
+        done = list(getattr(runner, "events", []))
+        if event not in done:
+            done.append(event)
+        pnl.info(
+            f"💰 {loop_progress(event.index, getattr(runner, 'loop', None))} 完成({how})\n"
+            f"{event.direction} 均價 {event.avg_entry} → {event.avg_exit},成交 {event.fills} 次\n"
+            f"這輪損益 {event.realized_pnl:+.4f} USDT(未扣手續費),期間最大回撤 {event.max_drawdown:+.4f} USDT\n"
+            f"累計 {sum(e.realized_pnl for e in done):+.4f} USDT({len(done)} 個 loop)"
         )
 
     runner.on_order = on_order
@@ -358,19 +358,12 @@ def run_forever(
             f"啟動 strategy_lab live runner:origin_price = {origin}({source}),"
             f"目前價格 = {price},差 {(price / origin - 1) * 100:+.3f}%"
         )
-    if isinstance(runner, ScaleInRunner):
-        plan = "\n".join(f"第{i}注 {p} × {q:g}" for i, (p, q) in enumerate(zip(runner.entry_prices, runner.lot_qtys), 1))
-    else:
-        plan = f"origin {origin}({source}),數量 {runner.order_qty:g}"
-    loop = "不限" if runner.loop is None else f"{runner.loop + 1} 個 event"
-    logger.bind(telegram=True).info(
-        f"🚀 strategy_lab 啟動({mode_label(config)})\n{Path(config.strategy_path).stem}({runner.direction})|{symbol}\n"
-        f"{plan}\n目前價格 {price}|loop {loop}"
-    )
     if recorder is not None:
         recorder.start_run(_run_info(runner, config, symbol, origin, source, now, log_path, preflight))
     try:
         runner.start(now, origin if origin is not None else price)
+        reporter = StatusReporter(runner, config, symbol, started_at=now)
+        logger.bind(telegram=True).info(start_message(runner, config, symbol, price, now, reporter.interval))
         _tick_tolerating_network_errors(runner, now, price, config)
 
         while runner.state != RunState.STOPPED:
@@ -382,6 +375,7 @@ def run_forever(
                 _warn_tick_network_error(config, e)
                 continue
             _tick_tolerating_network_errors(runner, now, price, config)
+            reporter.maybe_report(now, price)  # 每 STATUS_INTERVAL_MINUTES 分鐘一則 ⚪ #狀態
     except Exception:
         if recorder is not None:
             recorder.end_run(now_fn(), "crash")
@@ -394,9 +388,9 @@ def run_forever(
         f"strategy_lab live runner 結束:event {summary.count} 個(其中強制平倉 {summary.forced} 個,獲利 {summary.wins} 個),"
         f"合計損益 {summary.total_pnl:+.4f} USDT(未扣手續費),最大回撤 {summary.max_drawdown:+.4f} USDT"
     )
-    logger.bind(telegram=True).info(
-        f"🏁 strategy_lab 結束({runner.stop_reason or 'unknown'})\n"
-        f"event {summary.count} 個(強制平倉 {summary.forced}、獲利 {summary.wins})\n"
+    logger.bind(telegram=True, category="pnl").info(
+        f"🏁 strategy_lab 結束:{stop_reason_label(runner.stop_reason)}\n"
+        f"完成 {summary.count} 個 loop(強制平倉 {summary.forced}、獲利 {summary.wins})\n"
         f"合計損益 {summary.total_pnl:+.4f} USDT(未扣手續費),最大回撤 {summary.max_drawdown:+.4f} USDT"
     )
     if recorder is not None:
