@@ -434,6 +434,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | event + loop | 新增 `engine/events.py`(`EventTracker`:由成交自動切出 event=部位 0→0,帶正負號部位會計、加碼更新均價、每 tick 量期間最大回撤;`summarize()`:跨 event 權益曲線的最大回撤);runner 新增 `loop`/`on_event`/`events`,強制平倉也記成 event(`forced=True`);策略 YAML 新增 `loop`(重複次數,總 event = loop+1,預設 0,null 不限),既有策略都明確寫 `loop: null`;main 每個 event 寫 log、結束時寫總結;preflight 顯示 event 次數 | 新增 §6.20 | 已完成 |
 | 交易紀錄資料庫 | 新增 `storage/`(`models.py` 四張表 `sl_run`/`sl_order`/`sl_fill`/`sl_event`、`recorder.py` `TradeRecorder`、`backfill.py`、`setup_db.py`);runner 新增 `OrderRecord`/`on_order`/`stop_reason`;`BybitClient.get_executions()`(翻頁);`live/main.py` 實盤才建 recorder(dry-run 不存),run 開始/結束/被擋/當掉都有紀錄;preflight 確認時存估算給 `sl_run.preflight` | 新增 §6.21 | 已完成;用 09-27 真實成交重播,淨損益與 Bybit closedPnl 完全一致 |
 | 網路錯誤韌性 + 實盤 log | `BybitClient` 補接 requests 例外、預設 10 次/60 秒、下單帶 `orderLinkId` 防重複、取消不放棄;`run_forever` 網路失敗這一輪放棄下一輪再試;runner 收尾中斷後續做、分注只補掛缺的單;每張單下單/成交/取消寫 log;`select_strategy.py` 改成只替換 `strategy_path` 那一行(保留註解) | 新增 §6.23 | 已完成;521 passed |
+| Telegram 通知 + log 大小限制 | 新增 `strategy_lab/log/`(`logger_setup.py` 照 Fa_Successful_trade 結構:console/檔案/Telegram;`telegram_notifier.py` 背景發送、冷卻、不自我觸發;`log_limit.py` 總大小上限);`live/main.py` 新增 `mode_label()`、`attach_notifications()`、啟動/結束事件;runner 的「開始收尾」不發 Telegram;檔案輪替後壓縮 `.log.gz`;`tests/conftest.py` 擋住真 token 與真 logs/ | 新增 §6.24 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1371,3 +1372,27 @@ WARNING(模式橫幅、正常收尾)不發。strategy_lab 的事件:啟動(模�
 設成空字串(`load_dotenv()` 不會覆蓋已存在的變數),每個測試再把共用發送器重設。這是踩過的雷:
 sat_strategy 的 `bot.py` 一 import 就 `load_dotenv()` + 建發送器,加 conftest 之前跑測試會真的
 發到手機(測試時間 31 秒,加了之後 2 秒)。
+
+**log 結構與大小限制**(`strategy_lab/log/logger_setup.py`、`strategy_lab/log/log_limit.py`):
+
+```text
+logger.info / warning / error ...
+    ├── stdout(INFO+,彩色;背景執行時由 daemon 導進 logs/<設定檔>.console.log)
+    ├── logs/<設定檔>_<啟動時間>.log(INFO+,一次執行一個檔;寫滿 20 MB 輪替並壓縮成 .log.gz)
+    │       └── retention → enforce_log_dir_limit()(總大小上限)
+    └── Telegram(telegram_filter:WARNING+ 或 bind(telegram=True))
+```
+
+- `live/main.py` 的 `main()` 改呼叫 `setup_logger(name, log_dir=LOG_DIR)`(取代原本只加檔案 sink 的
+  `setup_file_logging()`;後者保留,改成呼叫 `add_file_sink()`)。
+- **總大小上限**:`logs/` 裡 `*.log*` 合計超過 `LOG_MAX_TOTAL_MB`(`.env`,預設 300 MB)就從最舊的
+  檔刪起,刪到上限以下為止——以檔案為單位的先進先出,跟 journald 的 `SystemMaxUse` 同一個概念。
+  啟動時檢查一次,之後每次輪替(loguru 在壓縮完之後呼叫 retention)再檢查。原本沒有任何清理,
+  每次啟動多一個檔只會越積越多。
+- **永遠不刪**:這次執行的 log 檔、這個設定檔的 `.console.log`、1 小時內有寫入的檔,以及
+  **還在背景跑的策略**(`run/<設定檔>.pid` 的 PID 還活著)的所有 log——同時跑好幾個策略時,
+  另一個策略的 log 可能好幾個小時沒寫入但檔案還開著,刪掉之後寫的內容會不見。
+  `logs/db_pending/`(資料庫連不上時的待補紀錄)在子資料夾,不在範圍內。
+- **壓縮**:輪替出來的舊檔壓成 `.log.gz`(純文字約剩 1/10);正在寫的檔、以及一次執行沒寫滿
+  20 MB 就結束的檔維持純文字。看壓縮檔:`gzcat logs/<檔名>.log.gz | less`。
+- 三個專案同一套(Fa_Successful_trade 上限 500 MB、sat_strategy 300 MB),`log_limit.py` 各放一份。
