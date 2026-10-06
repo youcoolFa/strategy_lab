@@ -97,8 +97,8 @@ class TestAttachNotifications:
         assert len(telegram) == 2  # 掛單不發;成交、event 完成各一則
         assert "成交" in telegram[0] and "進場" in telegram[0] and "第2注" in telegram[0] and "84643.5" in telegram[0]
         assert "第 1 個 loop(共 3 個)" in telegram[0]
-        assert "第 1 個 loop(共 3 個) 完成" in telegram[1] and "這輪損益 +1.2792" in telegram[1]
-        assert "累計 +1.2792 USDT(1 個 loop)" in telegram[1]
+        assert "第 1 個 loop(共 3 個) 完成" in telegram[1] and "這輪毛利 +1.28" in telegram[1]
+        assert "手續費待查" in telegram[1]  # 沒有 costs(紀錄器)→ 標明未扣手續費
 
     def test_dry_run_does_not_send_trade_events(self, telegram):
         runner = FakeRunner()
@@ -149,3 +149,53 @@ class TestHeartbeatInRunForever:
         statuses = [m for m in telegram if m.startswith("⏱")]
         assert len(statuses) == 2  # 第 60、120 分鐘
         assert "運作中" in statuses[0] and "第 1 個 loop" in statuses[0]
+
+
+class FakeCosts:
+    def __init__(self, costs):
+        self.costs = costs  # index -> (fees, funding) 或 None
+
+    def event_costs(self, index):
+        return self.costs.get(index)
+
+
+class TestNetPnl:
+    def test_loop_result_shows_net_after_real_fees(self, telegram):
+        runner = FakeRunner()
+        attach_notifications(runner, dry_run=False, costs=FakeCosts({1: (0.0286, 0.0)}))
+        ev = event()  # 毛利 +1.2792
+        runner.events = [ev]
+        runner.on_event(ev)
+        [msg] = telegram
+        assert "這輪淨利 +1.25 USDT(毛利 +1.28 − 手續費 0.0286 − 資金費 0.0000)" in msg
+        assert "手續費佔利益 2.24%" in msg  # 0.0286 ÷ 1.2792
+        assert "累計淨利 +1.25 USDT(1 個 loop)|手續費佔利益 2.24%" in msg
+        assert "未扣手續費" not in msg
+
+    def test_fees_not_yet_reported_are_marked_pending(self, telegram):
+        runner = FakeRunner()
+        attach_notifications(runner, dry_run=False, costs=FakeCosts({}))
+        ev = event()
+        runner.events = [ev]
+        runner.on_event(ev)
+        [msg] = telegram
+        assert "這輪毛利 +1.28 USDT(手續費待查" in msg
+
+
+class TestFeeRatio:
+    def test_ratio_of_fees_to_profit_or_loss(self):
+        from strategy_lab.live.status import fee_ratio
+
+        assert fee_ratio(0.1440, 0.0286) == "手續費佔利益 19.86%"
+        assert fee_ratio(-0.5, 0.0286) == "手續費佔虧損 5.72%"
+        assert "毛利為 0" in fee_ratio(0.0, 0.01)
+
+    def test_losing_loop_shows_ratio_against_loss(self, telegram):
+        runner = FakeRunner()
+        attach_notifications(runner, dry_run=False, costs=FakeCosts({1: (0.02, 0.0)}))
+        ev = Event(index=1, direction="long", start_time=NOW, end_time=NOW + timedelta(hours=1), fills=2,
+                   max_position=0.002, avg_entry=84643.5, avg_exit=84543.5, realized_pnl=-0.2, max_drawdown=-0.3,
+                   forced=True)
+        runner.events = [ev]
+        runner.on_event(ev)
+        assert "這輪淨利 -0.22 USDT" in telegram[0] and "手續費佔虧損 10.00%" in telegram[0]

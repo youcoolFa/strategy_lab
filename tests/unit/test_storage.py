@@ -223,3 +223,25 @@ class TestSetupAddsNewColumns:
         setup(url)  # 再跑一次不會出錯
 
         assert "lot" in {c["name"] for c in inspect(create_engine(url)).get_columns("sl_order")}
+
+
+class TestCostsForNotifications:
+    """Telegram 的 loop 結算要顯示淨利:手續費/資金費用 Bybit 成交明細的真實數字。"""
+
+    def test_event_costs_and_none_before_exchange_reports(self, db, tmp_path):
+        executions = FakeExecutions([])
+        rec = make_recorder(db, tmp_path, executions)
+        rec.start_run(run_info())
+        rec.record_order(order("o1", "entry", "Buy", "closed", avg=990.0, filled=1.0))
+        rec.record_order(order("o2", "exit", "Sell", "closed", price=1010.0, avg=1010.0, filled=1.0, at=30))
+        rec.record_event(event())
+        assert rec.event_costs(1) is None  # 交易所還沒回報 → 呼叫端顯示「待查」
+
+        executions.items = [
+            execution("e1", "o1", "Buy", 990, 0.198, at=1),
+            execution("f1", "fund-1", "Buy", 995, 0.05, exec_type="Funding", maker=None, at=20),
+            execution("e2", "o2", "Sell", 1010, 0.202, at=30),
+        ]
+        rec.record_event(event())
+        fees, funding = rec.event_costs(1)
+        assert fees == pytest.approx(0.4) and funding == pytest.approx(0.05)

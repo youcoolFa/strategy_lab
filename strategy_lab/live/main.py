@@ -54,7 +54,10 @@ from strategy_lab.live.broker import LiveBroker
 from strategy_lab.live.bybit_client import NETWORK_ERRORS, BybitClient
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
 from strategy_lab.live.market_feed import ticker_feed
-from strategy_lab.live.status import StatusReporter, loop_progress, mode_label, start_message, stop_reason_label
+from strategy_lab.live.status import (
+    StatusReporter, cost_totals, fee_ratio, loop_progress, mode_label, net_summary, px, start_message,
+    stop_reason_label, usd,
+)
 from strategy_lab.log.logger_setup import add_file_sink, setup_logger
 from strategy_lab.storage.recorder import RunInfo, TradeRecorder
 
@@ -211,7 +214,7 @@ def _run_info(runner: StrategyRunner, config: ExecutionConfig, symbol: str, orig
 _PURPOSE_LABELS = {"entry": "進場", "exit": "平倉", "forced_close": "強制平倉"}
 
 
-def attach_notifications(runner: Any, dry_run: bool) -> None:
+def attach_notifications(runner: Any, dry_run: bool, costs: Any = None) -> None:
     """實盤時,每筆成交、每輪(event)完成都發一則 Telegram(包住原本的 on_order/on_event,
     資料庫紀錄照常)。dry-run 不發——假成交每幾秒一輪,會洗版。"""
     if dry_run:
@@ -227,7 +230,7 @@ def attach_notifications(runner: Any, dry_run: bool) -> None:
             lot = f"(第{rec.lot}注)" if rec.lot else ""
             fills.info(
                 f"✅ 成交|{_PURPOSE_LABELS.get(rec.purpose, rec.purpose)}{lot} {rec.side} {rec.filled_qty:g} "
-                f"@ {rec.avg_price}|{loop_progress(rec.event_index, getattr(runner, 'loop', None))}"
+                f"@ {px(rec.avg_price)}|{loop_progress(rec.event_index, getattr(runner, 'loop', None))}"
             )
 
     def on_event(event: Event) -> None:
@@ -237,11 +240,20 @@ def attach_notifications(runner: Any, dry_run: bool) -> None:
         done = list(getattr(runner, "events", []))
         if event not in done:
             done.append(event)
+        this = costs.event_costs(event.index) if costs is not None else None
+        if this is not None:
+            fees, funding = this
+            result = (f"這輪淨利 {usd(event.realized_pnl - fees - funding)} USDT"
+                      f"(毛利 {usd(event.realized_pnl)} − 手續費 {fees:.4f} − 資金費 {funding:.4f})"
+                      f"|{fee_ratio(event.realized_pnl, fees)}")
+        else:
+            result = f"這輪毛利 {usd(event.realized_pnl)} USDT(手續費待查,收尾時補算進資料庫)"
+        total = net_summary(done, costs) or (
+            f"累計毛利 {usd(sum(e.realized_pnl for e in done))} USDT({len(done)} 個 loop,未扣手續費)")
         pnl.info(
             f"💰 {loop_progress(event.index, getattr(runner, 'loop', None))} 完成({how})\n"
-            f"{event.direction} 均價 {event.avg_entry} → {event.avg_exit},成交 {event.fills} 次\n"
-            f"這輪損益 {event.realized_pnl:+.4f} USDT(未扣手續費),期間最大回撤 {event.max_drawdown:+.4f} USDT\n"
-            f"累計 {sum(e.realized_pnl for e in done):+.4f} USDT({len(done)} 個 loop)"
+            f"{event.direction} 均價 {px(event.avg_entry)} → {px(event.avg_exit)},成交 {event.fills} 次\n"
+            f"{result}\n期間最大回撤 {usd(event.max_drawdown)} USDT\n{total}"
         )
 
     runner.on_order = on_order
@@ -362,7 +374,7 @@ def run_forever(
         recorder.start_run(_run_info(runner, config, symbol, origin, source, now, log_path, preflight))
     try:
         runner.start(now, origin if origin is not None else price)
-        reporter = StatusReporter(runner, config, symbol, started_at=now)
+        reporter = StatusReporter(runner, config, symbol, started_at=now, costs=recorder)
         logger.bind(telegram=True).info(start_message(runner, config, symbol, price, now, reporter.interval))
         _tick_tolerating_network_errors(runner, now, price, config)
 
@@ -388,13 +400,20 @@ def run_forever(
         f"strategy_lab live runner 結束:event {summary.count} 個(其中強制平倉 {summary.forced} 個,獲利 {summary.wins} 個),"
         f"合計損益 {summary.total_pnl:+.4f} USDT(未扣手續費),最大回撤 {summary.max_drawdown:+.4f} USDT"
     )
+    if recorder is not None:
+        recorder.end_run(now_fn(), runner.stop_reason or "unknown", summary)  # 先補同步成交明細,結算才有手續費
+    totals = cost_totals(runner.events, recorder)
+    if totals is not None:
+        gross, fees, funding = totals
+        total = (f"合計淨利 {usd(gross - fees - funding)} USDT(毛利 {usd(gross)} − 手續費 {fees:.4f} − 資金費 "
+                 f"{funding:.4f})|{fee_ratio(gross, fees)}")
+    else:
+        total = f"合計毛利 {usd(summary.total_pnl)} USDT(未扣手續費)"
     logger.bind(telegram=True, category="pnl").info(
         f"🏁 strategy_lab 結束:{stop_reason_label(runner.stop_reason)}\n"
         f"完成 {summary.count} 個 loop(強制平倉 {summary.forced}、獲利 {summary.wins})\n"
-        f"合計損益 {summary.total_pnl:+.4f} USDT(未扣手續費),最大回撤 {summary.max_drawdown:+.4f} USDT"
+        f"{total},最大回撤 {usd(summary.max_drawdown)} USDT"
     )
-    if recorder is not None:
-        recorder.end_run(now_fn(), runner.stop_reason or "unknown", summary)
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -435,7 +454,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         runner, symbol = build_runner_and_symbol(config)
         recorder = None if config.dry_run else make_recorder(config, runner.broker.client)
         attach_recorder(runner, recorder)
-        attach_notifications(runner, config.dry_run)
+        attach_notifications(runner, config.dry_run, costs=recorder)
         run_forever(runner, config, symbol, recorder=recorder, log_path=log_path, preflight=preflight)
     except Exception:
         logger.exception("live runner 異常結束(沒有走收尾流程,請檢查交易所上的掛單/持倉)")

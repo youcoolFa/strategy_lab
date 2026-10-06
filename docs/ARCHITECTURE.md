@@ -435,6 +435,9 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 交易紀錄資料庫 | 新增 `storage/`(`models.py` 四張表 `sl_run`/`sl_order`/`sl_fill`/`sl_event`、`recorder.py` `TradeRecorder`、`backfill.py`、`setup_db.py`);runner 新增 `OrderRecord`/`on_order`/`stop_reason`;`BybitClient.get_executions()`(翻頁);`live/main.py` 實盤才建 recorder(dry-run 不存),run 開始/結束/被擋/當掉都有紀錄;preflight 確認時存估算給 `sl_run.preflight` | 新增 §6.21 | 已完成;用 09-27 真實成交重播,淨損益與 Bybit closedPnl 完全一致 |
 | 網路錯誤韌性 + 實盤 log | `BybitClient` 補接 requests 例外、預設 10 次/60 秒、下單帶 `orderLinkId` 防重複、取消不放棄;`run_forever` 網路失敗這一輪放棄下一輪再試;runner 收尾中斷後續做、分注只補掛缺的單;每張單下單/成交/取消寫 log;`select_strategy.py` 改成只替換 `strategy_path` 那一行(保留註解) | 新增 §6.23 | 已完成;521 passed |
 | Telegram 通知 + log 大小限制 | 新增 `strategy_lab/log/`(`logger_setup.py` 照 Fa_Successful_trade 結構:console/檔案/Telegram;`telegram_notifier.py` 背景發送、冷卻、不自我觸發;`log_limit.py` 總大小上限);`live/main.py` 新增 `mode_label()`、`attach_notifications()`、啟動/結束事件;runner 的「開始收尾」不發 Telegram;檔案輪替後壓縮 `.log.gz`;`tests/conftest.py` 擋住真 token 與真 logs/ | 新增 §6.24 | 已完成 |
+| 分注依序掛單 | `ScaleInRunner._ready()`:loop 開始只掛第一注,第 k 注建倉成交才在同一個 tick 掛第 k+1 注(連同第 k 注的平倉單);斷網補掛同樣要前一注已成交;新 loop 從第一注重新開始。`scale_in_ladder.yaml` 註解、preflight 掛單計畫文字同步 | §6.22 規格表新增「掛單順序」列、「loop 結束」列 | 已完成 |
+| Telegram 看得懂的狀態 | 新增 `live/status.py`(`start_message`、`status_message`、`StatusReporter`):啟動訊息帶策略參數/各注→平倉價/最大部位/收尾時間;每小時狀態回報(⚪ #狀態,`STATUS_INTERVAL_MINUTES`);用語統一成 loop(第 k 個 loop/共 N、這輪與累計損益);訊息分類樣式(彩色圓點 + hashtag,HTML) | §6.24 新增「看得懂現在在幹嘛」與類別樣式表 | 已完成 |
+| 淨利與手續費比率 | `TradeRecorder.event_costs()`(Bybit 真實手續費/資金費);`live/status.py` 新增 `cost_totals`/`fee_ratio`/`net_summary`/`px`/`usd`;loop 結算、累計、每小時狀態、結束總結改成淨利 + 手續費佔利益(虧損)比率;價格 4 位、金額 2 位;「收尾還有」改成「距強制收尾還有」 | §6.24 新增「損益一律顯示淨利」「數字格式」「強制收尾」 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1309,7 +1312,8 @@ exit 一定是 `scale_out`,其他策略不能用這兩個,混搭在載入時就�
 `storage/setup_db.py` 補上「缺少的可為 NULL 欄位就 `ALTER TABLE ADD COLUMN`」,已套用到
 `trading-postgres`。
 
-**驗證**:PaperBroker 整合測試涵蓋建 1/2/3 平 1/2/3 各算 1 個 loop、loop 結束取消並重掛、
+**驗證**:PaperBroker 整合測試涵蓋依序掛單(一開始只有第一注、每注成交才掛下一注、價格一口氣跌穿
+時一注一注補上)、建 1/2/3 平 1/2/3 各算 1 個 loop、loop 結束取消並從第一注重掛、
 `loop: 0` 收尾、做空、時間窗收尾;沙盒多個 seed 跑過多輪;用真實行情唯讀預覽 preflight
 (dry-run、回答 no,沒有啟動)。
 
@@ -1397,6 +1401,27 @@ sat_strategy 的 `bot.py` 一 import 就 `load_dotenv()` + 建發送器,加 conf
   `maybe_report()`;間隔 `.env` 的 `STATUS_INTERVAL_MINUTES`(預設 60,0 = 關閉);電腦睡著醒來不補發;
   已停止就不發(緊接著有結束訊息)。**收到 = 還活著,超過時間沒收到 = 出事了。**只讀 runner 自己的狀態
   (EventTracker 的部位/均價、還開著的單),不另外打交易所 API。sat_strategy 同樣有。
+
+**損益一律顯示淨利 + 手續費比率**(2026-10-06,使用者要求「要計手續費」):
+- 手續費/資金費用 **Bybit 成交明細的真實數字**,不估算:`TradeRecorder.event_costs(index)` 回傳該 loop 的
+  `(手續費, 資金費)`(`record_event` 時已同步成交明細);交易所還沒回報 → `None`。
+- `live/status.py`:`cost_totals()`(完成的 loop 合計毛利/手續費/資金費)、`fee_ratio(gross, fees)`
+  (手續費 ÷ |毛利|,小數兩位,賺錢叫「佔利益」、虧錢叫「佔虧損」)、`net_summary()`。
+- loop 結算:「這輪淨利 +0.12 USDT(毛利 +0.14 − 手續費 0.0286 − 資金費 0.0000)|手續費佔利益 19.89%」
+  與「累計淨利 …|手續費佔利益 …」;手續費還沒查到 → 「這輪毛利 …(手續費待查)」,不假裝已扣。
+  每小時狀態、結束總結同一套。結束總結改成先 `recorder.end_run()`(補同步成交明細)再發。
+- dry-run 沒有紀錄器 → 顯示毛利並註明未扣手續費。
+- 實測(SUI 第 1 個 loop):毛利 +0.1440 − 手續費 0.0286 = 淨利 +0.1154,手續費佔利益 19.89%,
+  與 `sl_run.net_pnl` 一致。
+
+**數字格式**:`px()` 價格最多 4 位小數並去掉多餘的 0(`1.1947847999999999` → `1.1948`、`84900.0` → `84900`);
+`usd()` 損益金額(淨利、毛利、累計、未實現、回撤)2 位小數帶正負號;手續費/資金費保留 4 位
+(通常只有零點零幾);比率 2 位。
+
+**「強制收尾」**:訊息原本寫「收尾還有 …」,意思不清楚,改成「距強制收尾還有 …(10-12 05:55,到時取消
+掛單、市價平倉)」與啟動訊息的「強制收尾 … loop 沒做完也會在這時取消掛單、市價平倉並結束」。時間來自
+策略 YAML 的 time_window;`scale_in_ladder.yaml` 目前沿用 weekly_window(週一 06:00 前 5 分鐘),
+對分注策略沒有特別意義,要不要改成「啟動後 N 小時」或每日固定時間還沒決定(見 TODO)。
 
 **log 結構與大小限制**(`strategy_lab/log/logger_setup.py`、`strategy_lab/log/log_limit.py`):
 

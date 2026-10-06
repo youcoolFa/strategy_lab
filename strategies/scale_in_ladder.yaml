@@ -18,7 +18,7 @@
 name: scale_in_ladder
 symbol: BTC/USDT
 direction: long   # long(買入建倉、往上平倉)/ short(賣出建倉、往下平倉)
-loop: 0   # 重複次數:總 loop 數 = loop + 1;0 = 只做 1 個 loop;null = 不限次數(做到時間窗結束)
+loop: 2   # 重複次數:總 loop 數 = loop + 1;0 = 只做 1 個 loop;null = 不限次數(做到時間窗結束)
 scale_in: true
 
 entry:
@@ -30,7 +30,7 @@ exit:
   type: scale_out
   params:
     distance:
-      value: 1.0   # 平倉距離 = 平倉價 − 這注的建倉價
+      value: 0.2   # 平倉距離 = 平倉價 − 這注的建倉價
       unit: pct    # pct(建倉價的 %)/ points(固定點數,例 value: 500 → 84000 → 84500)
 
 time_window:

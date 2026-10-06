@@ -20,7 +20,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 from sqlalchemy import create_engine
@@ -190,6 +190,16 @@ class TradeRecorder:
             if self._fills.get(row["exec_id"]) != row:
                 self._fills[row["exec_id"]] = row
                 self._write("sl_fill", row)
+
+    def event_costs(self, index: int) -> Optional[Tuple[float, float]]:
+        """(手續費, 資金費),來自 Bybit 成交明細(record_event 時同步)。給 Telegram 的 loop 結算算淨利。
+        這個 event 連一筆成交明細都還沒拿到(交易所還沒回報、查詢失敗)→ None,呼叫端顯示「待查」。"""
+        mine = [f for f in self._fills.values() if f["event_index"] == index]
+        if not any(f["exec_type"] != "Funding" for f in mine):
+            return None
+        fees = sum(f["fee"] for f in mine if f["exec_type"] != "Funding")
+        funding = sum(f["fee"] for f in mine if f["exec_type"] == "Funding")
+        return fees, funding
 
     def _event_at(self, when: datetime) -> Optional[int]:
         for e in self._events.values():

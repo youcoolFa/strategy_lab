@@ -94,5 +94,54 @@
     "fullName": "Worldcoin",
     "marketRegion": "",
     "underlyingTicker": ""
+  },
+  "SUIUSDT": {
+    "symbol": "SUIUSDT",
+    "contractType": "LinearPerpetual",
+    "status": "Trading",
+    "baseCoin": "SUI",
+    "quoteCoin": "USDT",
+    "launchTime": "1683029724000",
+    "deliveryTime": "0",
+    "deliveryFeeRate": "",
+    "priceScale": "5",
+    "leverageFilter": {
+      "minLeverage": "1",
+      "maxLeverage": "50.00",
+      "leverageStep": "0.01"
+    },
+    "priceFilter": {
+      "minPrice": "0.00010",
+      "maxPrice": "1999.99980",
+      "tickSize": "0.00010"
+    },
+    "lotSizeFilter": {
+      "maxOrderQty": "330000",
+      "minOrderQty": "10",
+      "qtyStep": "10",
+      "postOnlyMaxOrderQty": "330000",
+      "maxMktOrderQty": "66000",
+      "minNotionalValue": "5"
+    },
+    "unifiedMarginTrade": true,
+    "fundingInterval": 480,
+    "settleCoin": "USDT",
+    "copyTrading": "both",
+    "upperFundingRate": "0.01",
+    "lowerFundingRate": "-0.01",
+    "isPreListing": false,
+    "preListingInfo": null,
+    "riskParameters": {
+      "priceLimitRatioX": "0.05",
+      "priceLimitRatioY": "0.1"
+    },
+    "displayName": "SUIUSDT",
+    "symbolType": "",
+    "forbidUplWithdrawal": false,
+    "symbolId": 309,
+    "fullName": "Sui",
+    "marketRegion": "",
+    "underlyingTicker": "",
+    "tags": []
   }
 }
