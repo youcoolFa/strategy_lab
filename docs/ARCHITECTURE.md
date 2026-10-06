@@ -438,6 +438,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 分注依序掛單 | `ScaleInRunner._ready()`:loop 開始只掛第一注,第 k 注建倉成交才在同一個 tick 掛第 k+1 注(連同第 k 注的平倉單);斷網補掛同樣要前一注已成交;新 loop 從第一注重新開始。`scale_in_ladder.yaml` 註解、preflight 掛單計畫文字同步 | §6.22 規格表新增「掛單順序」列、「loop 結束」列 | 已完成 |
 | Telegram 看得懂的狀態 | 新增 `live/status.py`(`start_message`、`status_message`、`StatusReporter`):啟動訊息帶策略參數/各注→平倉價/最大部位/收尾時間;每小時狀態回報(⚪ #狀態,`STATUS_INTERVAL_MINUTES`);用語統一成 loop(第 k 個 loop/共 N、這輪與累計損益);訊息分類樣式(彩色圓點 + hashtag,HTML) | §6.24 新增「看得懂現在在幹嘛」與類別樣式表 | 已完成 |
 | 淨利與手續費比率 | `TradeRecorder.event_costs()`(Bybit 真實手續費/資金費);`live/status.py` 新增 `cost_totals`/`fee_ratio`/`net_summary`/`px`/`usd`;loop 結算、累計、每小時狀態、結束總結改成淨利 + 手續費佔利益(虧損)比率;價格 4 位、金額 2 位;「收尾還有」改成「距強制收尾還有」 | §6.24 新增「損益一律顯示淨利」「數字格式」「強制收尾」 | 已完成 |
+| 運作中改參數 | 新增 `live/control.py`(`set entry_prices/distance/loop`:預覽 + yes、請求檔/結果檔、等 90 秒、逾時撤回、超過 10 分鐘的請求不套用);`StrategyRunner`/`ScaleInRunner.apply_changes()`(先全部驗證、取消重掛、取消前已成交不重掛、越過現價拒絕);`ExecutionConfig.strategy_overrides` + `apply_strategy_overrides()`(啟動與 preflight 套用);`run_forever` 在 tick 之間 `process_control()` | 新增 §6.25 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
