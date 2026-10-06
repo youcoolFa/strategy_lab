@@ -138,3 +138,16 @@ class TestStatus:
 def test_default_command_runs_live_main_with_the_config():
     cmd = daemon.default_command("/abs/live_btc_band.yaml")
     assert cmd[1:] == ["-m", "strategy_lab.live.main", "--config", "/abs/live_btc_band.yaml"]
+
+
+class TestDetach:
+    def test_old_program_without_handler_is_ended_and_pid_file_removed(self, env):
+        """舊版程式沒裝 SIGUSR1 處理器 → 預設動作是直接結束(不收尾),正好是脫離要的效果。"""
+        config, run_dir, log_dir, started = env
+        info = start(config, run_dir, log_dir, started)
+        message = daemon.detach(config, run_dir=run_dir, timeout=10)
+        assert "已脫離" in message and not daemon.is_alive(info.pid) and not info.pid_file.exists()
+
+    def test_not_running_is_reported(self, env):
+        config, run_dir, _, _ = env
+        assert "沒有在跑" in daemon.detach(config, run_dir=run_dir, timeout=1)

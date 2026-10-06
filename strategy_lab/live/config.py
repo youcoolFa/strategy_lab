@@ -61,6 +61,9 @@ class ExecutionConfig:
     # 運作中用 strategy_lab.live.control 改的參數,蓋過策略 YAML(不改共用的 strategies/*.yaml):
     # {"loop": 3 或 None, "exit_distance": {"value": 0.3, "unit": "pct"}}。見 live/main.py 的 apply_strategy_overrides()
     strategy_overrides: Optional[Dict[str, Any]] = None
+    # 啟動時交易所上有這個 symbol 的掛單/持倉:false = 拒絕啟動(預設);true = 不平倉直接接手(只支援分注策略,
+    # 對不上就拒絕)。搭配 `daemon detach` 換新版程式又不想被迫平倉。見 live/adopt.py
+    adopt_existing_position: bool = False
 
     # --- 執行安全設定(預設值對照 sat_strategy/app/config.py) ---
     dry_run: bool = True

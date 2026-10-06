@@ -173,8 +173,25 @@ def main(
     if not config.dry_run:
         orders, position = client.get_open_orders(symbol), client.get_position_qty(symbol)
         if orders or position != 0:
-            print_fn(f"\n✗ 交易所上 {symbol} 還有掛單 {len(orders)} 張、持倉 {position},啟動會被擋下。請先到 Bybit 處理。")
-            return 1
+            if not config.adopt_existing_position:
+                print_fn(f"\n✗ 交易所上 {symbol} 還有掛單 {len(orders)} 張、持倉 {position},啟動會被擋下。請先到 Bybit 處理;"
+                         "分注策略也可以在設定檔設 adopt_existing_position: true,不平倉直接接手。")
+                return 1
+            if not strategy.scale_in:
+                print_fn(f"\n✗ 交易所上 {symbol} 有殘留掛單/持倉;接手現有持倉目前只支援分注策略。請先到 Bybit 處理。")
+                return 1
+            from strategy_lab.live.adopt import AdoptionError, plan_adoption
+
+            try:
+                adoption = plan_adoption(entry_prices, raw_qtys, strategy.exit, strategy.direction, orders, position,
+                                         client.get_position_avg_price(symbol) if position else 0.0)
+            except AdoptionError as e:
+                print_fn(f"\n✗ 無法接手 {symbol} 的現有持倉/掛單:{e}")
+                return 1
+            print_fn("\n【接手現有持倉】(adopt_existing_position: true;不會平倉,沿用交易所上的單)")
+            for line in adoption.describe().split("\n"):
+                print_fn(f"  {line}")
+            print_fn("  已持有的注不會重新下單,上面「越過現價」的警告不適用於它們;loop 從這次啟動重新算。")
 
     expected = ("y", "yes") if config.dry_run else ("yes",)
     prompt = "\n輸入 y 確認啟動(dry-run): " if config.dry_run else "\n輸入 yes 確認以真實資金啟動(其他任何輸入取消): "

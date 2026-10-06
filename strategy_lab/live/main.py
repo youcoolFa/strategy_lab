@@ -94,6 +94,12 @@ def install_stop_signal_handlers(runner: StrategyRunner) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, handle_stop_signal)
 
+    def handle_detach_signal(signum, frame):
+        logger.warning("收到脫離訊號(SIGUSR1):這個 tick 結束後直接結束,不收尾,掛單與持倉留在交易所")
+        runner.request_detach()
+
+    signal.signal(signal.SIGUSR1, handle_detach_signal)
+
 
 def to_bybit_symbol(yaml_symbol: str) -> str:
     """YAML 裡的 symbol 是給人看的格式(如 "BTC/USDT"、ccxt 風格的
@@ -309,23 +315,43 @@ class LeftoverExchangeStateError(RuntimeError):
     pass
 
 
-def ensure_clean_start(client, symbol: str, dry_run: bool) -> None:
+def ensure_clean_start(client, symbol: str, dry_run: bool, adopt: bool = False) -> Optional[Tuple[list, float]]:
     """當機或被強制關閉時 _cleanup() 沒跑,舊掛單/部位還留在交易所上;新
     process 不知道它們存在,直接啟動會再掛一張,變成兩倍部位。有殘留就
-    拒絕啟動,讓人先到 Bybit 手動處理。"""
+    拒絕啟動,讓人先到 Bybit 手動處理。
+
+    adopt=True(設定檔 adopt_existing_position: true):有殘留時不拒絕,回傳 (掛單, 持倉) 給
+    adopt_existing() 接手;乾淨就回傳 None。"""
     if dry_run:
-        return
+        return None
     orders = client.get_open_orders(symbol)
     position = client.get_position_qty(symbol)
     if not orders and position == 0:
-        return
+        return None
+    if adopt:
+        return orders, position
     lines = [f"{symbol} 在交易所上還有上次留下的東西,拒絕啟動(避免重複掛單/重複開倉):"]
     for o in orders:
         lines.append(f"  掛單 {o.get('orderId')} {o.get('side')} @ {o.get('price')} qty={o.get('qty')}")
     if position != 0:
         lines.append(f"  持倉 {position}")
-    lines.append("請先到 Bybit 取消這些掛單/平掉持倉,再重新啟動。")
+    lines.append("請先到 Bybit 取消這些掛單/平掉持倉,再重新啟動;分注策略也可以在設定檔設 "
+                 "adopt_existing_position: true,不平倉直接接手。")
     raise LeftoverExchangeStateError("\n".join(lines))
+
+
+def adopt_existing(runner: Any, client: Any, symbol: str, orders: list, position: float, now: datetime) -> List[str]:
+    """把交易所上的持倉/掛單對應回分注策略的每一注並裝進 runner(不下單、不取消)。對不上 → 拒絕啟動。"""
+    from strategy_lab.live.adopt import AdoptionError, apply_adoption, plan_adoption
+
+    if not isinstance(runner, ScaleInRunner):
+        raise LeftoverExchangeStateError("接手現有持倉目前只支援分注策略(scale_in);請先到 Bybit 手動處理殘留掛單/持倉")
+    try:
+        plan = plan_adoption(runner.entry_prices, runner.lot_qtys, runner.exit, runner.direction, orders, position,
+                             client.get_position_avg_price(symbol) if position else 0.0)
+    except AdoptionError as e:
+        raise LeftoverExchangeStateError(f"無法接手 {symbol} 的現有持倉/掛單,拒絕啟動:{e}") from e
+    return apply_adoption(runner, plan, now)
 
 
 def resolve_origin_price(config: ExecutionConfig, current_price: float) -> float:
@@ -368,7 +394,7 @@ def run_forever(
 ) -> None:
     live_broker: LiveBroker = runner.broker  # type: ignore[assignment]
     try:
-        ensure_clean_start(live_broker.client, symbol, config.dry_run)
+        leftover = ensure_clean_start(live_broker.client, symbol, config.dry_run, adopt=config.adopt_existing_position)
     except LeftoverExchangeStateError:
         if recorder is not None:
             now = now_fn()
@@ -400,9 +426,14 @@ def run_forever(
         runner.start(now, origin if origin is not None else price)
         reporter = StatusReporter(runner, config, symbol, started_at=now, costs=recorder)
         logger.bind(telegram=True).info(start_message(runner, config, symbol, price, now, reporter.interval))
+        if leftover is not None:
+            adopted = adopt_existing(runner, live_broker.client, symbol, leftover[0], leftover[1], now)
+            logger.bind(telegram=True, category="position").info(
+                "🔁 接手現有持倉(沒有平倉,沿用交易所上的單)\n" + "\n".join(adopted)
+                + "\n注意:loop 從這次啟動重新算;舊程式的建倉手續費不在這次的淨利裡")
         _tick_tolerating_network_errors(runner, now, price, config)
 
-        while runner.state != RunState.STOPPED:
+        while runner.state != RunState.STOPPED and not runner.detach_requested:
             time.sleep(config.poll_interval_seconds)
             now = now_fn()
             try:
@@ -422,6 +453,13 @@ def run_forever(
 
     if config.use_live_ticker_feed:
         ticker_feed.stop()
+    if runner.detach_requested:
+        logger.bind(telegram=True).warning(
+            "🔌 已脫離:程式結束但沒有收尾,掛單與持倉保留在交易所上。下次在設定檔打開 adopt_existing_position "
+            "再啟動就會接手;不接手的話請到 Bybit 自行處理。")
+        if recorder is not None:
+            recorder.end_run(now_fn(), "detached", summarize(runner.events))
+        return
     summary = summarize(runner.events)
     logger.info(
         f"strategy_lab live runner 結束:event {summary.count} 個(其中強制平倉 {summary.forced} 個,獲利 {summary.wins} 個),"

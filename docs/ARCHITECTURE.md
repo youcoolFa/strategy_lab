@@ -439,6 +439,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | Telegram 看得懂的狀態 | 新增 `live/status.py`(`start_message`、`status_message`、`StatusReporter`):啟動訊息帶策略參數/各注→平倉價/最大部位/收尾時間;每小時狀態回報(⚪ #狀態,`STATUS_INTERVAL_MINUTES`);用語統一成 loop(第 k 個 loop/共 N、這輪與累計損益);訊息分類樣式(彩色圓點 + hashtag,HTML) | §6.24 新增「看得懂現在在幹嘛」與類別樣式表 | 已完成 |
 | 淨利與手續費比率 | `TradeRecorder.event_costs()`(Bybit 真實手續費/資金費);`live/status.py` 新增 `cost_totals`/`fee_ratio`/`net_summary`/`px`/`usd`;loop 結算、累計、每小時狀態、結束總結改成淨利 + 手續費佔利益(虧損)比率;價格 4 位、金額 2 位;「收尾還有」改成「距強制收尾還有」 | §6.24 新增「損益一律顯示淨利」「數字格式」「強制收尾」 | 已完成 |
 | 運作中改參數 | 新增 `live/control.py`(`set entry_prices/distance/loop`:預覽 + yes、請求檔/結果檔、等 90 秒、逾時撤回、超過 10 分鐘的請求不套用);`StrategyRunner`/`ScaleInRunner.apply_changes()`(先全部驗證、取消重掛、取消前已成交不重掛、越過現價拒絕);`ExecutionConfig.strategy_overrides` + `apply_strategy_overrides()`(啟動與 preflight 套用);`run_forever` 在 tick 之間 `process_control()` | 新增 §6.25 | 已完成 |
+| 接手現有持倉與脫離 | 新增 `live/adopt.py`(`plan_adoption`/`apply_adoption`,對不上就 `AdoptionError`);`ExecutionConfig.adopt_existing_position`;`ensure_clean_start(adopt=)`、`adopt_existing()`;SIGUSR1 → `runner.request_detach()`、`run_forever` 不收尾結束;`daemon detach`;`BybitClient.get_position_avg_price()`;preflight 預覽接手內容 | 新增 §6.26 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1484,3 +1485,31 @@ logger.info / warning / error ...
 `strategies/*.yaml`。`live/main.py` 的 `apply_strategy_overrides()` 在啟動與 preflight 時套用。
 
 **不能熱改**:幣種、方向、策略類型、數量/比重——要停止後重新啟動。
+
+### 6.26 接手現有持倉與脫離(`live/adopt.py`、`daemon detach`,2026-10-07)
+
+**為什麼**:2026-10-06 SUI 那次三注全部成交後價格下跌,當時在跑的是不支援 §6.25 改參數的舊版程式。換新版程式
+原本只能「停止 → 重啟」,而停止會收尾(市價平掉 60 SUI 認賠)、啟動又會因為交易所上有殘留而拒絕。
+
+**脫離**:`python -m strategy_lab.live.daemon detach --config …` 送 SIGUSR1。新版程式在這個 tick 結束後
+直接結束、**不收尾**(`runner.request_detach()`,`run_forever` 迴圈條件、Telegram 🔌、`sl_run.end_reason =
+detached`);還沒裝 SIGUSR1 處理器的舊版程式,預設動作就是立刻結束,效果一樣。`daemon stop` 仍是收尾後結束。
+
+**接手**:設定檔明確打開 `adopt_existing_position: true` 才做(預設 false,有殘留仍拒絕,錯誤訊息會提示這個
+選項)。`ensure_clean_start(adopt=True)` 回傳殘留 → `runner.start()` 之後、第一個 tick 之前 `adopt_existing()`:
+
+| 交易所上的東西 | 對應到 |
+|---|---|
+| reduceOnly、平倉方向的單 | 某一注的平倉單:數量 = 那注數量、價格 ≈ 建倉價 ± 平倉距離(容許 0.02%,交易所修整 tick)→ 那一注已持有 |
+| 非 reduceOnly、建倉方向的單 | 某一注的建倉單:數量、價格 ≈ 建倉價 |
+
+一致性檢查,任何一項不符就拒絕啟動(`AdoptionError` → `LeftoverExchangeStateError`),絕不亂猜:已持有的注
+是 1..k 連續(依序掛單);建倉單最多一張而且是第 k+1 注;各注數量加總 = 交易所持倉、方向一致;有持倉就要找得到
+平倉單;認不出的單一律拒絕。`apply_adoption()` 只把狀態裝進 runner(`Lot.filled_price` = 交易所持倉均價、
+`exit_order`/`entry_order` 用交易所的 orderId、`EventTracker` 以均價開倉),**不下單、不取消**。Telegram 🔁。
+preflight 同樣先預覽「會接手什麼」,對不上就拒絕。只支援分注策略。
+
+**限制**:各注個別成交價拿不到,用交易所持倉均價(合計損益正確);舊程式那幾張建倉單的手續費不在這次執行的
+紀錄裡(淨利少扣這部分);loop 從這次啟動重新算。
+
+**實測**(唯讀預覽,真實交易所):SUI 60 @ 1.22542、平倉單 1.2322/1.2316/1.231 正確對應到第 1/2/3 注。

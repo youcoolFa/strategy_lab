@@ -129,6 +129,8 @@ class StrategyRunner:
     trades: List[Trade] = field(default_factory=list, init=False)
     entry_time: Optional[datetime] = field(default=None, init=False)
     _stop_requested: bool = field(default=False, init=False)
+    # daemon detach(SIGUSR1):直接結束、不收尾,掛單與持倉留在交易所給下一次啟動接手(live/adopt.py)
+    detach_requested: bool = field(default=False, init=False)
     events: List[Event] = field(default_factory=list, init=False)
     _tracker: EventTracker = field(default_factory=EventTracker, init=False, repr=False)
     # 停止原因:window_cleanup / kill_switch / stop_requested / loop_done;還在跑時是 None
@@ -170,6 +172,9 @@ class StrategyRunner:
             return "不限次數" if v is None else f"共 {v + 1} 個"
         old, self.loop = self.loop, new
         return f"loop {old} → {new}({total(old)} → {total(new)})"
+
+    def request_detach(self) -> None:
+        self.detach_requested = True
 
     def request_stop(self) -> None:
         """對應 sat_strategy/app/bot.py 的 _stop_requested——給外部訊號

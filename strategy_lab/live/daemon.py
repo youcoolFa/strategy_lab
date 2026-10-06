@@ -168,6 +168,31 @@ def stop(config: os.PathLike, run_dir: Path = RUN_DIR, timeout: float = 90.0) ->
     )
 
 
+def detach(config: os.PathLike, run_dir: Path = RUN_DIR, timeout: float = 30.0) -> str:
+    """脫離:送 SIGUSR1,程式直接結束、**不收尾**(不取消掛單、不平倉),掛單與持倉留在交易所上,
+    給下一次啟動用 adopt_existing_position 接手。新版程式在這個 tick 結束後退出並發 Telegram;
+    還沒裝 SIGUSR1 處理器的舊版程式,預設動作就是立刻結束,效果一樣。"""
+    config = Path(config).resolve()
+    pid_file = _pid_file(config, run_dir)
+    pid = _read_pid(pid_file)
+    if pid is None:
+        return f"{config.stem} 沒有在跑(找不到 pid 檔)"
+    if not is_alive(pid):
+        pid_file.unlink(missing_ok=True)
+        return f"{config.stem} 沒有在跑(PID {pid} 已經不存在,清掉殘留 pid 檔)"
+    if str(config) not in _command_line(pid):
+        raise DaemonError(f"PID {pid} 不是這個策略的程式(pid 檔可能過期、PID 被重用),不送訊號")
+
+    os.kill(pid, signal.SIGUSR1)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not is_alive(pid):
+            pid_file.unlink(missing_ok=True)
+            return f"{config.stem} 已脫離(PID {pid} 已結束,沒有收尾:掛單與持倉保留在交易所)"
+        time.sleep(0.5)
+    raise DaemonError(f"送出脫離訊號 {timeout:.0f} 秒後 PID {pid} 還沒結束,請看 log")
+
+
 def status(config: os.PathLike, run_dir: Path = RUN_DIR, log_dir: Path = LOG_DIR) -> str:
     config = Path(config).resolve()
     pid = _read_pid(_pid_file(config, run_dir))
@@ -178,7 +203,8 @@ def status(config: os.PathLike, run_dir: Path = RUN_DIR, log_dir: Path = LOG_DIR
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="在背景啟動/停止 strategy_lab live runner")
-    parser.add_argument("action", choices=["start", "stop", "status"])
+    parser.add_argument("action", choices=["start", "stop", "detach", "status"],
+                        help="stop = 收尾(取消掛單、市價平倉)後結束;detach = 直接結束不收尾,掛單與持倉留給下次接手")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="執行設定檔,預設 live_execution_config.yaml")
     args = parser.parse_args(argv)
 
@@ -190,6 +216,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"停止: python -m strategy_lab.live.daemon stop --config {args.config}")
         elif args.action == "stop":
             print(stop(args.config))
+        elif args.action == "detach":
+            print(detach(args.config))
         else:
             print(status(args.config))
     except DaemonError as e:

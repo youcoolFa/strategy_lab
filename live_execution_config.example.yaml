@@ -40,3 +40,7 @@ position_sizing:
 account_value: null
 
 use_live_ticker_feed: false  # 要跟 Fa_Successful_trade 接的網路(mainnet/testnet)一致才能開
+
+# 啟動時交易所上已有這個 symbol 的掛單/持倉:false = 拒絕啟動;true = 不平倉直接接手(只支援分注策略,
+# 對不上就拒絕)。搭配 `python -m strategy_lab.live.daemon detach`(結束但不收尾)換新版程式用。
+adopt_existing_position: false

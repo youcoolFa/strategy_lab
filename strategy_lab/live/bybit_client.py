@@ -255,6 +255,14 @@ class BybitClient:
             total += -size if p.get("side") == "Sell" else size
         return total
 
+    def get_position_avg_price(self, symbol: str) -> float:
+        """持倉均價(Bybit avgPrice);沒有持倉是 0。接手現有持倉(live/adopt.py)用。"""
+        resp = self._call_with_retry(self._http.get_positions, category=self._category, symbol=symbol)
+        for p in resp["result"]["list"]:
+            if float(p.get("size") or 0.0):
+                return float(p.get("avgPrice") or 0.0)
+        return 0.0
+
     def get_fee_rates(self, symbol: str) -> Tuple[float, float]:
         """(maker, taker) 手續費率,這個帳戶在這個交易對的真實費率。"""
         resp = self._call_with_retry(self._http.get_fee_rates, category=self._category, symbol=symbol)
