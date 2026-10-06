@@ -1446,3 +1446,40 @@ logger.info / warning / error ...
 - **壓縮**:輪替出來的舊檔壓成 `.log.gz`(純文字約剩 1/10);正在寫的檔、以及一次執行沒寫滿
   20 MB 就結束的檔維持純文字。看壓縮檔:`gzcat logs/<檔名>.log.gz | less`。
 - 三個專案同一套(Fa_Successful_trade 上限 500 MB、sat_strategy 300 MB),`log_limit.py` 各放一份。
+
+### 6.25 運作中改參數(`live/control.py`,2026-10-07)
+
+使用者要求「策略運作中要改參數」:建倉價、平倉距離、loop,用終端機,要寫回設定檔。原本只能停止 → 改設定 →
+重啟,而停止會收尾(有部位就市價平倉、loop 計數歸零)。
+
+```bash
+.venv/bin/python -m strategy_lab.live.control --config live_execution_config.yaml \
+    set entry_prices=1.2300,1.2294,1.2288 distance=0.3 loop=3
+```
+
+**流程**(比照 preflight):預覽(舊 → 新、改完後每注建倉/平倉價與離現價、越過現價警告、每注淨利率)→ 輸入
+`yes`(dry-run 設定檔 `y`)→ 背景程式在跑:寫請求檔 `run/<設定檔>.control.json`(原子替換),`run_forever`
+在兩個 tick 之間 `process_control()` 讀取 → 用當下價格再驗證 → `runner.apply_changes()` → 寫回設定檔 →
+結果檔 `.control.result.json`;指令最多等 90 秒顯示「已套用 / 被拒絕 + 原因」。背景程式沒在跑:直接寫回
+設定檔,下次啟動生效。log 與 Telegram(🔧 參數已更新 / 被拒絕)都有紀錄。
+
+**規則**(`ScaleInRunner.apply_changes`;一般策略只能改 loop):
+
+| 參數 | 運作中改了 | 拒絕 |
+|---|---|---|
+| 建倉價 | 還沒成交且正掛著的注:取消、用新價重掛;還沒輪到的注:之後用新價;**已成交的注不動**(平倉價照原本建倉價) | 注數不對、≤ 0、**正掛著或馬上要掛的注新價越過現價**(避免 10-06 SUI 那種一掛就吃單) |
+| 平倉距離 | 持有中的注:取消舊平倉單、用新距離重掛;之後成交的注用新距離 | 數值 ≤ 0、單位不是 pct/points |
+| loop | 直接改 | 新的總次數(loop + 1)≤ 已完成的 loop 數 |
+
+- **先全部驗證、都通過才改**,不會改到一半失敗。
+- **取消前一刻剛好成交 → 不重掛**(`_cancel_for_replace`:取消後再查一次,狀態是 closed 就不重掛),交給下一個
+  tick 的正常成交流程,避免重複建倉。
+- 重掛時遇到網路錯誤:已改的參數保留,沒掛上的單下一個 tick 由既有的「補掛」邏輯接手。
+- 請求帶建立時間,**超過 10 分鐘不套用**;指令等不到回應會**撤回請求**——避免當時在跑的是不認得請求的
+  舊版程式,之後換新版啟動時突然套用很久以前的變更。
+
+**寫回設定檔**(保留其他行與註解,寫入前確認仍是合法 YAML):建倉價改 `entry_prices` 那一行;平倉距離與 loop
+寫進 `live_execution_config.yaml` 的 `strategy_overrides`(`{loop, exit_distance}`),不改共用的
+`strategies/*.yaml`。`live/main.py` 的 `apply_strategy_overrides()` 在啟動與 preflight 時套用。
+
+**不能熱改**:幣種、方向、策略類型、數量/比重——要停止後重新啟動。

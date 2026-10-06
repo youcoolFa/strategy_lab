@@ -36,7 +36,7 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 from loguru import logger
@@ -58,6 +58,9 @@ class ExecutionConfig:
     # 分注策略(scale_in: true)每一注的建倉價,依第一注、第二注…的順序;
     # 數量照策略 YAML 的 weights,第一注 = position_sizing。非分注策略不用。
     entry_prices: Optional[List[float]] = None
+    # 運作中用 strategy_lab.live.control 改的參數,蓋過策略 YAML(不改共用的 strategies/*.yaml):
+    # {"loop": 3 或 None, "exit_distance": {"value": 0.3, "unit": "pct"}}。見 live/main.py 的 apply_strategy_overrides()
+    strategy_overrides: Optional[Dict[str, Any]] = None
 
     # --- 執行安全設定(預設值對照 sat_strategy/app/config.py) ---
     dry_run: bool = True

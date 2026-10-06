@@ -33,7 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum, auto
-from typing import Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from loguru import logger
 
@@ -145,6 +145,31 @@ class StrategyRunner:
             raise ValueError(
                 f"一啟動就掛單的策略(sat_strategy 機制)只能用 order_type=limit,目前是 {self.order_type!r}"
             )
+
+    # --- 運作中改參數(live/control.py → run_forever 在兩個 tick 之間呼叫)---
+
+    def apply_changes(self, now: datetime, price: float, changes: Dict[str, Any]) -> List[str]:
+        """一般策略運作中只能改 loop。先驗證、全部通過才改;回傳給人看的變更說明。"""
+        unsupported = sorted(set(changes) - {"loop"})
+        if unsupported:
+            raise ValueError(f"{unsupported} 只有分注策略可以在運作中改;這個策略只能改 loop")
+        if "loop" not in changes:
+            return []
+        self._validate_loop(changes["loop"])
+        return [self._set_loop(changes["loop"])]
+
+    def _validate_loop(self, new: Optional[int]) -> None:
+        if new is not None and (isinstance(new, bool) or not isinstance(new, int) or new < 0):
+            raise ValueError(f"loop 必須是 0 以上的整數或 null(不限),收到 {new!r}")
+        done = len(self.events)
+        if new is not None and new + 1 <= done:
+            raise ValueError(f"已完成 {done} 個 loop,新的總次數(loop + 1 = {new + 1})要大於 {done}")
+
+    def _set_loop(self, new: Optional[int]) -> str:
+        def total(v: Optional[int]) -> str:
+            return "不限次數" if v is None else f"共 {v + 1} 個"
+        old, self.loop = self.loop, new
+        return f"loop {old} → {new}({total(old)} → {total(new)})"
 
     def request_stop(self) -> None:
         """對應 sat_strategy/app/bot.py 的 _stop_requested——給外部訊號

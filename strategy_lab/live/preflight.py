@@ -30,7 +30,7 @@ from strategy_lab.live import daemon
 from strategy_lab.live.bybit_client import BybitClient
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
 from strategy_lab.live.instrument_limits import UnknownSymbolError, fix_qty, load_instrument_limits
-from strategy_lab.live.main import _resolve_order_qty, resolve_origin_price, scale_in_entry_prices, to_bybit_symbol
+from strategy_lab.live.main import _resolve_order_qty, apply_strategy_overrides, resolve_origin_price, scale_in_entry_prices, to_bybit_symbol
 
 HKT = ZoneInfo("Asia/Hong_Kong")
 SNAPSHOT_DIR = daemon.RUN_DIR
@@ -105,7 +105,7 @@ def main(
 
     load_dotenv()
     config = load_execution_config(config_path=config_path)
-    strategy = load_strategy(config.strategy_path)
+    strategy = apply_strategy_overrides(load_strategy(config.strategy_path), config)
     symbol = config.symbol_override or to_bybit_symbol(strategy.symbol)
     client = client_factory(config)
 

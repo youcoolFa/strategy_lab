@@ -26,9 +26,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from strategy_lab.engine.runner import RunState, StrategyRunner, Trade
+from strategy_lab.plugins.exit.scale_out import ScaleOutExit
 from strategy_lab.interfaces import OrderLike
 
 
@@ -181,6 +182,95 @@ class ScaleInRunner(StrategyRunner):
         held = [l for l in self.lots if l.holding]
         qty = sum(l.qty for l in held)
         self.active_entry_price = sum(l.filled_price * l.qty for l in held) / qty if qty else None
+
+    # --- 運作中改參數(建倉價、平倉距離、loop)---
+
+    def apply_changes(self, now: datetime, price: float, changes: Dict[str, Any]) -> List[str]:
+        """先全部驗證,都通過才改(不會改到一半失敗)。回傳給人看的變更說明。
+        - 建倉價:還沒成交的注取消重掛 / 還沒輪到的之後用新價;已成交的注不動
+        - 平倉距離:已持有的注取消重掛平倉單;之後成交的注用新距離
+        - 取消前一刻剛好成交 → 不重掛(交給下一個 tick 的正常成交流程),避免重複下單"""
+        unsupported = sorted(set(changes) - {"entry_prices", "distance", "loop"})
+        if unsupported:
+            raise ValueError(f"不支援在運作中改 {unsupported};可以改 entry_prices、distance、loop")
+        new_prices = self._validate_entry_prices(changes["entry_prices"], price) if "entry_prices" in changes else None
+        new_exit = ScaleOutExit(distance=dict(changes["distance"])) if "distance" in changes else None
+        if "loop" in changes:
+            self._validate_loop(changes["loop"])
+
+        messages: List[str] = []
+        if "loop" in changes:
+            messages.append(self._set_loop(changes["loop"]))
+        if new_exit is not None:
+            messages += self._set_exit(now, new_exit)
+        if new_prices is not None:
+            messages += self._set_entry_prices(now, new_prices)
+        return messages
+
+    def _validate_entry_prices(self, prices: Any, price: float) -> List[float]:
+        prices = [float(p) for p in prices]
+        if len(prices) != self.entry.lots:
+            raise ValueError(f"entry_prices 要有 {self.entry.lots} 個價格(每注一個),收到 {prices}")
+        if any(p <= 0 for p in prices):
+            raise ValueError(f"entry_prices 必須全部大於 0,收到 {prices}")
+        # 會「立刻」掛在交易所上的注:正在掛著的,或還沒開始這個 loop 時的第一注
+        now_placed = [l.index for l in self.lots if l.entry_order is not None and l.filled_price is None]
+        if not self.lots:
+            now_placed = [1]
+        for index in now_placed:
+            p = prices[index - 1]
+            crosses = p <= price if self.direction == "short" else p >= price
+            if crosses:
+                side = "低於" if self.direction == "short" else "高於"
+                raise ValueError(f"第{index}注新建倉價 {p:g} 越過現價 {price:g}({side}現價會立刻吃單成交)")
+        return prices
+
+    def _set_entry_prices(self, now: datetime, prices: List[float]) -> List[str]:
+        old_prices, self.entry_prices = self.entry_prices, prices
+        messages = []
+        for lot in self.lots:
+            new = prices[lot.index - 1]
+            if lot.filled_price is not None:
+                messages.append(f"第{lot.index}注已成交,建倉價維持 {lot.entry_price:g}")
+                continue
+            if lot.entry_order is not None:
+                if not self._cancel_for_replace(now, lot.entry_order):
+                    messages.append(f"第{lot.index}注改價前已成交,維持 {lot.entry_price:g}(下一輪照常處理成交)")
+                    continue
+                old, lot.entry_price = lot.entry_price, new
+                self._place_entry(now, lot)
+                messages.append(f"第{lot.index}注建倉價 {old:g} → {new:g}(已重掛)")
+            else:
+                old, lot.entry_price = lot.entry_price, new
+                messages.append(f"第{lot.index}注建倉價 {old:g} → {new:g}(還沒掛,輪到時用新價)")
+        if not self.lots:
+            messages.append("建倉價 " + "、".join(f"{o:g} → {n:g}" for o, n in zip(old_prices, prices)) + "(下一個 loop 開始時掛)")
+        return messages
+
+    def _set_exit(self, now: datetime, new_exit: ScaleOutExit) -> List[str]:
+        old = self.exit
+        self.exit = new_exit
+        messages = [f"平倉距離 {old.value:g}{old.unit} → {new_exit.value:g}{new_exit.unit}"]
+        for lot in self.lots:
+            if not lot.holding or lot.exit_order is None:
+                continue
+            old_price = old.exit_price_for(lot.entry_price, self.direction)
+            if not self._cancel_for_replace(now, lot.exit_order):
+                messages.append(f"第{lot.index}注改價前已平倉成交(下一輪照常處理)")
+                continue
+            self._place_exit(now, lot)
+            new_price = new_exit.exit_price_for(lot.entry_price, self.direction)
+            messages.append(f"第{lot.index}注平倉單 {old_price:g} → {new_price:g}(已重掛)")
+        return messages
+
+    def _cancel_for_replace(self, now: datetime, order) -> bool:
+        """取消一張單準備重掛。回傳 True = 已取消可以重掛;False = 取消前已成交,不能重掛。"""
+        self.broker.cancel_order(order.id)
+        fetched = self.broker.fetch_order(order.id)
+        if fetched.status == "closed":
+            return False
+        self._update_order(now, order.id, "canceled", None, fetched.filled_qty)
+        return True
 
     # --- 收攤 ---
 

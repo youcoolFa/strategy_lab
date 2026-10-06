@@ -53,6 +53,7 @@ from strategy_lab.engine.scale_in_runner import ScaleInRunner
 from strategy_lab.live.broker import LiveBroker
 from strategy_lab.live.bybit_client import NETWORK_ERRORS, BybitClient
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
+from strategy_lab.live.control import RUN_DIR as CONTROL_RUN_DIR, process_control
 from strategy_lab.live.market_feed import ticker_feed
 from strategy_lab.live.status import (
     StatusReporter, cost_totals, fee_ratio, loop_progress, mode_label, net_summary, px, start_message,
@@ -140,8 +141,29 @@ def scale_in_entry_prices(config: ExecutionConfig) -> List[float]:
     return [float(p) for p in config.entry_prices]
 
 
+def apply_strategy_overrides(strategy: Any, config: ExecutionConfig) -> Any:
+    """套用 live_execution_config.yaml 的 strategy_overrides(運作中用 live/control.py 改過、寫回的參數),
+    讓重新啟動和 preflight 都用改過的值。只有 loop 與分注策略的平倉距離可以覆蓋。"""
+    overrides = config.strategy_overrides or {}
+    unknown = sorted(set(overrides) - {"loop", "exit_distance"})
+    if unknown:
+        raise ValueError(f"strategy_overrides 不認得 {unknown};只能有 loop、exit_distance")
+    if "loop" in overrides:
+        loop = overrides["loop"]
+        if loop is not None and (isinstance(loop, bool) or not isinstance(loop, int) or loop < 0):
+            raise ValueError(f"strategy_overrides.loop 要是 0 以上的整數或 null,收到 {loop!r}")
+        strategy.loop = loop
+    if "exit_distance" in overrides:
+        from strategy_lab.plugins.exit.scale_out import ScaleOutExit
+
+        if not isinstance(strategy.exit, ScaleOutExit):
+            raise ValueError("strategy_overrides.exit_distance 只能用在分注策略(exit: scale_out)")
+        strategy.exit = ScaleOutExit(distance=dict(overrides["exit_distance"]))
+    return strategy
+
+
 def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = None) -> Tuple[StrategyRunner, str]:
-    strategy = load_strategy(config.strategy_path)
+    strategy = apply_strategy_overrides(load_strategy(config.strategy_path), config)
     symbol = config.symbol_override or to_bybit_symbol(strategy.symbol)
 
     bybit_client = BybitClient(
@@ -341,6 +363,8 @@ def run_forever(
     recorder: Optional[Any] = None,
     log_path: Optional[Path] = None,
     preflight: Optional[Dict[str, Any]] = None,
+    config_path: Optional[Path] = None,
+    control_run_dir: Optional[Path] = None,
 ) -> None:
     live_broker: LiveBroker = runner.broker  # type: ignore[assignment]
     try:
@@ -388,6 +412,9 @@ def run_forever(
                 continue
             _tick_tolerating_network_errors(runner, now, price, config)
             reporter.maybe_report(now, price)  # 每 STATUS_INTERVAL_MINUTES 分鐘一則 ⚪ #狀態
+            # 運作中改參數(live/control.py 寫的請求檔):在兩個 tick 之間套用,不會跟成交處理互相干擾
+            if runner.state != RunState.STOPPED:
+                process_control(runner, config_path, now, price, control_run_dir or CONTROL_RUN_DIR)
     except Exception:
         if recorder is not None:
             recorder.end_run(now_fn(), "crash")
@@ -455,7 +482,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         recorder = None if config.dry_run else make_recorder(config, runner.broker.client)
         attach_recorder(runner, recorder)
         attach_notifications(runner, config.dry_run, costs=recorder)
-        run_forever(runner, config, symbol, recorder=recorder, log_path=log_path, preflight=preflight)
+        run_forever(runner, config, symbol, recorder=recorder, log_path=log_path, preflight=preflight,
+                    config_path=config_path or Path(__file__).resolve().parents[2] / "live_execution_config.yaml")
     except Exception:
         logger.exception("live runner 異常結束(沒有走收尾流程,請檢查交易所上的掛單/持倉)")
         raise
