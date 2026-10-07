@@ -135,15 +135,18 @@ def main(
 
     if strategy.scale_in:
         try:
-            entry_prices = scale_in_entry_prices(config)
-            if len(entry_prices) != strategy.entry.lots:
-                raise ValueError(f"entry_prices 要有 {strategy.entry.lots} 個價格(每注一個),目前是 {entry_prices}")
+            from strategy_lab.engine.scale_in_runner import validate_entry_prices
+
+            entry_prices = validate_entry_prices(scale_in_entry_prices(config), strategy.entry.lots)
         except ValueError as e:
             print_fn(f"✗ {e}。沒有啟動。")
             return 1
         raw_qtys = strategy.entry.lot_qtys(_resolve_order_qty(config, client, symbol, price=entry_prices[0]))
         qtys = []
         for i, raw in enumerate(raw_qtys, 1):
+            if entry_prices[i - 1] <= 0:
+                qtys.append(raw)  # 不用的注:不檢查最小下單量(build_scale_in_plan 也會略過)
+                continue
             fixed = _fix_qty_or_report(raw, limits, f"第{i}注", print_fn)
             if fixed is None:
                 return 1

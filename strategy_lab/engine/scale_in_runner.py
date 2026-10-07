@@ -26,11 +26,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from strategy_lab.engine.runner import RunState, StrategyRunner, Trade
 from strategy_lab.plugins.exit.scale_out import ScaleOutExit
 from strategy_lab.interfaces import OrderLike
+
+
+def validate_entry_prices(prices: Any, lots: int) -> List[float]:
+    """分注的建倉價:每注一個;第二、三注…填 0 = 沒有這一注(2026-10-07)。
+    規則:第一注一定要有(> 0);不能是負數;有第二注才有第三注——一旦出現 0,後面都要是 0。
+    例:[1000, 990, 980] 三注、[1000, 990, 0] 兩注、[1000, 0, 0] 一注;[1000, 0, 980] 不行。"""
+    try:
+        prices = [float(p) for p in prices]
+    except (TypeError, ValueError):
+        raise ValueError(f"entry_prices 要是數字清單,收到 {prices!r}") from None
+    if len(prices) != lots:
+        raise ValueError(f"entry_prices 要有 {lots} 個價格(每注一個,不用的注填 0),收到 {prices}")
+    if any(p < 0 for p in prices):
+        raise ValueError(f"entry_prices 不能是負數,收到 {prices}")
+    if prices[0] <= 0:
+        raise ValueError(f"第一注一定要有建倉價(> 0),收到 {prices}")
+    for i in range(1, lots - 1):
+        if prices[i] == 0 and any(p > 0 for p in prices[i + 1:]):
+            raise ValueError(f"有第二注才有第三注:第{i + 1}注是 0(不用),後面的注也要是 0,收到 {prices}")
+    return prices
 
 
 @dataclass
@@ -57,16 +77,16 @@ class ScaleInRunner(StrategyRunner):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        n = self.entry.lots
-        if len(self.entry_prices) != n:
-            raise ValueError(f"entry_prices 要有 {n} 個價格(每注一個),目前是 {self.entry_prices}")
-        if any(p <= 0 for p in self.entry_prices):
-            raise ValueError(f"entry_prices 必須全部大於 0,目前是 {self.entry_prices}")
-        self.entry_prices = [float(p) for p in self.entry_prices]
+        self.entry_prices = validate_entry_prices(self.entry_prices, self.entry.lots)
 
     @property
     def lot_qtys(self) -> List[float]:
         return self.entry.lot_qtys(self.order_qty)
+
+    @property
+    def active_lots(self) -> List[Tuple[int, float, float]]:
+        """有在用的注:(第幾注, 建倉價, 數量);建倉價 0 的注不算。"""
+        return [(i, p, q) for i, (p, q) in enumerate(zip(self.entry_prices, self.lot_qtys), 1) if p > 0]
 
     def tick(self, now: datetime, price: float) -> None:
         if not self._prelude(now, price):
@@ -93,10 +113,7 @@ class ScaleInRunner(StrategyRunner):
 
     def _place_entries(self, now: datetime) -> None:
         if not self.lots:
-            self.lots = [
-                Lot(index=i + 1, entry_price=p, qty=q)
-                for i, (p, q) in enumerate(zip(self.entry_prices, self.lot_qtys))
-            ]
+            self.lots = [Lot(index=i, entry_price=p, qty=q) for i, p, q in self.active_lots]
             self._loop_event_base = len(self.events)
         for lot in self.lots:
             if lot.entry_order is None and self._ready(lot):
@@ -208,17 +225,18 @@ class ScaleInRunner(StrategyRunner):
         return messages
 
     def _validate_entry_prices(self, prices: Any, price: float) -> List[float]:
-        prices = [float(p) for p in prices]
-        if len(prices) != self.entry.lots:
-            raise ValueError(f"entry_prices 要有 {self.entry.lots} 個價格(每注一個),收到 {prices}")
-        if any(p <= 0 for p in prices):
-            raise ValueError(f"entry_prices 必須全部大於 0,收到 {prices}")
+        prices = validate_entry_prices(prices, self.entry.lots)
+        for lot in self.lots:
+            if lot.filled_price is not None and prices[lot.index - 1] == 0:
+                raise ValueError(f"第{lot.index}注已成交,不能改成 0(不用);要等這個 loop 結束")
         # 會「立刻」掛在交易所上的注:正在掛著的,或還沒開始這個 loop 時的第一注
         now_placed = [l.index for l in self.lots if l.entry_order is not None and l.filled_price is None]
         if not self.lots:
             now_placed = [1]
         for index in now_placed:
             p = prices[index - 1]
+            if p == 0:
+                continue  # 改成不用 → 會取消,不會掛
             crosses = p <= price if self.direction == "short" else p >= price
             if crosses:
                 side = "低於" if self.direction == "short" else "高於"
@@ -228,10 +246,17 @@ class ScaleInRunner(StrategyRunner):
     def _set_entry_prices(self, now: datetime, prices: List[float]) -> List[str]:
         old_prices, self.entry_prices = self.entry_prices, prices
         messages = []
-        for lot in self.lots:
+        for lot in list(self.lots):
             new = prices[lot.index - 1]
             if lot.filled_price is not None:
                 messages.append(f"第{lot.index}注已成交,建倉價維持 {lot.entry_price:g}")
+                continue
+            if new == 0:  # 改成不用這一注
+                if lot.entry_order is not None and not self._cancel_for_replace(now, lot.entry_order):
+                    messages.append(f"第{lot.index}注取消前已成交,保留這一注(下一輪照常處理成交)")
+                    continue
+                self.lots.remove(lot)
+                messages.append(f"第{lot.index}注改成 0:不再建倉" + ("(已取消掛單)" if lot.entry_order else ""))
                 continue
             if lot.entry_order is not None:
                 if not self._cancel_for_replace(now, lot.entry_order):
@@ -243,7 +268,13 @@ class ScaleInRunner(StrategyRunner):
             else:
                 old, lot.entry_price = lot.entry_price, new
                 messages.append(f"第{lot.index}注建倉價 {old:g} → {new:g}(還沒掛,輪到時用新價)")
-        if not self.lots:
+        if self.lots:  # loop 進行中:從 0 加回來的注接在後面,輪到時掛
+            existing = {lot.index for lot in self.lots}
+            for i, p, q in self.active_lots:
+                if i not in existing:
+                    self.lots.append(Lot(index=i, entry_price=p, qty=q))
+                    messages.append(f"新增第{i}注 @ {p:g} × {q:g}(前一注成交後掛)")
+        else:
             messages.append("建倉價 " + "、".join(f"{o:g} → {n:g}" for o, n in zip(old_prices, prices)) + "(下一個 loop 開始時掛)")
         return messages
 

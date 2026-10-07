@@ -256,6 +256,9 @@ def _preview(config: Any, strategy: Any, changes: Dict[str, Any], client: Any, s
         exit_plugin = ScaleOutExit(distance=changes["distance"]) if "distance" in changes else strategy.exit
         print_fn(f"\n【改完後每注價格】現價 {price:g}")
         for i, p in enumerate(prices, 1):
+            if p <= 0:
+                print_fn(f"  第{i}注 不使用(建倉價 0)")
+                continue
             tp = exit_plugin.exit_price_for(p, strategy.direction)
             crosses = "entry_prices" in changes and (p <= price if strategy.direction == "short" else p >= price)
             warn = "  ⚠ 越過現價:這注如果正掛著或馬上要掛,背景程式會拒絕這次變更" if crosses else ""
@@ -296,8 +299,10 @@ def main(argv: Optional[List[str]] = None, client_factory: Optional[Callable[[An
         changes = control_changes = parse_assignments(args.assignments, current_distance)
         if ("entry_prices" in changes or "distance" in changes) and not getattr(strategy, "scale_in", False):
             raise ValueError(f"{strategy.name} 不是分注策略,只能改 loop")
-        if "entry_prices" in changes and len(changes["entry_prices"]) != strategy.entry.lots:
-            raise ValueError(f"entry_prices 要有 {strategy.entry.lots} 個價格(每注一個)")
+        if "entry_prices" in changes:
+            from strategy_lab.engine.scale_in_runner import validate_entry_prices
+
+            changes["entry_prices"] = validate_entry_prices(changes["entry_prices"], strategy.entry.lots)
     except ValueError as e:
         print_fn(f"✗ {e}")
         return 1

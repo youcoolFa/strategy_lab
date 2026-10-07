@@ -170,3 +170,17 @@ class TestScaleInPreflight:
         code, out, started = run(tmp_path, FakeClient(price=84950.0), "yes", monkeypatch,
                                  config=write_scale_config(tmp_path, value="0.001"))
         assert code == 1 and started == [] and "第3注" in out and "最小" in out
+
+
+class TestOptionalLots:
+    def test_disabled_third_lot_is_not_checked_against_minimum_qty(self, tmp_path, monkeypatch):
+        # 第一注 0.001 → 第三注 0.0005 會低於最小量;但第三注填 0 = 不用,所以不擋
+        code, out, started = run(tmp_path, FakeClient(price=84950.0), "no", monkeypatch,
+                                 config=write_scale_config(tmp_path, entry_prices="[84900, 84800, 0]", value="0.001"))
+        assert code == 0 and "第3注" not in out.split("【每輪損益")[0].split("【掛單計畫】")[1]
+        assert "level 2" in out
+
+    def test_third_without_second_is_refused(self, tmp_path, monkeypatch):
+        code, out, started = run(tmp_path, FakeClient(price=84950.0), "yes", monkeypatch,
+                                 config=write_scale_config(tmp_path, entry_prices="[84900, 0, 84700]"))
+        assert code == 1 and started == [] and "有第二注才有第三注" in out

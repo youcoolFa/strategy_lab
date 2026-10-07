@@ -412,7 +412,7 @@ def run_forever(
     origin = resolve_origin_price(config, price)
     source = "手動輸入" if config.origin_price is not None else "啟動當下即時價"
     if isinstance(runner, ScaleInRunner):
-        lots = ", ".join(f"第{i}注 {p} × {q:g}" for i, (p, q) in enumerate(zip(runner.entry_prices, runner.lot_qtys), 1))
+        lots = ", ".join(f"第{i}注 {p} × {q:g}" for i, p, q in runner.active_lots)
         logger.info(f"啟動 strategy_lab live runner(分注):{lots};目前價格 = {price}(origin_price 不使用)")
         origin, source = None, None  # 分注策略不用 origin_price;sl_run 記 NULL
     else:

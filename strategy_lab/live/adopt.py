@@ -82,6 +82,8 @@ def plan_adoption(entry_prices: Sequence[float], lot_qtys: Sequence[float], exit
         taken = held if is_exit else entries
         match = None
         for i, (target, lot_qty) in enumerate(zip(targets, lot_qtys), 1):
+            if entry_prices[i - 1] <= 0:
+                continue  # 這一注沒在用(建倉價 0)
             if i not in taken and _close(qty, lot_qty, 1e-6) and _close(price, target, PRICE_TOLERANCE):
                 match = i
                 break
@@ -116,7 +118,7 @@ def apply_adoption(runner: Any, plan: AdoptionPlan, now: datetime) -> List[str]:
     """把對應結果裝進 ScaleInRunner(要在 runner.start() 之後、第一個 tick 之前)。不下單、不取消任何單。"""
     from strategy_lab.engine.scale_in_runner import Lot
 
-    runner.lots = [Lot(index=i + 1, entry_price=p, qty=q) for i, (p, q) in enumerate(zip(runner.entry_prices, runner.lot_qtys))]
+    runner.lots = [Lot(index=i, entry_price=p, qty=q) for i, p, q in runner.active_lots]
     runner._loop_event_base = len(runner.events)
     for h in plan.held:
         lot = runner.lots[h.lot - 1]

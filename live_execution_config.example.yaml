@@ -20,7 +20,7 @@ strategy_path: strategies/weekend_band_reversion.yaml  # 要跑哪個策略;也�
 symbol_override: null  # 不設就從策略 YAML 的 symbol 轉換成 Bybit 格式(如 "BTCUSDT")
 origin_price: null  # 起點價格:填數字 = 手動指定(例如週六 04:00 的價格);null = 用啟動當下的即時價格
 # ↑ 分注策略(scale_in: true)不用 origin_price,維持 null(保留日後用)
-entry_prices: null  # 分注策略每注的建倉價,依第一注、第二注、第三注…,例 [84900, 84500, 84000];非分注策略維持 null
+entry_prices: null  # 分注策略每注的建倉價,依第一注、第二注、第三注…,例 [84900, 84500, 84000];不用的注填 0(例 [84900, 84500, 0] 只做兩注,有第二注才有第三注);非分注策略維持 null
 
 dry_run: true   # 先觀察 log,不真的下單;確認邏輯沒問題後才考慮改 false
 testnet: true   # 先用 Bybit 測試網;確認沒問題後才考慮改 false 接正式環境

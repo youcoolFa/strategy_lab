@@ -256,3 +256,11 @@ class TestPreviewWarnings:
                      input_fn=lambda p: "no", print_fn=lambda *a: printed.append(" ".join(map(str, a))),
                      run_dir=tmp_path / "run", is_running_fn=lambda p, r: True, wait_fn=lambda p, r, t: None)
         assert "越過現價" not in "\n".join(printed)
+
+
+class TestOptionalLotsCli:
+    def test_zero_lot_is_shown_as_not_used_and_bad_pattern_refused(self, config_path, tmp_path):
+        code, out = TestCli().run_cli(config_path, tmp_path, ["entry_prices=1.2300,1.2294,0"], answer="no")
+        assert code == 0 and "第3注 不使用" in out
+        code, out = TestCli().run_cli(config_path, tmp_path, ["entry_prices=1.2300,0,1.2288"], answer="no")
+        assert code == 1 and "有第二注才有第三注" in out

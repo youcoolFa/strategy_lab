@@ -81,6 +81,8 @@ def build_scale_in_plan(
     entry_side, exit_side = ("Sell", "Buy") if direction == "short" else ("Buy", "Sell")
     levels = []
     for i, (raw_price, qty) in enumerate(zip(entry_prices, qtys)):
+        if raw_price <= 0:
+            continue  # 建倉價 0 = 沒有這一注
         price = _round(raw_price, limits, entry_side)
         take_profit = _round(exit.exit_price_for(price, direction), limits, exit_side)
         levels.append(LevelPlan(i + 1, price, qty, take_profit, _crosses(price, market.price, direction)))

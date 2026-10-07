@@ -153,11 +153,14 @@ def start_message(runner: Any, config: Any, symbol: str, price: float, now: date
     if params:
         lines.append(params)
     if _is_scale_in(runner):
-        for i, (p, q) in enumerate(zip(runner.entry_prices, runner.lot_qtys), 1):
+        for i, p, q in runner.active_lots:
             lines.append(f"第{i}注 {px(p)} × {q:g} → 平倉 {px(runner.exit.exit_price_for(p, runner.direction))}")
         lines.append("依序掛單:先掛第1注,前一注成交才掛下一注")
-        max_qty = round(sum(runner.lot_qtys), 8)
-        notional = sum(p * q for p, q in zip(runner.entry_prices, runner.lot_qtys))
+        unused = [i for i, p in enumerate(runner.entry_prices, 1) if p <= 0]
+        if unused:
+            lines.append("不使用:" + "、".join(f"第{i}注" for i in unused) + "(建倉價 0)")
+        max_qty = round(sum(q for _, _, q in runner.active_lots), 8)
+        notional = sum(p * q for _, p, q in runner.active_lots)
     else:
         lines.append(f"origin {px(runner.origin_price)}|數量 {runner.order_qty:g}")
         max_qty, notional = runner.order_qty, runner.order_qty * price
