@@ -5,12 +5,18 @@
 strategy_lab 是一個以 Python `dataclass` 為基礎的交易策略回測框架,採
 Plugin 化設計,將策略邏輯拆分為 entry(進場)、exit(出場)、
 time_window(排程時間窗)、kill_switch(市場行為觸發的終止條件,選填)
-四類獨立模組,並透過統一的狀態機驅動執行。系統不連接任何真實交易所,
-僅對內建的模擬交易所(paper broker)與合成價格產生器運作。
+四類獨立模組,並透過統一的狀態機驅動執行。核心(`broker/`、`plugins/`、
+`rules/`、`dsl/`、`engine/`)只對內建的模擬交易所(paper broker)與合成
+價格產生器運作,不連任何真實交易所。
 
-本文件對應目前(Phase 3:DSL,加上 Live 遷移 Stage 1)完成後的架構
-狀態,涵蓋元件關係、核心狀態機、單次執行流程、目前已知的設計限制,
-以及往真實環境遷移的進度(§6)。
+**現況(2026-10-09)**:另外疊加的 `strategy_lab/live/` 已經在 Bybit
+mainnet 小額帳戶實盤(分注策略 `scale_in_ladder`,preflight → 背景 daemon),
+交易紀錄寫進共用的 `trading` PostgreSQL(§6.21),Telegram 通知(§6.24);
+另有不用策略 YAML、只記帳的 free style(§6.27)與每注持倉計時(§6.28)。
+Live 層的元件關係見 §1.1。
+
+本文件涵蓋元件關係、核心狀態機、單次執行流程、目前已知的設計限制,
+以及往真實環境遷移的過程與現況(§6)。
 
 ## 1. 元件關係圖
 
@@ -89,6 +95,71 @@ flowchart TD
     F -->|"next(feed) 提供價格"| Demo
     Demo -->|"組裝 entry/exit/time_window/kill_switch<br/>建構 StrategyRunner"| Run
 ```
+
+### 1.1 Live 層(實盤)元件關係(2026-10-09)
+
+上圖是教學沙盒核心;實盤是另外疊加的 `strategy_lab/live/` 加上 `engine/` 的分注 runner、
+`storage/`(交易紀錄資料庫)與 `log/`(log + Telegram)。只有 `live/` 會連真實服務。
+
+```mermaid
+flowchart TD
+    subgraph Entry["入口(使用者在終端機執行)"]
+        PF["live/preflight.py<br/>啟動前預覽 + 輸入 yes"]
+        DM["live/daemon.py<br/>start / stop / detach / status"]
+        CT["live/control.py<br/>運作中改參數(請求檔)"]
+        FS["live/free_style.py<br/>start / stop / status(手動交易記帳)"]
+    end
+
+    subgraph Run["實盤主程式"]
+        MAIN["live/main.py<br/>build_runner_and_symbol / run_forever<br/>attach_notifications"]
+        CFG["live/config.py<br/>live_*.yaml 執行設定"]
+        ADOPT["live/adopt.py<br/>接手交易所上的持倉/掛單"]
+        ST["live/status.py<br/>啟動訊息 / 每小時狀態"]
+    end
+
+    subgraph Engine["engine/"]
+        SR["runner.py StrategyRunner"]
+        SIR["scale_in_runner.py ScaleInRunner<br/>分注:依序掛單、每注平倉"]
+        EV["events.py EventTracker<br/>部位 0→0 = 一輪"]
+        HT["hold_time.py<br/>每注持倉計時 / expected_hold"]
+    end
+
+    subgraph Exchange["交易所"]
+        LB["live/broker.py LiveBroker<br/>(dry_run 開關、精度修正)"]
+        BC["live/bybit_client.py BybitClient<br/>pybit + 重試"]
+        BY[("Bybit mainnet")]
+    end
+
+    subgraph Store["storage/ + log/"]
+        REC["storage/recorder.py TradeRecorder"]
+        DB[("trading PostgreSQL :5434<br/>sl_run / sl_order / sl_fill / sl_event")]
+        TG["log/ logger_setup + telegram_notifier<br/>@fa_strategy_lab_bot"]
+    end
+
+    PF -->|"使用者 yes"| DM --> MAIN
+    CT -.->|"請求檔,tick 之間套用"| MAIN
+    CFG --> MAIN
+    MAIN --> SIR
+    SIR -->|繼承| SR
+    SR --> EV
+    SIR --> HT
+    MAIN --> ADOPT --> SIR
+    SR -->|下單 / 查單| LB --> BC --> BY
+    SR -->|on_order / on_event| REC --> DB
+    REC -->|成交明細、手續費| BC
+    MAIN --> ST --> TG
+    SR -->|WARNING 以上| TG
+    FS -->|"只讀:訂單 / 成交"| BC
+    FS -->|寫入| REC
+```
+
+**Live 層職責**:
+- **preflight → daemon**:preflight 顯示估算、使用者自己輸入 yes 才啟動背景 daemon(Claude 不替使用者輸入)。
+- **main.run_forever**:每 `poll_interval_seconds` 查價、跑一次 tick;tick 之間套用 `control.py` 的改參數請求;
+  結束時寫 `sl_run` 總結、發 🟣 Telegram。Mac 睡眠時 process 被凍結,tick 會延後(見 TODO)。
+- **ScaleInRunner**:分注策略,每注各自掛平倉單;每注持倉計時(§6.28)。
+- **TradeRecorder**:每張單 / 每輪 / 每筆成交寫進 `trading` 資料庫;連不上改寫 `logs/db_pending/`,之後 backfill。
+- **free_style**:不經過 runner;只讀 Bybit,stop 時用同一套 `EventTracker` 切輪,經 TradeRecorder 寫入(§6.27)。
 
 **元件職責:**
 
@@ -1247,8 +1318,8 @@ dataset 30(`bybit_wallet_snapshot`)改指向它,另外新增 dataset 31–34(四
 
 | 表 | 一列 | 主鍵 | 寫入時機 |
 |---|---|---|---|
-| `sl_run` | 每次啟動 | `run_id`(uuid) | 啟動;結束時補結束原因與總結。被啟動檢查擋下(`refused_leftover`)、當掉(`crash`)也有一列 |
-| `sl_order` | 每張單 | Bybit `orderId` | 下單、偵測到成交/取消時;runner 標出用途(entry/exit/forced_close)與所屬 event |
+| `sl_run` | 每次啟動 | `run_id`(uuid) | 啟動;結束時補結束原因與總結。被啟動檢查擋下(`refused_leftover`)、當掉(`crash`)也有一列;free style 的 `strategy_name = "free style"`(§6.27) |
+| `sl_order` | 每張單 | Bybit `orderId` | 下單、偵測到成交/取消時;runner 標出用途(entry/exit/forced_close;free style 為 manual)與所屬 event;分注平倉單另記 `hold_seconds`(§6.28) |
 | `sl_fill` | 每筆成交/資金費 | Bybit `execId` | 每個 event 完成時同步該期間成交明細;收尾時整段再同步一次 |
 | `sl_event` | 部位 0 → 0 一輪 | `run_id` + `event_index` | event 完成時;收尾同步後重算 |
 
@@ -1261,6 +1332,9 @@ password/token 的欄位)、啟動前 preflight 確認過的估算、Python 直�
 event。`sl_event.net_pnl = realized_pnl − fees − funding`。
 
 **寫入一律 upsert**(自然主鍵 + `session.merge`),重送不會重複。
+
+**欄位中文說明**(2026-10-09):每張表、每個欄位的說明寫在 `storage/models.py` 的 `comment=`,`setup_db` 用
+`COMMENT ON` 寫進資料庫;在 Superset SQL Lab 用 `col_description()` 查,或看 dataset 的欄位描述(§6.27)。
 
 **dry-run 不寫**;資料庫掛掉不影響交易:啟動時連不上或寫入中途失敗,這次執行
 剩下的紀錄改寫 `logs/db_pending/<run_id>.jsonl`,不再嘗試連線(避免拖慢交易
