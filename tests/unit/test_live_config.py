@@ -40,8 +40,9 @@ class TestExecutionConfigDefaults:
         # 暫時沒有東西可以自動填,見 dsl/order_config.py。
         assert ExecutionConfig().account_value is None
 
-    def test_strategy_path_defaults_to_weekend_mean_reversion(self):
-        assert ExecutionConfig().strategy_path == "strategies/weekend_mean_reversion.yaml"
+    def test_strategy_path_defaults_to_scale_in_ladder(self):
+        """weekend_mean_reversion 已刪除(2026-10-10),預設改成主力策略 scale_in_ladder"""
+        assert ExecutionConfig().strategy_path == "strategies/scale_in_ladder.yaml"
 
     def test_origin_price_defaults_to_none(self):
         # None = 用啟動當下的即時價格;要手動指定(例如週六 04:00 的價格)

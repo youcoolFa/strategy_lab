@@ -158,7 +158,12 @@ def prepare_config(project_root: Path, strategy_path: str, symbol: str, settings
     if info["scale_in"] and params.get("distance") is not None:
         unit = (info.get("distance") or {}).get("unit", "pct")
         changes["distance"] = {"value": float(params["distance"]), "unit": unit}
-    if "loop" in params:
+    if info.get("band") and params.get("band") is not None:  # 區間策略的買賣 %(2026-10-10)
+        from strategy_lab.plugins.entry.band import BandEntry
+
+        band = BandEntry(buy_pct=params["band"].get("buy_pct"), sell_pct=params["band"].get("sell_pct"))  # 驗證
+        changes["band"] = {"buy_pct": band.buy_pct, "sell_pct": band.sell_pct}
+    if "loop" in params and not info.get("band"):  # 區間策略固定做到收尾,不寫 loop
         loop = params["loop"]
         if loop is not None and (isinstance(loop, bool) or not isinstance(loop, int) or loop < 0):
             raise ValueError(f"loop 要是 0 以上的整數或 null,收到 {loop!r}")
@@ -191,7 +196,9 @@ def list_strategies(project_root: Path = PROJECT_ROOT) -> List[Path]:
 def strategy_info(path: Path) -> Dict[str, Any]:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     weights = ((raw.get("entry") or {}).get("params") or {}).get("weights") or []
+    entry_params = (raw.get("entry") or {}).get("params") or {}
     return {"name": raw.get("name"), "direction": raw.get("direction", "long"), "scale_in": bool(raw.get("scale_in")),
+            "band": bool(raw.get("band")), "buy_pct": entry_params.get("buy_pct"), "sell_pct": entry_params.get("sell_pct"),
             "lots": len(weights) if raw.get("scale_in") else 0, "loop": raw.get("loop"),
             "expected_hold": raw.get("expected_hold"),
             "distance": ((raw.get("exit") or {}).get("params") or {}).get("distance")}

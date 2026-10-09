@@ -93,7 +93,7 @@ class TestOverridesAreUsedOnStartup:
     def test_distance_override_on_a_non_scale_in_strategy_is_an_error(self):
         config = ExecutionConfig(strategy_overrides={"exit_distance": {"value": 0.4, "unit": "pct"}})
         with pytest.raises(ValueError, match="分注"):
-            apply_strategy_overrides(load_strategy("strategies/weekend_mean_reversion.yaml"), config)
+            apply_strategy_overrides(load_strategy("strategies/mean_reversion_breakout_guard.yaml"), config)
 
 
 def scale_runner():
@@ -196,7 +196,7 @@ class TestRunForeverAppliesRequests:
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
         config_file = tmp_path / "live_wmr.yaml"
-        config_file.write_text("strategy_path: strategies/weekend_mean_reversion.yaml\ndry_run: true\n", encoding="utf-8")
+        config_file.write_text("strategy_path: strategies/mean_reversion_breakout_guard.yaml\ndry_run: true\n", encoding="utf-8")
         config = load_execution_config(config_path=config_file)
         config.poll_interval_seconds = 0
         runner, symbol = build_runner_and_symbol(config)
@@ -264,3 +264,32 @@ class TestOptionalLotsCli:
         assert code == 0 and "第3注 不使用" in out
         code, out = TestCli().run_cli(config_path, tmp_path, ["entry_prices=1.2300,0,1.2288"], answer="no")
         assert code == 1 and "有第二注才有第三注" in out
+
+
+class TestBandOverride:
+    """區間策略的買賣 %(2026-10-10):頁面寫進各自設定檔的 strategy_overrides.band,不改共用的策略 YAML。"""
+
+    def test_band_override_replaces_buy_and_sell_pct(self):
+        config = ExecutionConfig(strategy_overrides={"band": {"buy_pct": 0.3, "sell_pct": 0.5}})
+        strategy = apply_strategy_overrides(load_strategy("strategies/weekend_band_reversion.yaml"), config)
+        assert (strategy.entry.buy_pct, strategy.entry.sell_pct) == (0.3, 0.5)
+
+    def test_band_override_on_a_non_band_strategy_is_an_error(self):
+        config = ExecutionConfig(strategy_overrides={"band": {"buy_pct": 0.3, "sell_pct": 0.5}})
+        with pytest.raises(ValueError, match="區間"):
+            apply_strategy_overrides(load_strategy("strategies/scale_in_ladder.yaml"), config)
+
+    def test_bad_band_values_are_rejected(self):
+        config = ExecutionConfig(strategy_overrides={"band": {"buy_pct": 0, "sell_pct": 0.5}})
+        with pytest.raises(ValueError, match="buy_pct"):
+            apply_strategy_overrides(load_strategy("strategies/weekend_band_reversion.yaml"), config)
+
+
+class TestWriteBackBand:
+    def test_band_pct_is_written_into_strategy_overrides(self, config_path):
+        control.write_back(config_path, {"loop": 3})
+        control.write_back(config_path, {"band": {"buy_pct": 0.3, "sell_pct": 0.5}})
+        text = config_path.read_text(encoding="utf-8")
+        assert text.count("strategy_overrides:") == 1
+        assert yaml.safe_load(text)["strategy_overrides"] == {"loop": 3, "band": {"buy_pct": 0.3, "sell_pct": 0.5}}
+        assert "# 真實下單開關" in text  # 其他註解保留

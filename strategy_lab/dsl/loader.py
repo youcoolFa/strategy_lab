@@ -45,6 +45,7 @@ class ComposedStrategy:
     direction: Literal["long", "short"] = "long"
     loop: Optional[int] = 0
     scale_in: bool = False
+    band: bool = False  # 區間策略(engine/band_runner.py),2026-10-10
     expected_hold: Optional[timedelta] = None  # 預估持倉時間(分注策略),見 engine/hold_time.py
 
 
@@ -62,6 +63,7 @@ def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
     entry = registry_get("entry", definition.entry.type)(**definition.entry.params)
     exit = registry_get("exit", definition.exit.type)(**definition.exit.params)
     _validate_scale_in_flag(definition.scale_in, entry, exit)
+    _validate_band(definition, entry, exit)
     expected_hold = parse_expected_hold(definition.expected_hold)
     if expected_hold is not None and not definition.scale_in:
         raise ValueError("expected_hold(預估持倉時間)目前只支援分注策略(scale_in: true)")
@@ -76,6 +78,7 @@ def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
         direction=definition.direction,
         loop=definition.loop,
         scale_in=definition.scale_in,
+        band=definition.band,
         expected_hold=expected_hold,
     )
 
@@ -116,3 +119,19 @@ def _validate_kill_switch_fits_time_window(kill_switch: Optional[KillSwitch], ti
             f"time_window 的跨度({span}),should_cleanup() 一定先觸發,"
             "kill_switch 永遠不會有機會生效(見 docs/ARCHITECTURE.md §4.6.1)"
         )
+
+
+def _validate_band(definition: StrategyDefinition, entry: EntrySignal, exit: ExitSignal) -> None:
+    """區間策略(band: true,2026-10-10):entry/exit 都要是 band plugin、direction 要是 both
+    (上下同時掛單)、loop 要是 null(一直做到時間窗結束);反過來 direction: both 只能用在區間策略。"""
+    band = definition.band
+    for kind, plugin in (("entry", entry), ("exit", exit)):
+        if getattr(plugin, "band", False) != band:
+            raise ValueError(f"band: {str(band).lower()} 跟 {kind} plugin {type(plugin).__name__} 不一致"
+                             "(區間策略的 entry/exit 都要用 type: band,其他策略不能用)")
+    if band and definition.direction != "both":
+        raise ValueError(f"區間策略(band: true)的 direction 要寫 both(上下同時掛單),目前是 {definition.direction}")
+    if not band and definition.direction == "both":
+        raise ValueError("direction: both 只能用在區間策略(band: true)")
+    if band and definition.loop is not None:
+        raise ValueError(f"區間策略的 loop 要是 null(一直做到時間窗結束),目前是 {definition.loop}")

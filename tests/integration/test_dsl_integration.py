@@ -14,7 +14,7 @@ STRATEGIES_DIR = Path(__file__).resolve().parents[2] / "strategies"
 
 class TestWeekendStrategyFromYaml:
     def test_entry_fill_exit_fill_then_cleanup(self):
-        strategy = load_strategy(STRATEGIES_DIR / "weekend_mean_reversion.yaml")
+        strategy = load_strategy(STRATEGIES_DIR / "mean_reversion_breakout_guard.yaml")
         runner = StrategyRunner(
             entry=strategy.entry,
             exit=strategy.exit,

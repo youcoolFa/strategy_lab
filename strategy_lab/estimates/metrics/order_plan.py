@@ -19,6 +19,8 @@ class OrderPlanMetric:
         rows = [Row("price", "現價", f"{market.price}", market.price)]
         if plan.scale_in:
             return MetricResult(self.title, rows + self._scale_in_rows(plan, market.price, entry_side, exit_side))
+        if plan.band:
+            return MetricResult(self.title, rows + self._band_rows(plan, market.price))
         rows.append(
             Row("origin", "origin", f"{plan.origin_price}({plan.origin_source}),離現價 {_pct(plan.origin_price, market.price)}", plan.origin_price)
         )
@@ -71,3 +73,24 @@ class OrderPlanMetric:
         rows.append(Row("stop_loss", "停損", "無停損"))
         rows.append(Row("notional", "全部成交時", f"數量 {plan.total_qty:g} / 名義價值 {plan.notional:.2f} USDT", plan.notional))
         return rows
+
+    @staticmethod
+    def _band_rows(plan, price):
+        """區間策略(2026-10-10):上下各一張,成交就在對面補一張。"""
+        buy, sell = plan.entry_price, plan.band_sell_price
+        rows = [
+            Row("origin", "origin", f"{plan.origin_price}({plan.origin_source}),離現價 {_pct(plan.origin_price, price)}", plan.origin_price),
+            Row("band_buy", "買單", f"買 {buy}(離現價 {_pct(buy, price)})× {plan.qty}", buy),
+            Row("band_sell", "賣單", f"賣 {sell}(離現價 {_pct(sell, price)})× {plan.qty}", sell),
+            Row("band_rule", "規則",
+                f"成交一張就在對面價位補一張同數量的單;第一張成交後持倉在 ±{plan.qty:g} 之間切換,直到收尾"),
+        ]
+        if plan.entry_crosses_market:
+            rows.append(Row("entry_crosses_market", "⚠ 掛單",
+                            "現價已經在區間外,有一張一掛出去會立刻吃單成交(origin 可能過期)", warning=True))
+        else:
+            rows.append(Row("entry_crosses_market", "掛單", "兩張都在交易所上等價格碰到(maker)"))
+        rows.append(Row("stop_loss", "停損", "無停損"))
+        rows.append(Row("notional", "數量 / 名義價值", f"{plan.qty} / {plan.notional:.2f} USDT(最大部位 ±{plan.qty:g})", plan.notional))
+        return rows
+

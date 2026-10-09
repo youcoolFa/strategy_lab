@@ -270,3 +270,72 @@ def test_running_row_detach_only_with_DETACH_typed(fake):
     at.text_input(key=f"detach_typed_{c}").input("DETACH")
     at.button(key=f"detach_btn_{c}").click().run()
     assert ("detach", "live_execution_config.yaml") in calls and not at.exception
+
+
+# ---------------------------------------------------------------- 區間策略(2026-10-10)
+
+BAND_CONFIG = """strategy_path: strategies/weekend_band_reversion.yaml
+symbol_override: XRPUSDT
+dry_run: false
+testnet: false
+position_sizing:
+  mode: fixed_qty
+  value: 10
+strategy_overrides:
+  band: {buy_pct: 0.3, sell_pct: 0.5}
+"""
+BAND_ROW = {"kind": "strategy", "config": "live_weekend_band_reversion_xrpusdt", "symbol": "XRPUSDT",
+            "strategy": "weekend_band_reversion", "mode": "🔴 實盤", "started_at": NOW}
+
+
+def test_band_form_asks_buy_and_sell_pct_only(fake):
+    calls, _ = fake
+    at = run()
+    at.radio(key="new_strategy").set_value("weekend_band_reversion").run()
+    at.text_input(key="new_symbol").input("xrpusdt").run()
+    keys = {w.key for w in list(at.text_input) + list(at.number_input) + list(at.checkbox)}
+    assert {"new_buy_pct", "new_sell_pct"} <= keys
+    assert not {"new_prices", "new_loop", "new_adopt", "new_distance"} & keys
+    at.number_input(key="new_buy_pct").set_value(0.3).run()
+    at.number_input(key="new_sell_pct").set_value(0.5).run()
+    at.button(key="new_prepare").click().run()
+    [(_, strategy, symbol, settings, params)] = [c for c in calls if c[0] == "prepare"]
+    assert strategy == "strategies/weekend_band_reversion.yaml" and symbol == "XRPUSDT"
+    assert params == {"band": {"buy_pct": 0.3, "sell_pct": 0.5}}
+    assert "adopt_existing_position" not in settings
+    assert not at.exception
+
+
+def test_running_band_row_offers_stop_only(fake):
+    _, state = fake
+    root = actions_root(fake)
+    (root / "live_weekend_band_reversion_xrpusdt.yaml").write_text(BAND_CONFIG, encoding="utf-8")
+    state["active"] = [BAND_ROW]
+    at = run()
+    c = BAND_ROW["config"]
+    keys = set(buttons(at))
+    assert f"stop_btn_{c}" in keys
+    assert f"ctl_preview_{c}" not in keys and f"detach_btn_{c}" not in keys
+    assert not at.exception
+
+
+def actions_root(fake):
+    return data.project_root()
+
+
+def test_overview_shows_start_estimated_end_and_length_to_the_minute(fake, monkeypatch):
+    """2026-10-10 使用者要求:總覽要有策略啟動時間、預估結束時間、預估長度;時間只到分鐘。"""
+    import re
+    from zoneinfo import ZoneInfo
+
+    hkt = ZoneInfo("Asia/Hong_Kong")
+    started = datetime(2026, 10, 7, 4, 16, 41, tzinfo=hkt)
+    monkeypatch.setattr(data, "unfinished_by_symbol", lambda url: {"SUIUSDT": {
+        "symbol": "SUIUSDT", "strategy_name": "scale_in_ladder", "git_commit": "f251f84399", "started_at": started}})
+    at = run()
+    df = at.dataframe[0].value
+    row = df[df["設定檔"] == "live_execution_config"].iloc[0]
+    assert row["啟動時間"] == "10-07 04:16"
+    assert row["預估結束"] == "10-12 05:55"
+    assert row["預估長度"] == "5 天 1 小時 39 分"
+    assert not any(re.search(r"\d\d:\d\d:\d\d", str(v)) for v in row.values)  # 沒有秒

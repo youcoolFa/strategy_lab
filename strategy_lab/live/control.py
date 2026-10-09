@@ -123,7 +123,9 @@ def write_back(config_path: Path, changes: Dict[str, Any]) -> None:
         overrides["loop"] = changes["loop"]
     if "distance" in changes:
         overrides["exit_distance"] = dict(changes["distance"])
-    if "loop" in changes or "distance" in changes:
+    if "band" in changes:  # 區間策略的買賣 %(2026-10-10,頁面寫的;運作中不能改)
+        overrides["band"] = {"buy_pct": float(changes["band"]["buy_pct"]), "sell_pct": float(changes["band"]["sell_pct"])}
+    if "loop" in changes or "distance" in changes or "band" in changes:
         text = _remove_top_level_block(text, "strategy_overrides").rstrip("\n")
         block = [_OVERRIDES_HEADER]
         if "loop" in overrides:
@@ -131,12 +133,15 @@ def write_back(config_path: Path, changes: Dict[str, Any]) -> None:
         if "exit_distance" in overrides:
             d = overrides["exit_distance"]
             block.append(f"  exit_distance: {{value: {d['value']:g}, unit: {d['unit']}}}")
+        if "band" in overrides:
+            band = overrides["band"]
+            block.append(f"  band: {{buy_pct: {band['buy_pct']:g}, sell_pct: {band['sell_pct']:g}}}")
         text += "\n\n" + "\n".join(block) + "\n"
 
     check = yaml.safe_load(text) or {}
     if "entry_prices" in changes and [float(p) for p in check.get("entry_prices") or []] != list(changes["entry_prices"]):
         raise ValueError(f"無法安全地改寫 {config_path} 的 entry_prices,請手動修改")
-    if ("loop" in changes or "distance" in changes) and check.get("strategy_overrides") != overrides:
+    if ("loop" in changes or "distance" in changes or "band" in changes) and check.get("strategy_overrides") != overrides:
         raise ValueError(f"無法安全地改寫 {config_path} 的 strategy_overrides,請手動修改")
     tmp = config_path.with_suffix(config_path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")

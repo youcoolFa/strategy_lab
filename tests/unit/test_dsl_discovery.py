@@ -24,7 +24,7 @@ class TestListStrategyFiles:
 
 class TestPromptStrategyChoice:
     def _files(self, tmp_path):
-        a = tmp_path / "weekend_mean_reversion.yaml"
+        a = tmp_path / "weekend_band_reversion.yaml"
         b = tmp_path / "ma_crossover_bracket.yaml"
         a.write_text("")
         b.write_text("")
@@ -52,7 +52,7 @@ class TestPromptStrategyChoice:
         files = self._files(tmp_path)
         printed = []
         prompt_strategy_choice(files, input_fn=lambda _: "1", print_fn=printed.append)
-        assert "  1. weekend_mean_reversion" in printed
+        assert "  1. weekend_band_reversion" in printed
         assert "  2. ma_crossover_bracket" in printed
 
     def test_empty_file_list_raises_value_error(self):

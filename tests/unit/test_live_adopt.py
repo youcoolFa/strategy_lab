@@ -186,7 +186,7 @@ class TestDetach:
 
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=True, poll_interval_seconds=0)
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", dry_run=True, poll_interval_seconds=0)
         runner, symbol = build_runner_and_symbol(config)
         clock = {"now": NOW, "n": 0}
 

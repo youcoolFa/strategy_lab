@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from strategy_lab.dsl.schema import PluginSpec, StrategyDefinition
 
 VALID_DEFINITION = {
-    "name": "weekend_mean_reversion",
+    "name": "weekend_example",
     "symbol": "BTC/USDT",
     "entry": {"type": "deviation_from_reference", "params": {"deviation_pct": 0.75}},
     "exit": {"type": "return_to_reference", "params": {}},
@@ -29,7 +29,7 @@ class TestPluginSpec:
 class TestStrategyDefinition:
     def test_valid_full_definition_parses(self):
         definition = StrategyDefinition(**VALID_DEFINITION)
-        assert definition.name == "weekend_mean_reversion"
+        assert definition.name == "weekend_example"
         assert definition.entry.type == "deviation_from_reference"
         assert definition.entry.params == {"deviation_pct": 0.75}
         assert definition.kill_switch is None
@@ -114,3 +114,14 @@ class TestScaleInFlag:
 
     def test_true(self):
         assert self._definition(scale_in=True).scale_in is True
+
+
+class TestBand:
+    """區間策略(2026-10-10):band: true + direction: both(上下同時掛單)。"""
+
+    def test_band_defaults_to_false(self):
+        assert StrategyDefinition(**VALID_DEFINITION).band is False
+
+    def test_band_true_with_direction_both(self):
+        definition = StrategyDefinition(**{**VALID_DEFINITION, "band": True, "direction": "both"})
+        assert definition.band is True and definition.direction == "both"

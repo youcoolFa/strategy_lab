@@ -178,3 +178,50 @@ class TestProjectRoot:
 
     def test_default_is_the_real_project(self):
         assert data.project_root() == data.PROJECT_ROOT
+
+
+class TestSchedule:
+    """總覽的「啟動時間 / 預估結束 / 預估長度」(2026-10-10):預估結束 = 策略時間窗的強制收尾時間。"""
+
+    def test_scale_in_ladder_started_on_wednesday_ends_monday_0555(self, tmp_path):
+        from zoneinfo import ZoneInfo
+
+        hkt = ZoneInfo("Asia/Hong_Kong")
+        cfg = tmp_path / "live_x.yaml"
+        cfg.write_text("strategy_path: strategies/scale_in_ladder.yaml\n")
+        start = datetime(2026, 10, 7, 4, 16, 41, tzinfo=hkt)
+        s = data.schedule(cfg, start)
+        assert s["start"] == start
+        assert s["end"] == datetime(2026, 10, 12, 5, 55, tzinfo=hkt)
+        # 畫面只到分鐘:長度用截到分鐘的啟動時間算,畫面上 04:16 → 05:55 的心算結果才對得上
+        assert s["duration"] == timedelta(days=5, hours=1, minutes=39)
+
+    def test_start_time_from_the_db_is_utc_and_must_be_read_as_hkt(self, tmp_path):
+        """資料庫存的是 UTC(10-06 20:16 UTC = 10-07 04:16 HKT);時間窗是照 HKT 算的,
+        直接拿 UTC 去算會差 8 小時(2026-10-10 真實資料踩到:顯示 10-12 13:55)。"""
+        from zoneinfo import ZoneInfo
+
+        cfg = tmp_path / "live_x.yaml"
+        cfg.write_text("strategy_path: strategies/scale_in_ladder.yaml\n")
+        start_utc = datetime(2026, 10, 6, 20, 16, 41, tzinfo=timezone.utc)
+        s = data.schedule(cfg, start_utc)
+        assert s["end"] == datetime(2026, 10, 12, 5, 55, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        assert data.fmt_time(s["end"]) == "10-12 05:55"
+        assert data.fmt_duration(s["duration"]) == "5 天 1 小時 39 分"
+
+    def test_unknown_start_or_broken_config_gives_none(self, tmp_path):
+        cfg = tmp_path / "live_x.yaml"
+        cfg.write_text("strategy_path: strategies/does_not_exist.yaml\n")
+        assert data.schedule(cfg, None) is None
+        assert data.schedule(cfg, NOW) is None
+
+
+class TestMinuteFormatting:
+    def test_times_and_durations_show_minutes_only(self):
+        from zoneinfo import ZoneInfo
+
+        t = datetime(2026, 10, 12, 5, 55, 37, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        assert data.fmt_time(t) == "10-12 05:55"
+        assert data.fmt_time(None) == "—"
+        assert data.fmt_duration(timedelta(days=4, hours=1, minutes=38, seconds=59)) == "4 天 1 小時 38 分"
+        assert data.fmt_duration(None) == "—"

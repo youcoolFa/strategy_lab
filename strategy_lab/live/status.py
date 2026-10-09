@@ -27,7 +27,7 @@ from strategy_lab.engine.hold_time import format_hold
 from strategy_lab.engine.runner import RunState
 
 DEFAULT_STATUS_INTERVAL_MINUTES = 60
-_PURPOSE_LABELS = {"entry": "進場", "exit": "平倉", "forced_close": "強制平倉"}
+_PURPOSE_LABELS = {"entry": "進場", "exit": "平倉", "forced_close": "強制平倉", "band": "區間"}
 _STOP_REASONS = {
     "window_cleanup": "窗口到期收尾",
     "kill_switch": "觸發 kill switch",
@@ -162,6 +162,12 @@ def start_message(runner: Any, config: Any, symbol: str, price: float, now: date
             lines.append("不使用:" + "、".join(f"第{i}注" for i in unused) + "(建倉價 0)")
         max_qty = round(sum(q for _, _, q in runner.active_lots), 8)
         notional = sum(p * q for _, p, q in runner.active_lots)
+    elif getattr(runner.entry, "band", False):
+        buy, sell = runner.entry.prices(runner.origin_price)
+        q = runner.order_qty
+        lines.append(f"origin {px(runner.origin_price)}|買 {px(buy)} × {q:g}|賣 {px(sell)} × {q:g}")
+        lines.append(f"成交一張就在對面價位補一張同數量的單;持倉在 ±{q:g} 之間切換,直到收尾")
+        max_qty, notional = q, q * price
     else:
         lines.append(f"origin {px(runner.origin_price)}|數量 {runner.order_qty:g}")
         max_qty, notional = runner.order_qty, runner.order_qty * price

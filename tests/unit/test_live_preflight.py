@@ -184,3 +184,48 @@ class TestOptionalLots:
         code, out, started = run(tmp_path, FakeClient(price=84950.0), "yes", monkeypatch,
                                  config=write_scale_config(tmp_path, entry_prices="[84900, 0, 84700]"))
         assert code == 1 and started == [] and "有第二注才有第三注" in out
+
+
+BAND_YAML = """name: band_example
+symbol: BTC/USDT
+direction: both
+loop: null
+scale_in: false
+band: true
+entry:
+  type: band
+  params: {buy_pct: 0.1, sell_pct: 0.2}
+exit:
+  type: band
+  params: {}
+time_window:
+  type: weekly_window
+  params: {end_weekday: 0, end_time: "06:00"}
+"""
+
+
+def write_band_config(tmp_path, origin="null", adopt="false"):
+    strategy = tmp_path / "band.yaml"
+    strategy.write_text(BAND_YAML)
+    path = tmp_path / "live_band.yaml"
+    path.write_text(f"strategy_path: {strategy}\nsymbol_override: BTCUSDT\norigin_price: {origin}\n"
+                    "dry_run: false\ntestnet: false\nposition_sizing:\n  mode: fixed_qty\n  value: 0.001\n"
+                    f"adopt_existing_position: {adopt}\n")
+    return path
+
+
+class TestBandPreflight:
+    """區間策略(2026-10-10):預覽列出上下兩張單與規則;交易所上有殘留就拒絕(不支援接手)。"""
+
+    def test_shows_both_orders_and_starts_after_yes(self, tmp_path, monkeypatch):
+        code, out, started = run(tmp_path, FakeClient(price=100000.0), "yes", monkeypatch,
+                                 config=write_band_config(tmp_path))
+        assert code == 0 and len(started) == 1
+        assert "買 99900" in out and "賣 100200" in out  # origin = 現價 100000
+        assert "對面" in out and "每次穿過區間" in out and "多單或空單" in out
+
+    def test_leftovers_are_refused_even_with_adopt(self, tmp_path, monkeypatch):
+        client = FakeClient(price=100000.0, position=0.001)
+        code, out, started = run(tmp_path, client, "yes", monkeypatch, config=write_band_config(tmp_path, adopt="true"))
+        assert code == 1 and started == []
+        assert "區間策略" in out and "接手" in out

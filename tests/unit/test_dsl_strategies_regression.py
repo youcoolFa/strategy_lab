@@ -15,16 +15,10 @@ from strategy_lab.plugins.time_window.weekly_window import WeeklyWindow
 STRATEGIES_DIR = Path(__file__).resolve().parents[2] / "strategies"
 
 
-class TestWeekendMeanReversionYaml:
-    def test_matches_demo_weekend_phase1_hand_composed_version(self):
-        strategy = load_strategy(STRATEGIES_DIR / "weekend_mean_reversion.yaml")
-        assert strategy.entry == RestingDeviationFromReferenceEntry(deviation_pct=0.75)
-        assert strategy.exit == RestingReturnToReferenceExit()
-        assert strategy.time_window == WeeklyWindow()  # 跟 demo 一樣全用預設值
-
-    def test_direction_is_set_explicitly_in_yaml(self):
-        strategy = load_strategy(STRATEGIES_DIR / "weekend_mean_reversion.yaml")
-        assert strategy.direction == "long"
+class TestWeekendMeanReversionIsDeleted:
+    def test_weekend_mean_reversion_yaml_no_longer_exists(self):
+        """使用者要求刪除(2026-10-10);同一套進出場邏輯仍在 mean_reversion_breakout_guard.yaml(多一個 kill_switch)"""
+        assert not (STRATEGIES_DIR / "weekend_mean_reversion.yaml").exists()
 
 
 class TestMACrossoverBracketYaml:
@@ -36,9 +30,8 @@ class TestMACrossoverBracketYaml:
 
 
 class TestMeanReversionBreakoutGuardYaml:
-    def test_matches_weekend_mean_reversion_entry_exit_time_window(self):
-        """進出場邏輯跟 weekend_mean_reversion.yaml 完全一樣,差別只在
-        多了 kill_switch。"""
+    def test_entry_exit_time_window(self):
+        """一啟動就掛單的週末均值回歸(原本的 weekend_mean_reversion,已刪除)加上 kill_switch。"""
         strategy = load_strategy(STRATEGIES_DIR / "mean_reversion_breakout_guard.yaml")
         assert strategy.entry == RestingDeviationFromReferenceEntry(deviation_pct=0.75)
         assert strategy.exit == RestingReturnToReferenceExit()
@@ -52,15 +45,18 @@ class TestMeanReversionBreakoutGuardYaml:
 
 
 class TestWeekendBandReversionYaml:
-    def test_entry_below_origin_exit_offset_above_origin(self):
-        from strategy_lab.plugins.exit.resting_offset_from_reference import RestingOffsetFromReferenceExit
+    def test_is_the_two_sided_band_strategy(self):
+        """2026-10-10 改版:上下各掛一張(買、賣的 % 分開設),成交一張就在對面補一張,
+        持倉在 ±1 之間切換直到收尾;direction both、loop null。"""
+        from strategy_lab.plugins.entry.band import BandEntry
+        from strategy_lab.plugins.exit.band import BandExit
 
-        # deviation_pct/offset_pct/direction 是使用者會實際調的參數,只驗證結構。
         strategy = load_strategy(STRATEGIES_DIR / "weekend_band_reversion.yaml")
-        assert isinstance(strategy.entry, RestingDeviationFromReferenceEntry)
-        assert isinstance(strategy.exit, RestingOffsetFromReferenceExit)
+        assert strategy.band is True and strategy.scale_in is False
+        assert isinstance(strategy.entry, BandEntry) and isinstance(strategy.exit, BandExit)
+        assert strategy.entry.buy_pct > 0 and strategy.entry.sell_pct > 0
+        assert strategy.direction == "both" and strategy.loop is None
         assert strategy.time_window == WeeklyWindow()
-        assert strategy.direction in ("long", "short")
 
 
 class TestEveryStrategyDeclaresLoop:
@@ -73,8 +69,8 @@ class TestEveryStrategyDeclaresLoop:
         for path in sorted(STRATEGIES_DIR.glob("*.yaml")):
             assert "loop" in yaml.safe_load(path.read_text()), path.name
 
-    def test_weekend_mean_reversion_loops_without_limit(self):
-        assert load_strategy(STRATEGIES_DIR / "weekend_mean_reversion.yaml").loop is None
+    def test_mean_reversion_breakout_guard_loops_without_limit(self):
+        assert load_strategy(STRATEGIES_DIR / "mean_reversion_breakout_guard.yaml").loop is None
 
 
 class TestScaleIn:
@@ -130,7 +126,7 @@ class TestExpectedHold:
     def test_only_for_scale_in_strategies(self, tmp_path):
         import pytest
 
-        src = (STRATEGIES_DIR / "weekend_mean_reversion.yaml").read_text()
+        src = (STRATEGIES_DIR / "mean_reversion_breakout_guard.yaml").read_text()
         path = tmp_path / "w.yaml"
         path.write_text(src + "\nexpected_hold:\n  value: 4\n  unit: hours\n")
         with pytest.raises(ValueError, match="expected_hold"):

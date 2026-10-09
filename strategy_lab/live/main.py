@@ -152,9 +152,16 @@ def apply_strategy_overrides(strategy: Any, config: ExecutionConfig) -> Any:
     """套用 live_execution_config.yaml 的 strategy_overrides(運作中用 live/control.py 改過、寫回的參數),
     讓重新啟動和 preflight 都用改過的值。只有 loop 與分注策略的平倉距離可以覆蓋。"""
     overrides = config.strategy_overrides or {}
-    unknown = sorted(set(overrides) - {"loop", "exit_distance"})
+    unknown = sorted(set(overrides) - {"loop", "exit_distance", "band"})
     if unknown:
-        raise ValueError(f"strategy_overrides 不認得 {unknown};只能有 loop、exit_distance")
+        raise ValueError(f"strategy_overrides 不認得 {unknown};只能有 loop、exit_distance、band")
+    if "band" in overrides:  # 區間策略的買賣 %(2026-10-10,頁面寫的)
+        from strategy_lab.plugins.entry.band import BandEntry
+
+        if not isinstance(strategy.entry, BandEntry):
+            raise ValueError("strategy_overrides.band 只能用在區間策略(entry: band)")
+        band = dict(overrides["band"] or {})
+        strategy.entry = BandEntry(buy_pct=band.get("buy_pct"), sell_pct=band.get("sell_pct"))
     if "loop" in overrides:
         loop = overrides["loop"]
         if loop is not None and (isinstance(loop, bool) or not isinstance(loop, int) or loop < 0):
@@ -192,6 +199,14 @@ def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = N
         loop=strategy.loop,
         on_event=log_event,
     )
+    if getattr(strategy, "band", False):
+        if config.adopt_existing_position:
+            raise ValueError("區間策略不支援「接手現有持倉」(adopt_existing_position 只支援分注策略),請改成 false")
+        from strategy_lab.engine.band_runner import BandRunner
+
+        runner = BandRunner(order_qty=_resolve_order_qty(config, bybit_client, symbol), **common)
+        attach_recorder(runner, recorder)
+        return runner, symbol
     if strategy.scale_in:
         entry_prices = scale_in_entry_prices(config)
         # 第一注數量:fixed_quote_amount / account_percentage 用第一注的建倉價換算
@@ -241,7 +256,7 @@ def _run_info(runner: StrategyRunner, config: ExecutionConfig, symbol: str, orig
     )
 
 
-_PURPOSE_LABELS = {"entry": "進場", "exit": "平倉", "forced_close": "強制平倉"}
+_PURPOSE_LABELS = {"entry": "進場", "exit": "平倉", "forced_close": "強制平倉", "band": "區間"}
 
 
 def attach_notifications(runner: Any, dry_run: bool, costs: Any = None) -> None:

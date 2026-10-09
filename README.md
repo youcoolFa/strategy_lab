@@ -44,7 +44,7 @@
 ## 執行 YAML 策略(Phase 3)
 
 ```bash
-.venv/bin/python -m demo.run_from_yaml --strategy strategies/weekend_mean_reversion.yaml
+.venv/bin/python -m demo.run_from_yaml --strategy strategies/mean_reversion_breakout_guard.yaml
 .venv/bin/python -m demo.run_from_yaml --strategy strategies/ma_crossover_bracket.yaml
 ```
 

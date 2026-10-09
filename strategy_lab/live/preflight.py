@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 from strategy_lab.dsl.loader import load_strategy
 from strategy_lab.estimates.metrics import run_metrics
 from strategy_lab.estimates.model import Estimate, MarketSnapshot
-from strategy_lab.estimates.plan import build_order_plan, build_scale_in_plan
+from strategy_lab.estimates.plan import build_band_plan, build_order_plan, build_scale_in_plan
 from strategy_lab.live import daemon
 from strategy_lab.live.bybit_client import BybitClient
 from strategy_lab.live.config import ExecutionConfig, load_execution_config
@@ -133,7 +133,17 @@ def main(
     window_end = strategy.time_window.window_end(now)
     cleanup_at = window_end - timedelta(minutes=getattr(strategy.time_window, "cleanup_buffer_minutes", 0))
 
-    if strategy.scale_in:
+    if getattr(strategy, "band", False):
+        qty = _fix_qty_or_report(_resolve_order_qty(config, client, symbol), limits, "每張單", print_fn)
+        if qty is None:
+            return 1
+        origin = resolve_origin_price(config, price)
+        plan = build_band_plan(
+            strategy_name=strategy.name, entry=strategy.entry, origin_price=origin,
+            origin_source="手動輸入" if config.origin_price is not None else "啟動當下即時價",
+            qty=qty, market=market, cleanup_at=cleanup_at, limits=limits,
+        )
+    elif strategy.scale_in:
         try:
             from strategy_lab.engine.scale_in_runner import validate_entry_prices
 
@@ -176,6 +186,10 @@ def main(
     if not config.dry_run:
         orders, position = client.get_open_orders(symbol), client.get_position_qty(symbol)
         if orders or position != 0:
+            if getattr(strategy, "band", False):
+                print_fn(f"\n✗ 交易所上 {symbol} 還有掛單 {len(orders)} 張、持倉 {position}。區間策略不支援接手現有持倉,"
+                         "請先到 Bybit 處理(取消掛單、平倉)再開始。")
+                return 1
             if not config.adopt_existing_position:
                 print_fn(f"\n✗ 交易所上 {symbol} 還有掛單 {len(orders)} 張、持倉 {position},啟動會被擋下。請先到 Bybit 處理;"
                          "分注策略也可以在設定檔設 adopt_existing_position: true,不平倉直接接手。")

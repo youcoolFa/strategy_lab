@@ -1,4 +1,4 @@
-# weekend_mean_reversion.yaml 的鏡像版本——做空,不是做多。
+# 週末均值回歸(見 mean_reversion_breakout_guard.yaml)的鏡像版本——做空,不是做多。
 # 邏輯完全對稱:漲破 origin_price 的 deviation_pct% 就賣出開空倉,
 # 跌回 origin_price 就買回平倉。用來示範/驗證 direction: short 這條路徑
 # 整個接得通(dsl/schema.py -> dsl/loader.py -> StrategyRunner -> 8 種

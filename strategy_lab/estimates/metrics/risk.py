@@ -38,6 +38,11 @@ class RiskMetric:
                 )
             )
 
+        if getattr(plan, "band", False):
+            rows.append(Row("band_side", "持倉方向",
+                            f"區間策略:第一張成交後持倉一直是多單或空單(±{plan.qty:g}),價格往上或往下突破區間都會虧;"
+                            "下面以多單、價格往下為例,空單往上的虧損量級相同"))
+
         for pct in ADVERSE_MOVES_PCT:
             price = base * (1 - pct / 100 if long else 1 + pct / 100)
             loss = self._loss_at(est, price)

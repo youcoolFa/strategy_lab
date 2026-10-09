@@ -51,10 +51,17 @@ class OrderPlan:
     # 分注策略每一注的計畫(build_scale_in_plan);非分注策略留空,lot_levels() 會把
     # 上面的 entry_price/qty/take_profit 當成唯一的 level 1。
     levels: List[LevelPlan] = field(default_factory=list)
+    # 區間策略(build_band_plan,2026-10-10):賣單價位;買單價位放在 entry_price、賣價也放在 take_profit,
+    # 所以「每輪損益」照多單 買價 → 賣價 算(空單 賣價 → 買價 的價差一樣)。非區間策略為 None。
+    band_sell_price: Optional[float] = None
 
     @property
     def scale_in(self) -> bool:
         return bool(self.levels)
+
+    @property
+    def band(self) -> bool:
+        return self.band_sell_price is not None
 
     def lot_levels(self) -> List[LevelPlan]:
         if self.levels:

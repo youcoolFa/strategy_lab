@@ -29,7 +29,8 @@ class CyclePnlMetric:
                 fees += est.lot_entry_fee(level) + est.lot_exit_fee(level, level.take_profit, resting=plan.exit_resting)
                 exposure += level.notional
                 net = gross - fees
-                what = f"成交到第{level.index}注、{level.index}注都平倉" if plan.scale_in else "完成一輪"
+                what = (f"成交到第{level.index}注、{level.index}注都平倉" if plan.scale_in
+                        else "每次穿過區間(買價 ↔ 賣價)" if getattr(plan, "band", False) else "完成一輪")
                 rows.append(
                     Row(
                         f"level_{level.index}", f"level {level.index}",

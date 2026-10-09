@@ -14,7 +14,7 @@ demo/sandbox_order.yaml 的 position_sizing,用 dsl.order_config 換算出
 裡,算好的數字才傳進 StrategyRunner,runner.py/PaperBroker 完全不用改。
 
 執行方式:
-  .venv/bin/python -m demo.run_from_yaml --strategy strategies/weekend_mean_reversion.yaml
+  .venv/bin/python -m demo.run_from_yaml --strategy strategies/mean_reversion_breakout_guard.yaml
   .venv/bin/python -m demo.run_from_yaml --strategy strategies/ma_crossover_bracket.yaml
   .venv/bin/python -m demo.run_from_yaml                      # 互動式選單
 """
@@ -40,11 +40,11 @@ SANDBOX_ORDER_CONFIG_PATH = Path(__file__).resolve().parent / "sandbox_order.yam
 # 兩個示範策略各自需要不同的起始時間(週末策略要從星期六開始、crossover
 # 策略要從平日開始)才跑得出有意義的結果,用策略名稱對應,demo 用途足夠。
 START_TIMES = {
-    "weekend_mean_reversion": datetime(2026, 8, 1, 4, 0, tzinfo=HKT),  # 星期六
+    "mean_reversion_breakout_guard": datetime(2026, 8, 1, 4, 0, tzinfo=HKT),  # 星期六
     "ma_crossover_bracket": datetime(2026, 8, 3, 9, 0, tzinfo=HKT),  # 星期一
 }
 TICK_INTERVALS = {
-    "weekend_mean_reversion": timedelta(minutes=5),
+    "mean_reversion_breakout_guard": timedelta(minutes=5),
     "ma_crossover_bracket": timedelta(minutes=1),
 }
 

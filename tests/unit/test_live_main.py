@@ -54,7 +54,7 @@ class TestBuildRunnerAndSymbol:
     def test_wires_weekend_strategy_correctly(self, monkeypatch):
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=True, testnet=True)
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", dry_run=True, testnet=True)
 
         runner, symbol = build_runner_and_symbol(config)
 
@@ -66,7 +66,7 @@ class TestBuildRunnerAndSymbol:
         assert runner.order_type == "limit"  # 預設值,對齊 ExecutionConfig.order_type
 
     def test_order_type_market_is_threaded_through_to_runner(self, monkeypatch):
-        # weekend_mean_reversion 是一啟動就掛單的機制,只接受 limit;
+        # mean_reversion_breakout_guard 是一啟動就掛單的機制,只接受 limit;
         # 這裡用 ma_crossover_bracket 驗證 market 有被傳進 runner。
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
@@ -79,7 +79,7 @@ class TestBuildRunnerAndSymbol:
     def test_weekend_strategy_with_market_order_type_is_rejected(self, monkeypatch):
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", order_type="market")
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", order_type="market")
 
         with pytest.raises(ValueError, match="limit"):
             build_runner_and_symbol(config)
@@ -88,7 +88,7 @@ class TestBuildRunnerAndSymbol:
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
         config = ExecutionConfig(
-            strategy_path="strategies/weekend_mean_reversion.yaml", symbol_override="ETHUSDT", dry_run=True
+            strategy_path="strategies/mean_reversion_breakout_guard.yaml", symbol_override="ETHUSDT", dry_run=True
         )
 
         _, symbol = build_runner_and_symbol(config)
@@ -109,7 +109,7 @@ class TestBuildRunnerAndSymbol:
             original_init(self, *args, **kwargs)
 
         monkeypatch.setattr(BybitClient, "__init__", capture_init)
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", category="spot")
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", category="spot")
 
         build_runner_and_symbol(config)
 
@@ -120,7 +120,7 @@ class TestBuildRunnerAndSymbol:
         ——只是準備好連線設定,實際下單才會真的呼叫出去。"""
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=False, testnet=True)
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", dry_run=False, testnet=True)
 
         runner, symbol = build_runner_and_symbol(config)
 
@@ -140,7 +140,7 @@ class TestBuildRunnerAndSymbolPositionSizing:
 
         monkeypatch.setattr(BybitClient, "get_last_price", fail_if_called)
         config = ExecutionConfig(
-            strategy_path="strategies/weekend_mean_reversion.yaml",
+            strategy_path="strategies/mean_reversion_breakout_guard.yaml",
             position_sizing=PositionSizing(mode="fixed_qty", value=0.02),
         )
 
@@ -153,7 +153,7 @@ class TestBuildRunnerAndSymbolPositionSizing:
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
         monkeypatch.setattr(BybitClient, "get_last_price", lambda self, symbol: 50000.0)
         config = ExecutionConfig(
-            strategy_path="strategies/weekend_mean_reversion.yaml",
+            strategy_path="strategies/mean_reversion_breakout_guard.yaml",
             position_sizing=PositionSizing(mode="fixed_quote_amount", value=500.0),
         )
 
@@ -171,7 +171,7 @@ class TestBuildRunnerAndSymbolPositionSizing:
         monkeypatch.setattr(BybitClient, "get_last_price", lambda self, symbol: 50000.0)
         monkeypatch.setattr(BybitClient, "get_account_equity", lambda self: 10000.0)
         config = ExecutionConfig(
-            strategy_path="strategies/weekend_mean_reversion.yaml",
+            strategy_path="strategies/mean_reversion_breakout_guard.yaml",
             position_sizing=PositionSizing(mode="account_percentage", value=2.0),
         )
 
@@ -193,7 +193,7 @@ class TestBuildRunnerAndSymbolPositionSizing:
 
         monkeypatch.setattr(BybitClient, "get_account_equity", fail_if_called)
         config = ExecutionConfig(
-            strategy_path="strategies/weekend_mean_reversion.yaml",
+            strategy_path="strategies/mean_reversion_breakout_guard.yaml",
             position_sizing=PositionSizing(mode="account_percentage", value=2.0),
             account_value=5000.0,
         )
@@ -254,7 +254,7 @@ class TestRunForever:
 
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=True, poll_interval_seconds=0)
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", dry_run=True, poll_interval_seconds=0)
         runner, symbol = build_runner_and_symbol(config)
 
         prices = iter([1000.0, 989.0, 989.0, 1000.0, 1000.0])
@@ -305,7 +305,7 @@ class TestRunForeverUsesManualOriginPrice:
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
         config = ExecutionConfig(
-            strategy_path="strategies/weekend_mean_reversion.yaml",
+            strategy_path="strategies/mean_reversion_breakout_guard.yaml",
             dry_run=True,
             poll_interval_seconds=0,
             origin_price=1010.0,
@@ -370,7 +370,7 @@ class TestRunForeverRefusesDirtyStart:
     def test_raises_before_start_and_places_nothing(self, monkeypatch):
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=False, testnet=True)
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", dry_run=False, testnet=True)
         runner, symbol = build_runner_and_symbol(config)
         leftover = FakeExchangeClient(open_orders=[{"orderId": "old", "side": "Buy", "price": "992.5", "qty": "1"}])
         runner.broker.client = leftover
@@ -394,7 +394,7 @@ class TestMainConfigArgument:
     def test_config_argument_loads_that_file(self, monkeypatch, tmp_path):
         captured = self._capture(monkeypatch)
         path = tmp_path / "live_wld_long.yaml"
-        path.write_text("strategy_path: strategies/weekend_mean_reversion.yaml\nsymbol_override: WLDUSDT\norigin_price: 0.48\n")
+        path.write_text("strategy_path: strategies/mean_reversion_breakout_guard.yaml\nsymbol_override: WLDUSDT\norigin_price: 0.48\n")
 
         main(["--config", str(path)])
 
@@ -507,7 +507,7 @@ class TestLoopWiring:
     def test_strategy_loop_and_event_logger_are_passed_to_runner(self, monkeypatch):
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=True)
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", dry_run=True)
 
         runner, _ = build_runner_and_symbol(config)
 
@@ -537,7 +537,7 @@ class TestRecorderWiring:
     def _runner(self, monkeypatch, recorder, dry_run=False):
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=dry_run, testnet=True, poll_interval_seconds=0)
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", dry_run=dry_run, testnet=True, poll_interval_seconds=0)
         runner, symbol = build_runner_and_symbol(config, recorder=recorder)
         return config, runner, symbol
 
@@ -567,7 +567,7 @@ class TestRecorderWiring:
         run_forever(runner, config, symbol, now_fn=lambda: datetime(2026, 8, 1, 4, 0, tzinfo=HKT), recorder=spy)
 
         assert spy.ended == ["stop_requested"]
-        assert spy.started[0].strategy_name == "weekend_mean_reversion"
+        assert spy.started[0].strategy_name == "mean_reversion_breakout_guard"
         assert spy.started[0].origin_price == 1000.0
 
     def test_runner_orders_and_events_flow_into_recorder(self, monkeypatch):
@@ -603,3 +603,71 @@ class TestScaleInWiring:
         config = ExecutionConfig(strategy_path="strategies/scale_in_ladder.yaml", dry_run=True)
         with pytest.raises(ValueError, match="entry_prices"):
             build_runner_and_symbol(config)
+
+
+BAND_YAML = """name: band_example
+symbol: BTC/USDT
+direction: both
+loop: null
+scale_in: false
+band: true
+entry:
+  type: band
+  params: {buy_pct: 0.5, sell_pct: 0.4}
+exit:
+  type: band
+  params: {}
+time_window:
+  type: weekly_window
+  params: {end_weekday: 0, end_time: "06:00"}
+"""
+
+
+class TestBandWiring:
+    """區間策略(2026-10-10):band: true → BandRunner;不支援接手現有持倉;Telegram 成交訊息標「區間」。"""
+
+    def _config(self, tmp_path, **kw):
+        path = tmp_path / "band.yaml"
+        path.write_text(BAND_YAML)
+        return ExecutionConfig(strategy_path=str(path), dry_run=True, testnet=True, symbol_override="XRPUSDT",
+                               position_sizing=PositionSizing(mode="fixed_qty", value=10), **kw)
+
+    def test_band_strategy_builds_a_band_runner(self, monkeypatch, tmp_path):
+        from strategy_lab.engine.band_runner import BandRunner
+
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        runner, symbol = build_runner_and_symbol(self._config(tmp_path))
+        assert isinstance(runner, BandRunner) and symbol == "XRPUSDT"
+        assert runner.order_qty == 10 and runner.direction == "both" and runner.loop is None
+        assert runner.entry.prices(100.0) == (pytest.approx(99.5), pytest.approx(100.4))
+
+    def test_adopting_existing_position_is_refused_for_band(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        with pytest.raises(ValueError, match="接手"):
+            build_runner_and_symbol(self._config(tmp_path, adopt_existing_position=True))
+
+    def test_band_fill_is_labelled_in_telegram(self):
+        from loguru import logger
+
+        from strategy_lab.engine.runner import OrderRecord
+        from strategy_lab.live.main import attach_notifications
+        from strategy_lab.log.telegram_notifier import telegram_filter
+
+        sent = []
+        sink = logger.add(lambda m: sent.append(m.record["message"]), level="DEBUG", filter=telegram_filter)
+        try:
+            class R:
+                on_order = on_event = None
+                loop = None
+                events = []
+
+            runner = R()
+            attach_notifications(runner, dry_run=False)
+            runner.on_order(OrderRecord(order_id="o", purpose="band", event_index=1, side="Sell", order_type="limit",
+                                        price=101.0, qty=2.0, reduce_only=False, status="closed", avg_price=101.0,
+                                        filled_qty=2.0, time=datetime(2026, 8, 1, tzinfo=ZoneInfo("UTC"))))
+        finally:
+            logger.remove(sink)
+        assert "區間" in sent[0] and "band" not in sent[0]

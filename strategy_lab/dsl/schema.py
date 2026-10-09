@@ -33,13 +33,17 @@ class StrategyDefinition(BaseModel):
     # direction 決定了 entry/exit 該配哪一種 plugin 才有意義(long 配
     # ShortDeviationFromReferenceEntry 沒道理),不是單純「怎麼下單」的
     # 選擇,見 docs/ARCHITECTURE.md §6.11。
-    direction: Literal["long", "short"] = "long"
+    # both = 區間策略(band: true)上下同時掛單;是否搭配 band 由 dsl/loader.py 檢查(2026-10-10)
+    direction: Literal["long", "short", "both"] = "long"
     # 重複次數:總 event 數 = loop + 1,做完 bot 就收尾結束;0 = 只做 1 個 event;
     # null = 不限次數(做到時間窗結束)。event = 部位從 0 開始、回到 0 結束。
     loop: Optional[conint(ge=0)] = 0
     # 分注策略(engine/scale_in_runner.py)= true;必須跟 entry/exit plugin 一致,
     # dsl/loader.py 會檢查。每個策略 YAML 都明確寫出來,一眼看得出是哪一種。
     scale_in: bool = False
+    # 區間策略(engine/band_runner.py)= true:上下各掛一張、成交就在對面補一張;必須跟 entry/exit plugin
+    # 一致、direction 要是 both(dsl/loader.py 檢查)。2026-10-10 weekend_band_reversion 改版。
+    band: bool = False
     # 預估持倉時間(分注策略):{value: 4, unit: hours};持倉超過就 🟡 警告,不自動平倉;
     # null = 不預估。格式由 engine/hold_time.parse_expected_hold 檢查(2026-10-09)。
     expected_hold: Optional[Dict[str, Any]] = None

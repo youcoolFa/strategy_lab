@@ -137,6 +137,50 @@ def free_style_running(db_url: str) -> List[Dict[str, Any]]:
     return [r for r in unfinished_by_symbol(db_url).values() if r["strategy_name"] == FREE_STYLE]
 
 
+HKT_ZONE = "Asia/Hong_Kong"
+
+
+def fmt_time(dt: Optional[datetime]) -> str:
+    """畫面上的時間只到分鐘(HKT),例 10-12 05:55。"""
+    if dt is None:
+        return "—"
+    from zoneinfo import ZoneInfo
+
+    return dt.astimezone(ZoneInfo(HKT_ZONE)).strftime("%m-%d %H:%M")
+
+
+def fmt_duration(delta: Optional[timedelta]) -> str:
+    """時間長度只到分鐘,例 4 天 1 小時 38 分。"""
+    if delta is None:
+        return "—"
+    from strategy_lab.engine.hold_time import format_hold
+
+    return format_hold(delta)
+
+
+def schedule(config_path: Path, started_at: Optional[datetime]) -> Optional[Dict[str, Any]]:
+    """啟動時間、預估結束(策略時間窗的強制收尾時間)、預估長度。啟動時間不知道或策略讀不到 → None。"""
+    if started_at is None:
+        return None
+    try:
+        from strategy_lab.dsl.loader import load_strategy
+
+        cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+        strategy_file = Path(cfg.get("strategy_path", ""))
+        if not strategy_file.is_absolute():
+            strategy_file = PROJECT_ROOT / strategy_file
+        window = load_strategy(strategy_file).time_window
+        from zoneinfo import ZoneInfo
+
+        # 資料庫存的是 UTC;時間窗照 HKT 算(實盤 run_forever 傳的也是 HKT),先換成 HKT 再算,不然差 8 小時
+        started_at = started_at.astimezone(ZoneInfo(HKT_ZONE))
+        end = window.window_end(started_at) - timedelta(minutes=getattr(window, "cleanup_buffer_minutes", 0))
+    except Exception:  # noqa: BLE001  設定 / 策略檔壞掉不能讓整頁掛掉
+        return None
+    # 畫面只到分鐘:長度用截到分鐘的啟動時間算,跟畫面上顯示的兩個時間對得上
+    return {"start": started_at, "end": end, "duration": end - started_at.replace(second=0, microsecond=0)}
+
+
 def mode_label(config_path: Path) -> str:
     """設定檔的實盤開關;沒寫的欄位用安全預設(dry_run / testnet 都是 true)。"""
     try:

@@ -72,16 +72,21 @@ with tab_overview:
         rows = []
         for d in daemons:
             run = unfinished.get(d.symbol) if d.alive else None
+            plan = data.schedule(data.config_path(d.config), run["started_at"]) if run else None
             rows.append({
                 "設定檔": d.config, "幣種": d.symbol or "—",
                 "狀態": "🟢 運作中" if d.alive else "⚪ 沒在跑", "PID": d.pid if d.alive else None,
                 "策略": run["strategy_name"] if run else "—",
+                "啟動時間": data.fmt_time(plan["start"]) if plan else "—",
+                "預估結束": data.fmt_time(plan["end"]) if plan else "—",
+                "預估長度": data.fmt_duration(plan["duration"]) if plan else "—",
                 "程式版本": data.code_version_label(run.get("git_commit") if run else None, head) if d.alive else "—",
                 "最後寫 log": f"{hkt(d.last_log_at)}({ago(d.last_log_at, now)})" if d.last_log_at else "—",
                 "提醒": data.stale_warning(d.alive, d.last_log_at, now) or "",
             })
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-        st.caption("「舊碼」= 正在跑的程式不是最新 commit,新功能要下次啟動才生效。"
+        st.caption("預估結束 = 策略時間窗的強制收尾時間(取消掛單、市價平倉);預估長度 = 預估結束 − 啟動時間。"
+                   "「舊碼」= 正在跑的程式不是最新 commit,新功能要下次啟動才生效。"
                    "每小時一定會寫 ⚪ 狀態,超過 70 分鐘沒寫 log 通常是 Mac 睡著了。")
     else:
         st.info("沒有 live_*.yaml 執行設定")
@@ -199,7 +204,15 @@ def _running_strategy_row(row, root):
     info = _strategy_info(root, cfg.get("strategy_path", ""))
     word = "y" if cfg.get("dry_run", True) else "yes"
     st.caption(f"設定檔 {c}.yaml")
+    band = bool(info.get("band"))
+    if band:
+        st.caption("區間策略:運作中不能改參數,也不提供脫離(脫離後不能接手,單會留在交易所沒人管);只能停止並收尾。")
+    else:
+        _running_params(c, path, cfg, info, word)
+    _stop_buttons(c, path, allow_detach=not band)
 
+
+def _running_params(c, path, cfg, info, word):
     st.markdown("**改參數**(預覽 → 輸入確認字 → 立刻套用到正在跑的程式)")
     changes = {}
     overrides = cfg.get("strategy_overrides") or {}
@@ -244,6 +257,9 @@ def _running_strategy_row(row, root):
                 st.code(text, language=None)
                 st.session_state.pop(f"ctl_pending_{c}", None)
 
+
+
+def _stop_buttons(c, path, allow_detach=True):
     left, right = st.columns(2)
     with left:
         st.markdown("**停止(收尾)**:取消所有掛單、**市價平倉**後結束")
@@ -256,6 +272,8 @@ def _running_strategy_row(row, root):
                 st.error(str(e))
             except Exception as e:  # noqa: BLE001  DaemonError 等
                 st.error(f"停止失敗:{e}")
+    if not allow_detach:
+        return
     with right:
         st.markdown("**脫離**:直接結束、**不收尾**,掛單與持倉留在交易所(下次用「接手現有持倉」開始)")
         typed_detach = st.text_input("輸入 DETACH", key=f"detach_typed_{c}")
@@ -324,8 +342,14 @@ def _start_strategy(choice, root):
     st.caption(f"設定檔:{path.name}({'沿用現有的' if existing else '新建,從範本建立'})")
 
     st.warning("🔴 這裡開始的策略一律是**真正的交易環境**(Bybit 正式站、真實資金);dry-run / 測試網請用終端機")
-    adopt = st.checkbox("接手現有持倉(交易所上這個幣已有的持倉 / 掛單,不平倉直接接著管理;只支援分注策略)",
-                        value=bool(cfg.get("adopt_existing_position", False)), key="new_adopt")
+    band = bool(info.get("band"))
+    if band:
+        st.caption("區間策略:上下各掛一張,成交一張就在對面價位補一張同數量的單,持倉在 ±數量 之間切換,"
+                   "直到收尾。不支援接手現有持倉:交易所上這個幣要沒有持倉、沒有掛單。")
+        adopt = False
+    else:
+        adopt = st.checkbox("接手現有持倉(交易所上這個幣已有的持倉 / 掛單,不平倉直接接著管理;只支援分注策略)",
+                            value=bool(cfg.get("adopt_existing_position", False)), key="new_adopt")
     sizing = cfg.get("position_sizing") or {}
     modes = ["fixed_qty", "fixed_quote_amount", "account_percentage"]
     mode = st.selectbox("數量模式", modes, index=modes.index(sizing.get("mode", "fixed_qty")), key="new_mode")
@@ -334,6 +358,14 @@ def _start_strategy(choice, root):
     params = {}
     try:
         overrides = cfg.get("strategy_overrides") or {}
+        if band:
+            band_default = overrides.get("band") or {}
+            b1, b2 = st.columns(2)
+            buy_pct = b1.number_input("買單:起點價往下多少 %", value=float(band_default.get("buy_pct", info.get("buy_pct") or 0.1)),
+                                      format="%g", key="new_buy_pct")
+            sell_pct = b2.number_input("賣單:起點價往上多少 %", value=float(band_default.get("sell_pct", info.get("sell_pct") or 0.1)),
+                                       format="%g", key="new_sell_pct")
+            params["band"] = {"buy_pct": float(buy_pct), "sell_pct": float(sell_pct)}
         if info.get("scale_in"):
             prices_text = st.text_input(f"建倉價({info['lots']} 注,逗號分隔;不用的注填 0)",
                                         value=",".join(f"{p:g}" for p in (cfg.get("entry_prices") or [])), key="new_prices")
@@ -342,14 +374,17 @@ def _start_strategy(choice, root):
                                    format="%g", key="new_distance")
             params["entry_prices"] = _parse_prices(prices_text) or None
             params["distance"] = float(dist) if dist else None
-        loop_default = overrides.get("loop", info.get("loop"))
-        loop_text = st.text_input("loop(重複次數;null = 不限)", value="null" if loop_default is None else str(loop_default),
-                                  key="new_loop")
-        params["loop"] = _parse_loop(loop_text)
+        if not band:  # 區間策略固定做到收尾
+            loop_default = overrides.get("loop", info.get("loop"))
+            loop_text = st.text_input("loop(重複次數;null = 不限)", value="null" if loop_default is None else str(loop_default),
+                                      key="new_loop")
+            params["loop"] = _parse_loop(loop_text)
     except ValueError:
         st.error("建倉價要是逗號分隔的數字,loop 要是整數或 null")
         return
-    settings = {"adopt_existing_position": adopt, "position_sizing.mode": mode, "position_sizing.value": float(value)}
+    settings = {"position_sizing.mode": mode, "position_sizing.value": float(value)}
+    if not band:
+        settings["adopt_existing_position"] = adopt
     signature = (path.name, settings, params)
 
     if st.button("💾 寫入參數並預覽", key="new_prepare"):

@@ -1,4 +1,5 @@
-# 跟 weekend_mean_reversion.yaml 用同一套進出場邏輯,多加一層
+# 週末均值回歸(一啟動就掛單:離 origin deviation_pct% 買、回到 origin 賣;原本的 weekend_mean_reversion
+# 已於 2026-10-10 刪除,邏輯完全一樣),多加一層
 # kill_switch:如果價格連續突破(不是短暫的均值回歸,而是趨勢真的變了),
 # 就終止整個策略迴圈、強制平倉,不再繼續嘗試「買跌」。
 #

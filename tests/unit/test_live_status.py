@@ -165,3 +165,32 @@ class TestHoldTimeInStatus:
         runner.tick(NOW, 85292.4)
         msg = status_message(runner, CONFIG, "BTCUSDT", 85292.4, NOW + timedelta(minutes=65), started_at=NOW)
         assert "持倉時間" not in msg
+
+
+class TestBandMessages:
+    """區間策略(2026-10-10):啟動訊息列出上下兩個價位與規則;狀態回報的掛單標「區間」。"""
+
+    def _runner(self):
+        from strategy_lab.engine.band_runner import BandRunner
+        from strategy_lab.plugins.entry.band import BandEntry
+        from strategy_lab.plugins.exit.band import BandExit
+
+        runner = BandRunner(entry=BandEntry(buy_pct=1.0, sell_pct=2.0), exit=BandExit(),
+                            time_window=WeeklyWindow(end_weekday=0, end_time="06:00", cleanup_buffer_minutes=5),
+                            order_qty=2.0, direction="both", loop=None)
+        runner.start(NOW, 100.0)
+        return runner
+
+    def test_start_message_shows_both_prices_and_the_rule(self):
+        msg = start_message(self._runner(), CONFIG, "XRPUSDT", 100.0, NOW, 60)
+        assert "買 99 × 2" in msg and "賣 102 × 2" in msg
+        assert "對面" in msg and "±2" in msg
+        assert "最大部位 2" in msg
+
+    def test_status_lists_band_orders(self):
+        runner = self._runner()
+        runner.tick(NOW, 100.0)
+        runner.tick(NOW + timedelta(minutes=5), 99.0)  # 買單成交 → 對面兩張賣單
+        msg = status_message(runner, CONFIG, "XRPUSDT", 100.0, NOW + timedelta(hours=1), started_at=NOW)
+        assert msg.count("區間 Sell 2 @ 102") == 2
+        assert "部位 多 2" in msg

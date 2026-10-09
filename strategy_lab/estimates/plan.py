@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from strategy_lab.estimates.model import LevelPlan, MarketSnapshot, OrderPlan
 from strategy_lab.interfaces import EntrySignal, ExitSignal, PlannedExit, StrategyContext
@@ -103,4 +103,38 @@ def build_scale_in_plan(
         cleanup_at=cleanup_at,
         loop=loop,
         levels=levels,
+    )
+
+
+def build_band_plan(
+    strategy_name: str,
+    entry: Any,
+    origin_price: float,
+    origin_source: str,
+    qty: float,
+    market: MarketSnapshot,
+    cleanup_at: datetime,
+    limits: Optional[InstrumentLimits] = None,
+) -> OrderPlan:
+    """區間策略(2026-10-10):一開始上下各掛一張,成交一張就在對面補一張,持倉在 ±qty 之間切換。
+    買價放 entry_price、賣價放 take_profit 與 band_sell_price,direction 用 long:每輪損益照
+    買價 → 賣價 算(空單 賣價 → 買價 的價差一樣)。現價已經在區間外 → 有一張一掛就吃單成交。"""
+    raw_buy, raw_sell = entry.prices(origin_price)
+    buy = _round(raw_buy, limits, "Buy")
+    sell = _round(raw_sell, limits, "Sell")
+    return OrderPlan(
+        strategy_name=strategy_name,
+        direction="long",
+        origin_price=origin_price,
+        origin_source=origin_source,
+        qty=qty,
+        entry_price=buy,
+        entry_known_in_advance=True,
+        entry_crosses_market=market.price <= buy or market.price >= sell,
+        take_profit=sell,
+        stop_loss=None,
+        exit_resting=True,
+        cleanup_at=cleanup_at,
+        loop=None,
+        band_sell_price=sell,
     )

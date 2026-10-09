@@ -36,7 +36,7 @@ class TestRunForeverStartAndEnd:
 
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=True, poll_interval_seconds=0)
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", dry_run=True, poll_interval_seconds=0)
         runner, symbol = build_runner_and_symbol(config)
         prices = iter([1000.0, 989.0, 989.0, 1000.0, 1000.0])
         clock = {"now": NOW}
@@ -55,7 +55,7 @@ class TestRunForeverStartAndEnd:
         run_forever(runner, config, symbol, now_fn=lambda: clock["now"])
 
         start, end = telegram[0], telegram[-1]
-        assert "啟動" in start and "DRY RUN" in start and "weekend_mean_reversion" in start and symbol in start
+        assert "啟動" in start and "DRY RUN" in start and "mean_reversion_breakout_guard" in start and symbol in start
         assert "結束" in end and "stop_requested" in end and "完成 1 個 loop" in end
         # 收尾時的「開始收尾」WARNING 不另外發(結束訊息已經有原因)
         assert not any("開始收尾" in m for m in telegram)
@@ -131,7 +131,7 @@ class TestHeartbeatInRunForever:
         monkeypatch.setenv("BYBIT_API_KEY", "dummy")
         monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
         monkeypatch.setenv("STATUS_INTERVAL_MINUTES", "60")
-        config = ExecutionConfig(strategy_path="strategies/weekend_mean_reversion.yaml", dry_run=True, poll_interval_seconds=0)
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", dry_run=True, poll_interval_seconds=0)
         runner, symbol = build_runner_and_symbol(config)
         clock = {"now": NOW, "ticks": 0}
 

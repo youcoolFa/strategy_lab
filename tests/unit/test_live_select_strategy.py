@@ -20,7 +20,7 @@ class TestUpdateStrategyPathInConfig:
         example.write_text(
             yaml.dump(
                 {
-                    "strategy_path": "strategies/weekend_mean_reversion.yaml",
+                    "strategy_path": "strategies/mean_reversion_breakout_guard.yaml",
                     "dry_run": True,
                     "testnet": True,
                 }
@@ -38,12 +38,12 @@ class TestUpdateStrategyPathInConfig:
 
     def test_updates_existing_config_preserving_other_fields(self, tmp_path):
         example = tmp_path / "live_execution_config.example.yaml"
-        example.write_text(yaml.dump({"strategy_path": "strategies/weekend_mean_reversion.yaml", "dry_run": True}))
+        example.write_text(yaml.dump({"strategy_path": "strategies/mean_reversion_breakout_guard.yaml", "dry_run": True}))
         config_path = tmp_path / "live_execution_config.yaml"
         config_path.write_text(
             yaml.dump(
                 {
-                    "strategy_path": "strategies/weekend_mean_reversion.yaml",
+                    "strategy_path": "strategies/mean_reversion_breakout_guard.yaml",
                     "dry_run": False,  # 使用者自己已經改過的值
                     "testnet": False,
                 }
@@ -59,7 +59,7 @@ class TestUpdateStrategyPathInConfig:
 
     def test_written_file_ends_with_newline(self, tmp_path):
         example = tmp_path / "live_execution_config.example.yaml"
-        example.write_text(yaml.dump({"strategy_path": "strategies/weekend_mean_reversion.yaml"}))
+        example.write_text(yaml.dump({"strategy_path": "strategies/mean_reversion_breakout_guard.yaml"}))
         config_path = tmp_path / "live_execution_config.yaml"
 
         update_strategy_path_in_config(config_path, example, "strategies/ma_crossover_bracket.yaml")
@@ -72,12 +72,12 @@ class TestSelectStrategyConfigArgument:
         import strategy_lab.live.select_strategy as module
 
         target = tmp_path / "live_wld_short.yaml"
-        monkeypatch.setattr(module, "prompt_strategy_choice", lambda files: module.STRATEGIES_DIR / "weekend_mean_reversion.yaml")
+        monkeypatch.setattr(module, "prompt_strategy_choice", lambda files: module.STRATEGIES_DIR / "mean_reversion_breakout_guard.yaml")
 
         module.main(["--config", str(target)])
 
         data = yaml.safe_load(target.read_text())
-        assert data["strategy_path"] == "strategies/weekend_mean_reversion.yaml"
+        assert data["strategy_path"] == "strategies/mean_reversion_breakout_guard.yaml"
         assert data["dry_run"] is True  # 新檔從 example 範本建立,安全預設值
         assert not (module.CONFIG_PATH == target)
 
@@ -89,7 +89,7 @@ class TestPreservesComments:
         original = (
             "# 執行設定\n"
             "#   這段說明要留著\n"
-            "strategy_path: strategies/weekend_mean_reversion.yaml\n"
+            "strategy_path: strategies/mean_reversion_breakout_guard.yaml\n"
             "origin_price: 84967.50   # 2026-09-26 你指定\n"
             "dry_run: false   # 真實下單開關\n"
         )
@@ -99,7 +99,7 @@ class TestPreservesComments:
         update_strategy_path_in_config(config_path, tmp_path / "unused.yaml", "strategies/scale_in_ladder.yaml")
 
         assert config_path.read_text(encoding="utf-8") == original.replace(
-            "strategies/weekend_mean_reversion.yaml", "strategies/scale_in_ladder.yaml"
+            "strategies/mean_reversion_breakout_guard.yaml", "strategies/scale_in_ladder.yaml"
         )
 
     def test_trailing_comment_on_strategy_path_line_is_kept(self, tmp_path):

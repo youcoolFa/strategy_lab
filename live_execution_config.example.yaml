@@ -30,7 +30,7 @@ retry_backoff_cap_seconds: 60.0   # 指數退避(2^次數 秒)最多等這麼久
 category: linear   # linear(USDT 永續,預設)/ spot(現貨)/ inverse(幣本位)/ option(期權)
 
 # 下單方式——「下多大單」不是策略邏輯,是這裡的事(見 dsl/order_config.py)。
-order_type: limit  # limit 或 market;kill_switch/收攤平倉永遠是 market,不受這裡影響。weekend_mean_reversion(一啟動就掛單)只能用 limit
+order_type: limit  # limit 或 market;kill_switch/收攤平倉永遠是 market,不受這裡影響。一啟動就掛單的策略(mean_reversion_breakout_guard、weekend_band_reversion)只能用 limit
 position_sizing:
   mode: fixed_qty       # fixed_qty(直接給數量) / fixed_quote_amount(給報價貨幣金額,如 USDT) / account_percentage(帳戶權益百分比)
   value: 0.001            # 對應上面 mode 的數字

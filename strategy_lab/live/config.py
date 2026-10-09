@@ -49,7 +49,7 @@ _DEFAULT_CONFIG_YAML_PATH = Path(__file__).resolve().parents[2] / "live_executio
 @dataclass
 class ExecutionConfig:
     # --- 要跑哪個策略(參數本身在 YAML 裡,不在這裡) ---
-    strategy_path: str = "strategies/weekend_mean_reversion.yaml"
+    strategy_path: str = "strategies/scale_in_ladder.yaml"  # 預設主力策略;weekend_mean_reversion 已刪除(2026-10-10)
     symbol_override: Optional[str] = None  # Bybit 原生格式(如 "BTCUSDT");不設就從 YAML 的 symbol 轉換
     # 起點價格:None = 用啟動當下的即時價格;填數字 = 手動指定(例如週六
     # 04:00 的價格)。Fa_Successful_trade 的 Redis 歷史價格還沒接上前,

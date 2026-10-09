@@ -14,7 +14,7 @@ from strategy_lab.plugins.time_window.weekly_window import WeeklyWindow
 from strategy_lab.registry import UnknownPlugin
 
 WEEKEND_YAML = """
-name: weekend_mean_reversion
+name: weekend_example
 symbol: BTC/USDT
 entry:
   type: deviation_from_reference
@@ -42,7 +42,7 @@ class TestLoadStrategyBasics:
         path = write_yaml(tmp_path, WEEKEND_YAML)
         strategy = load_strategy(path)
 
-        assert strategy.name == "weekend_mean_reversion"
+        assert strategy.name == "weekend_example"
         assert strategy.symbol == "BTC/USDT"
         assert isinstance(strategy.entry, DeviationFromReferenceEntry)
         assert isinstance(strategy.exit, ReturnToReferenceExit)
@@ -128,3 +128,54 @@ kill_switch:
         path = write_yaml(tmp_path, yaml_with_ok_kill_switch)
         strategy = load_strategy(path)
         assert strategy.kill_switch is not None
+
+
+BAND_YAML = """
+name: band_example
+symbol: BTC/USDT
+direction: both
+loop: null
+scale_in: false
+band: true
+entry:
+  type: band
+  params:
+    buy_pct: 0.1
+    sell_pct: 0.2
+exit:
+  type: band
+  params: {}
+time_window:
+  type: weekly_window
+  params:
+    end_weekday: 0
+    end_time: "06:00"
+"""
+
+
+class TestBandStrategy:
+    """區間策略(2026-10-10):band 旗標、direction: both、loop: null 都要一致,不合就讀檔時報錯。"""
+
+    def test_loads_band_plugins_and_flag(self, tmp_path):
+        from strategy_lab.plugins.entry.band import BandEntry
+        from strategy_lab.plugins.exit.band import BandExit
+
+        strategy = load_strategy(write_yaml(tmp_path, BAND_YAML))
+        assert strategy.band is True and strategy.direction == "both" and strategy.loop is None
+        assert strategy.entry == BandEntry(buy_pct=0.1, sell_pct=0.2) and isinstance(strategy.exit, BandExit)
+
+    def test_other_strategies_are_not_band(self, tmp_path):
+        assert load_strategy(write_yaml(tmp_path, WEEKEND_YAML)).band is False
+
+    @pytest.mark.parametrize("old, new, match", [
+        ("band: true", "band: false", "band"),
+        ("direction: both", "direction: long", "both"),
+        ("loop: null", "loop: 2", "loop"),
+    ])
+    def test_inconsistent_band_settings_rejected(self, tmp_path, old, new, match):
+        with pytest.raises(ValueError, match=match):
+            load_strategy(write_yaml(tmp_path, BAND_YAML.replace(old, new)))
+
+    def test_direction_both_only_for_band(self, tmp_path):
+        with pytest.raises(ValueError, match="both"):
+            load_strategy(write_yaml(tmp_path, WEEKEND_YAML + "direction: both\n"))
