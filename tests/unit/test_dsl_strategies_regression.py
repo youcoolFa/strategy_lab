@@ -101,3 +101,37 @@ class TestScaleIn:
         bad.write_text(src.replace("scale_in: true", "scale_in: false"))
         with pytest.raises(ValueError, match="scale_in"):
             load_strategy(bad)
+
+
+class TestExpectedHold:
+    """策略的預估持倉時間 expected_hold(2026-10-09):超過就 🟡 警告,不自動平倉。"""
+
+    def _write(self, tmp_path, extra):
+        src = (STRATEGIES_DIR / "scale_in_ladder.yaml").read_text()
+        path = tmp_path / "s.yaml"
+        path.write_text(src + extra)
+        return path
+
+    def test_parsed_into_a_timedelta(self, tmp_path):
+        from datetime import timedelta
+
+        strategy = load_strategy(self._write(tmp_path, "\nexpected_hold:\n  value: 4\n  unit: hours\n"))
+        assert strategy.expected_hold == timedelta(hours=4)
+
+    def test_default_is_none(self):
+        assert load_strategy(STRATEGIES_DIR / "scale_in_ladder.yaml").expected_hold is None
+
+    def test_bad_unit_rejected(self, tmp_path):
+        import pytest
+
+        with pytest.raises(ValueError, match="expected_hold"):
+            load_strategy(self._write(tmp_path, "\nexpected_hold:\n  value: 4\n  unit: weeks\n"))
+
+    def test_only_for_scale_in_strategies(self, tmp_path):
+        import pytest
+
+        src = (STRATEGIES_DIR / "weekend_mean_reversion.yaml").read_text()
+        path = tmp_path / "w.yaml"
+        path.write_text(src + "\nexpected_hold:\n  value: 4\n  unit: hours\n")
+        with pytest.raises(ValueError, match="expected_hold"):
+            load_strategy(path)

@@ -23,6 +23,7 @@ from typing import Any, Optional, Tuple
 import yaml
 from loguru import logger
 
+from strategy_lab.engine.hold_time import format_hold
 from strategy_lab.engine.runner import RunState
 
 DEFAULT_STATUS_INTERVAL_MINUTES = 60
@@ -210,6 +211,13 @@ def status_message(runner: Any, config: Any, symbol: str, price: float, now: dat
             lines.append(f"  {_PURPOSE_LABELS.get(r.purpose, r.purpose)} {r.side} {r.qty:g} @ {px(r.price)}({lot}{distance})")
     else:
         lines.append("掛單:無")
+    held = [l for l in getattr(runner, "lots", []) if l.holding and l.filled_at is not None]
+    if held:
+        expected = getattr(runner, "expected_hold", None)
+        head = f"持倉時間(預估 {format_hold(expected)})" if expected else "持倉時間"
+        lines.append(head + ":" + "、".join(
+            f"第{l.index}注 {format_hold(now - l.filled_at)}" + (" ⚠️" if expected and now - l.filled_at > expected else "")
+            for l in held))
     waiting = [l for l in getattr(runner, "lots", []) if l.entry_order is None and l.filled_price is None]
     if waiting:
         lines.append("待掛(前一注成交後才掛):" + "、".join(f"第{l.index}注 {px(l.entry_price)} × {l.qty:g}" for l in waiting))

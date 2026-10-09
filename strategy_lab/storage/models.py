@@ -73,6 +73,8 @@ class SlOrder(Base):
     filled_qty = Column(MONEY, comment="已成交數量")
     created_at = Column(TS, nullable=False, comment="下單時間")
     updated_at = Column(TS, nullable=False, comment="最後一次狀態更新時間(成交 / 取消)")
+    hold_seconds = Column(Integer, comment="持倉秒數(時間暴露):這一注建倉成交 → 平倉成交;只有分注策略的平倉單有值,"
+                                           "接手的注從接手時算起")
 
 
 class SlFill(Base):

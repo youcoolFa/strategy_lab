@@ -139,3 +139,29 @@ class TestNumberFormat:
         assert px(1.1947847999999999) == "1.1948"
         assert px(1.2310) == "1.231" and px(84900.0) == "84900" and px(None) == "—"
         assert usd(0.11535) == "+0.12" and usd(-0.2) == "-0.20"
+
+
+class TestHoldTimeInStatus:
+    """每小時 ⚪ 狀態回報列出每注已持倉多久,超過預估的標 ⚠️(2026-10-09)"""
+
+    def test_lists_each_held_lot_and_marks_over_estimate(self):
+        runner = scale_runner()
+        runner.expected_hold = timedelta(hours=1)
+        runner.tick(NOW, 85292.4)
+        runner.tick(NOW + timedelta(minutes=5), 84800.0)  # 第1注 @ +5 分
+        runner.tick(NOW + timedelta(minutes=35), 84400.0)  # 第2注 @ +35 分
+        msg = status_message(runner, CONFIG, "BTCUSDT", 84450.0, NOW + timedelta(minutes=95), started_at=NOW)
+        assert "持倉時間(預估 1 小時 0 分):第1注 1 小時 30 分 ⚠️、第2注 1 小時 0 分" in msg
+
+    def test_without_estimate(self):
+        runner = scale_runner()
+        runner.tick(NOW, 85292.4)
+        runner.tick(NOW + timedelta(minutes=5), 84800.0)
+        msg = status_message(runner, CONFIG, "BTCUSDT", 85000.0, NOW + timedelta(minutes=65), started_at=NOW)
+        assert "持倉時間:第1注 1 小時 0 分" in msg
+
+    def test_no_line_when_nothing_held(self):
+        runner = scale_runner()
+        runner.tick(NOW, 85292.4)
+        msg = status_message(runner, CONFIG, "BTCUSDT", 85292.4, NOW + timedelta(minutes=65), started_at=NOW)
+        assert "持倉時間" not in msg

@@ -124,6 +124,7 @@ def apply_adoption(runner: Any, plan: AdoptionPlan, now: datetime) -> List[str]:
         lot = runner.lots[h.lot - 1]
         lot.qty = h.qty
         lot.filled_price = plan.avg_price  # 個別成交價拿不到,用交易所均價(合計損益正確)
+        lot.filled_at = now  # 實際建倉時間拿不到:持倉計時從接手時算起
         lot.exit_order = LiveOrder(id=h.order_id, status="open", price=h.price, side=h.side, qty=h.qty, reduce_only=True)
         runner._emit_order(now, "exit", lot.exit_order, h.side, "limit", h.price, h.qty, reduce_only=True,
                            status="open", lot=h.lot)

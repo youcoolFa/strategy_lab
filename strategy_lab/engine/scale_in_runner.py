@@ -25,9 +25,12 @@ origin_price 這個策略不用(start() 仍照常記下啟動價,保留給日後
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from loguru import logger
+
+from strategy_lab.engine.hold_time import LotHold, format_hold
 from strategy_lab.engine.runner import RunState, StrategyRunner, Trade
 from strategy_lab.plugins.exit.scale_out import ScaleOutExit
 from strategy_lab.interfaces import OrderLike
@@ -62,6 +65,8 @@ class Lot:
     exit_order: Optional[OrderLike] = None
     filled_price: Optional[float] = None  # 建倉成交價;None = 還沒建倉
     done: bool = False  # 這一注本 loop 已經平倉完成
+    filled_at: Optional[datetime] = None  # 建倉成交時間(持倉計時從這裡算;接手的注 = 接手時間)
+    hold_warned: bool = False  # 已經發過「超過預估持倉時間」警告
 
     @property
     def holding(self) -> bool:
@@ -72,7 +77,10 @@ class Lot:
 @dataclass
 class ScaleInRunner(StrategyRunner):
     entry_prices: List[float] = field(default_factory=list)
+    # 預估持倉時間(策略 YAML 的 expected_hold):某一注持倉超過就 WARNING 一次(🟡),不自動平倉
+    expected_hold: Optional[timedelta] = None
     lots: List[Lot] = field(default_factory=list, init=False)
+    lot_holds: List[LotHold] = field(default_factory=list, init=False)  # 每注平倉後的持倉時間(結束總結用)
     _loop_event_base: int = field(default=0, init=False, repr=False)  # 這個 loop 開始時已完成的 event 數
 
     def __post_init__(self) -> None:
@@ -96,6 +104,7 @@ class ScaleInRunner(StrategyRunner):
             return
         self._sync_entries(now)
         self._sync_exits(now)
+        self._warn_long_holds(now)
         # 跟 loop 開始時比,不跟這一輪開始時比:上一輪若在記完成交後網路失敗中斷,
         # event 已經多了一個,這一輪仍要能結束 loop。
         if len(self.events) > self._loop_event_base:
@@ -149,6 +158,7 @@ class ScaleInRunner(StrategyRunner):
             order = self.broker.fetch_order(lot.entry_order.id)
             if order.status == "closed":
                 lot.filled_price = order.price
+                lot.filled_at = now
                 lot.qty = order.filled_qty or lot.qty  # 平倉數量用實際成交量(交易所會修正精度)
                 if self.entry_time is None:
                     self.entry_time = now
@@ -172,7 +182,9 @@ class ScaleInRunner(StrategyRunner):
             if order.status == "closed":
                 self.trades.append(Trade(entry_price=lot.filled_price, exit_price=order.price,
                                          qty=order.filled_qty, direction=self.direction))
-                self._update_order(now, order.id, "closed", order.price, order.filled_qty)
+                held = self._hold(lot, now, forced=False)
+                self._update_order(now, order.id, "closed", order.price, order.filled_qty,
+                                   hold_seconds=held.seconds if held else None)
                 lot.done = True  # 這一注本 loop 已完成;filled_price 保留 → 不會再掛建倉
                 lot.exit_order = None  # 已成交,收尾時不用再取消
                 self._record_fill(now, -self._entry_sign(), order.filled_qty, order.price)
@@ -180,6 +192,32 @@ class ScaleInRunner(StrategyRunner):
                 self._update_order(now, order.id, "canceled", None, order.filled_qty)
                 self._place_exit(now, lot)
         self._refresh_active_entry_price()
+
+    # --- 持倉計時(2026-10-09)---
+
+    def _hold(self, lot: Lot, now: datetime, forced: bool) -> Optional[LotHold]:
+        if lot.filled_at is None:
+            return None
+        held = LotHold(index=lot.index, event_index=self._tracker.completed + 1,
+                       seconds=(now - lot.filled_at).total_seconds(), forced=forced)
+        self.lot_holds.append(held)
+        return held
+
+    def _warn_long_holds(self, now: datetime) -> None:
+        if self.expected_hold is None:
+            return
+        for lot in self.lots:
+            if lot.holding and lot.filled_at is not None and not lot.hold_warned \
+                    and now - lot.filled_at > self.expected_hold:
+                lot.hold_warned = True
+                logger.warning(f"⏰ 第{lot.index}注已持倉 {format_hold(now - lot.filled_at)},超過預估 "
+                               f"{format_hold(self.expected_hold)}(建倉 {lot.filled_price:g};只是提醒,不會自動平倉)")
+
+    def _cleanup(self, now: datetime) -> None:
+        for lot in self.lots:  # 收尾時還拿著的注:持倉到市價平倉這一刻
+            if lot.holding:
+                self._hold(lot, now, forced=True)
+        super()._cleanup(now)
 
     def _end_loop(self, now: datetime) -> None:
         """部位回到 0:取消還沒成交的建倉單,下一個 tick 重新掛全部(選項 A)。"""

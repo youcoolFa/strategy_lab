@@ -441,6 +441,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 運作中改參數 | 新增 `live/control.py`(`set entry_prices/distance/loop`:預覽 + yes、請求檔/結果檔、等 90 秒、逾時撤回、超過 10 分鐘的請求不套用);`StrategyRunner`/`ScaleInRunner.apply_changes()`(先全部驗證、取消重掛、取消前已成交不重掛、越過現價拒絕);`ExecutionConfig.strategy_overrides` + `apply_strategy_overrides()`(啟動與 preflight 套用);`run_forever` 在 tick 之間 `process_control()` | 新增 §6.25 | 已完成 |
 | 接手現有持倉與脫離 | 新增 `live/adopt.py`(`plan_adoption`/`apply_adoption`,對不上就 `AdoptionError`);`ExecutionConfig.adopt_existing_position`;`ensure_clean_start(adopt=)`、`adopt_existing()`;SIGUSR1 → `runner.request_detach()`、`run_forever` 不收尾結束;`daemon detach`;`BybitClient.get_position_avg_price()`;preflight 預覽接手內容 | 新增 §6.26 | 已完成 |
 | free style + 資料表中文說明 | 新增 `live/free_style.py`(`start`/`stop`/`status`;只讀 Bybit,stop 時用 `EventTracker` 重播成交切出每一輪,`purpose = manual`、`end_reason = free_style_stop`;7 天分段查詢);`BybitClient.list_order_history()`;`storage/models.py` 每張表/欄位加 `comment`,`setup_db` 用 COMMENT ON 寫進 Postgres | 新增 §6.27 | 已完成 |
+| 持倉計時(時間暴露)+ 預估持倉時間 | 新增 `engine/hold_time.py`(`LotHold`、`format_hold`、`parse_expected_hold`、`hold_summary`);策略 YAML `expected_hold`(只限分注);`Lot.filled_at`/`hold_warned`、`ScaleInRunner.lot_holds`/`expected_hold`、超時 WARNING 一次、收尾強制平倉也計時;`OrderRecord.hold_seconds` → `sl_order.hold_seconds`;🟢 平倉成交、⚪ 狀態、🟣 結束總結顯示 | 新增 §6.28 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1559,4 +1560,22 @@ stop 時還有持倉 → 這一輪不算進 `sl_event`(成交明細照寫),總�
 **資料表中文說明**(同一天):`storage/models.py` 每張表、每個欄位都有 `comment`;`setup_db` 每次
 執行都用 `COMMENT ON` 寫進 Postgres(說明有冒號,用 `exec_driver_sql` 原樣送出,不能用 `text()`;psycopg2 會把 `%` 當格式符號,送出前改成 `%%`)。
 Superset 的 dataset 欄位描述另外從資料庫同步過一次(不會自動同步,改了說明要再同步)。
+
+### 6.28 持倉計時(時間暴露)與預估持倉時間(`engine/hold_time.py`,2026-10-09)
+
+**每一注**從建倉成交到平倉成交的時間(`Lot.filled_at` → 平倉成交那個 tick):
+
+| 在哪裡 | 顯示 |
+|---|---|
+| 🟢 平倉成交 Telegram | `✅ 成交|平倉(第1注)Sell 20 @ 1.2322|持倉 3 小時 12 分|…` |
+| ⚪ 每小時狀態 | `持倉時間(預估 4 小時 0 分):第1注 5 小時 2 分 ⚠️、第2注 1 小時 0 分`(超過預估標 ⚠️) |
+| 🟣 結束總結 | `持倉時間:平均 …、最長 …(第k注)|超過預估 …:n 注|收尾強制平倉 n 注` |
+| trading DB | `sl_order.hold_seconds`(平倉單;`setup_db` 自動補欄位) |
+
+**預估持倉時間**:策略 YAML `expected_hold: {value: 4, unit: hours}`(minutes / hours / days;null = 不預估;
+只支援分注策略,其他策略寫了會在讀檔時報錯)。某一注持倉超過預估 → `logger.warning` 一次(🟡 Telegram),
+**只提醒、不自動平倉**。
+
+**細節**:收尾(時間窗 / 停止)時還拿著的注,持倉算到市價平倉那一刻(`forced`);接手的注(§6.26)實際建倉
+時間拿不到,從接手時算起。時間以 tick 為準(輪詢間隔 5 秒;Mac 睡眠時 tick 會延後,見 TODO)。
 

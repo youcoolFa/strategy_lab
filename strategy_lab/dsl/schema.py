@@ -40,6 +40,9 @@ class StrategyDefinition(BaseModel):
     # 分注策略(engine/scale_in_runner.py)= true;必須跟 entry/exit plugin 一致,
     # dsl/loader.py 會檢查。每個策略 YAML 都明確寫出來,一眼看得出是哪一種。
     scale_in: bool = False
+    # 預估持倉時間(分注策略):{value: 4, unit: hours};持倉超過就 🟡 警告,不自動平倉;
+    # null = 不預估。格式由 engine/hold_time.parse_expected_hold 檢查(2026-10-09)。
+    expected_hold: Optional[Dict[str, Any]] = None
 
     class Config:
         extra = "forbid"

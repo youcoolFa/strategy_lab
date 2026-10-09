@@ -199,3 +199,36 @@ class TestFeeRatio:
         runner.events = [ev]
         runner.on_event(ev)
         assert "這輪淨利 -0.22 USDT" in telegram[0] and "手續費佔虧損 10.00%" in telegram[0]
+
+
+class TestHoldTimeInExitFill:
+    """平倉成交的 🟢 訊息帶這一注的持倉時間(2026-10-09)"""
+
+    def test_exit_fill_shows_hold_time(self, telegram):
+        runner = FakeRunner()
+        attach_notifications(runner, dry_run=False)
+        rec = record("closed", purpose="exit", lot=1)
+        rec.hold_seconds = 3 * 3600 + 12 * 60
+        runner.on_order(rec)
+        assert "持倉 3 小時 12 分" in telegram[0]
+
+    def test_entry_fill_has_no_hold_time(self, telegram):
+        runner = FakeRunner()
+        attach_notifications(runner, dry_run=False)
+        runner.on_order(record("closed", lot=1))
+        assert "持倉" not in telegram[0]
+
+
+class TestExpectedHoldReachesTheRunner:
+    def test_build_runner_passes_expected_hold_from_the_strategy_yaml(self, monkeypatch, tmp_path):
+        from pathlib import Path
+
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        src = (Path(__file__).resolve().parents[2] / "strategies" / "scale_in_ladder.yaml").read_text()
+        path = tmp_path / "s.yaml"
+        path.write_text(src + "\nexpected_hold:\n  value: 3\n  unit: hours\n")
+        config = ExecutionConfig(strategy_path=str(path), dry_run=True, symbol_override="SUIUSDT",
+                                 entry_prices=[1.2, 1.19, 1.18])
+        runner, _ = build_runner_and_symbol(config)
+        assert runner.expected_hold == timedelta(hours=3)

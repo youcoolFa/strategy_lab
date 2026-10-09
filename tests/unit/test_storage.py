@@ -296,6 +296,16 @@ class TestLotColumn:
         [o] = rows(db, SlOrder)
         assert o.lot == 2
 
+    def test_exit_hold_seconds_is_stored(self, db, tmp_path):
+        """平倉單記這一注的持倉秒數(建倉成交 → 平倉成交,2026-10-09)"""
+        rec = make_recorder(db, tmp_path)
+        rec.start_run(run_info())
+        record = order("o9", "exit", "Sell", "closed", avg=1000.0, filled=1.0)
+        record.lot, record.hold_seconds = 1, 11520
+        rec.record_order(record)
+        [o] = rows(db, SlOrder)
+        assert o.hold_seconds == 11520
+
 
 class TestSetupAddsNewColumns:
     def test_existing_sl_order_without_lot_gets_the_column(self, tmp_path):

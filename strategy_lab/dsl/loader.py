@@ -18,6 +18,7 @@ registry.get(kind, spec.type) 把字串轉成 class -> class(**spec.params)
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Literal, Optional, Union
 
@@ -26,6 +27,7 @@ import yaml
 import strategy_lab.plugins  # noqa: F401  (觸發所有 @register 執行)
 from strategy_lab.dsl.schema import StrategyDefinition
 from strategy_lab.interfaces import EntrySignal, ExitSignal, KillSwitch, TimeWindow
+from strategy_lab.engine.hold_time import parse_expected_hold
 from strategy_lab.registry import get as registry_get
 
 
@@ -43,6 +45,7 @@ class ComposedStrategy:
     direction: Literal["long", "short"] = "long"
     loop: Optional[int] = 0
     scale_in: bool = False
+    expected_hold: Optional[timedelta] = None  # 預估持倉時間(分注策略),見 engine/hold_time.py
 
 
 def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
@@ -59,6 +62,9 @@ def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
     entry = registry_get("entry", definition.entry.type)(**definition.entry.params)
     exit = registry_get("exit", definition.exit.type)(**definition.exit.params)
     _validate_scale_in_flag(definition.scale_in, entry, exit)
+    expected_hold = parse_expected_hold(definition.expected_hold)
+    if expected_hold is not None and not definition.scale_in:
+        raise ValueError("expected_hold(預估持倉時間)目前只支援分注策略(scale_in: true)")
 
     return ComposedStrategy(
         name=definition.name,
@@ -70,6 +76,7 @@ def load_strategy(path: Union[str, Path]) -> ComposedStrategy:
         direction=definition.direction,
         loop=definition.loop,
         scale_in=definition.scale_in,
+        expected_hold=expected_hold,
     )
 
 

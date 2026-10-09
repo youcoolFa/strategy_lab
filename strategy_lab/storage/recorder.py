@@ -141,6 +141,7 @@ class TradeRecorder:
             "purpose": rec.purpose, "lot": getattr(rec, "lot", None), "side": rec.side, "order_type": rec.order_type, "price": rec.price,
             "qty": rec.qty, "reduce_only": rec.reduce_only, "status": rec.status, "avg_price": rec.avg_price,
             "filled_qty": rec.filled_qty, "created_at": prev["created_at"] if prev else rec.time, "updated_at": rec.time,
+            "hold_seconds": round(rec.hold_seconds) if getattr(rec, "hold_seconds", None) is not None else None,
         }
         self._orders[rec.order_id] = row
         self._write("sl_order", row)

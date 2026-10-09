@@ -22,6 +22,9 @@ symbol: BTC/USDT
 direction: long   # long(買入建倉、往上平倉)/ short(賣出建倉、往下平倉)
 loop: 2   # 重複次數:總 loop 數 = loop + 1;0 = 只做 1 個 loop;null = 不限次數(做到時間窗結束)
 scale_in: true
+# 預估持倉時間:某一注從建倉成交起持倉超過這麼久,就發 🟡 Telegram 警告(只提醒,不自動平倉);
+# null = 不預估。例:expected_hold: {value: 4, unit: hours}(unit:minutes / hours / days)
+expected_hold: null
 
 entry:
   type: scale_in

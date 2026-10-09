@@ -37,7 +37,7 @@ import platform
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -48,6 +48,7 @@ from loguru import logger
 from strategy_lab.dsl.loader import load_strategy
 from strategy_lab.dsl.order_config import OrderConfig, compute_qty
 from strategy_lab.engine.events import Event, summarize
+from strategy_lab.engine.hold_time import format_hold, hold_summary
 from strategy_lab.engine.runner import RunState, StrategyRunner
 from strategy_lab.engine.scale_in_runner import ScaleInRunner
 from strategy_lab.live.broker import LiveBroker
@@ -195,7 +196,8 @@ def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = N
         entry_prices = scale_in_entry_prices(config)
         # 第一注數量:fixed_quote_amount / account_percentage 用第一注的建倉價換算
         order_qty = _resolve_order_qty(config, bybit_client, symbol, price=entry_prices[0])
-        runner: StrategyRunner = ScaleInRunner(order_qty=order_qty, entry_prices=entry_prices, **common)
+        runner: StrategyRunner = ScaleInRunner(order_qty=order_qty, entry_prices=entry_prices,
+                                               expected_hold=strategy.expected_hold, **common)
     else:
         order_qty = _resolve_order_qty(config, bybit_client, symbol)
         runner = StrategyRunner(order_qty=order_qty, **common)
@@ -256,9 +258,11 @@ def attach_notifications(runner: Any, dry_run: bool, costs: Any = None) -> None:
             prev_order(rec)
         if rec.status == "closed":
             lot = f"(第{rec.lot}注)" if rec.lot else ""
+            held = getattr(rec, "hold_seconds", None)
+            hold = f"|持倉 {format_hold(timedelta(seconds=held))}" if held is not None else ""
             fills.info(
                 f"✅ 成交|{_PURPOSE_LABELS.get(rec.purpose, rec.purpose)}{lot} {rec.side} {rec.filled_qty:g} "
-                f"@ {px(rec.avg_price)}|{loop_progress(rec.event_index, getattr(runner, 'loop', None))}"
+                f"@ {px(rec.avg_price)}{hold}|{loop_progress(rec.event_index, getattr(runner, 'loop', None))}"
             )
 
     def on_event(event: Event) -> None:
@@ -478,6 +482,8 @@ def run_forever(
         f"🏁 strategy_lab 結束:{stop_reason_label(runner.stop_reason)}\n"
         f"完成 {summary.count} 個 loop(強制平倉 {summary.forced}、獲利 {summary.wins})\n"
         f"{total},最大回撤 {usd(summary.max_drawdown)} USDT"
+        + (f"\n{holds}" if (holds := hold_summary(getattr(runner, "lot_holds", []),
+                                                   getattr(runner, "expected_hold", None))) else "")
     )
 
 

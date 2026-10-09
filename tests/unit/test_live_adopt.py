@@ -101,6 +101,12 @@ class TestApply:
         assert len(broker._orders) == before  # 沒有重掛、沒有新單
         assert broker.position_qty() == 60.0
 
+    def test_hold_time_of_adopted_lots_counts_from_adoption(self):
+        """實際建倉時間拿不到,持倉計時從接手時算起(2026-10-09)"""
+        runner, broker, orders, records = runner_with_exchange_state()
+        apply_adoption(runner, plan(orders, 60.0), NOW)
+        assert [l.filled_at for l in runner.lots] == [NOW, NOW, NOW]
+
     def test_loop_completes_when_exits_fill_with_pnl_from_exchange_average(self):
         runner, broker, orders, records = runner_with_exchange_state()
         apply_adoption(runner, plan(orders, 60.0), NOW)

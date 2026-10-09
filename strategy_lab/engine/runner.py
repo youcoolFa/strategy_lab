@@ -84,6 +84,7 @@ class OrderRecord:
     filled_qty: float
     time: datetime
     lot: Optional[int] = None  # 分注策略的第幾注(1 起算);非分注策略為 None
+    hold_seconds: Optional[float] = None  # 平倉成交時:這一注持倉多久(建倉成交 → 平倉成交);其他為 None
 
 
 _ORDER_STATUS_LABEL = {"open": "下單", "closed": "成交", "canceled": "取消"}
@@ -363,11 +364,12 @@ class StrategyRunner:
         )
         self._remember(rec)
 
-    def _update_order(self, now, order_id, status, avg_price, filled_qty) -> None:
+    def _update_order(self, now, order_id, status, avg_price, filled_qty, hold_seconds=None) -> None:
         prev = self._open_records.get(order_id)
         if prev is None:
             return
-        rec = OrderRecord(**{**prev.__dict__, "status": status, "avg_price": avg_price, "filled_qty": filled_qty, "time": now})
+        rec = OrderRecord(**{**prev.__dict__, "status": status, "avg_price": avg_price, "filled_qty": filled_qty,
+                             "time": now, "hold_seconds": hold_seconds})
         self._remember(rec)
 
     def _remember(self, rec: OrderRecord) -> None:
