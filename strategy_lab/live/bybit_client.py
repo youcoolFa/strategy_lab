@@ -244,6 +244,16 @@ class BybitClient:
                 logger.warning(f"取消訂單 {order_id} 網路持續失敗,{self._persist_retry_seconds} 秒後重試,不放棄: {e}")
                 time.sleep(self._persist_retry_seconds)
 
+    def list_positions(self) -> list:
+        """整個帳戶的 USDT 永續持倉(只回有部位的;Streamlit 狀態頁用,只讀)。"""
+        resp = self._call_with_retry(self._http.get_positions, category=self._category, settleCoin="USDT")
+        return [p for p in resp["result"]["list"] if float(p.get("size") or 0.0)]
+
+    def list_open_orders(self) -> list:
+        """整個帳戶的 USDT 永續掛單(Streamlit 狀態頁用,只讀)。"""
+        resp = self._call_with_retry(self._http.get_open_orders, category=self._category, settleCoin="USDT", limit=50)
+        return resp["result"]["list"]
+
     def get_position_qty(self, symbol: str) -> float:
         """多單正數、空單負數。Bybit 的 size 永遠是正數,方向在 side
         ("Buy"/"Sell",沒持倉時是空字串)。"""

@@ -651,3 +651,26 @@ class TestNeverGiveUpOnNetworkErrors:
         client.cancel_order("BTCUSDT", "o1")  # 不應該 raise
 
         assert len(http.calls) == 8
+
+
+class TestAccountWideQueries:
+    """Streamlit 狀態頁:整個帳戶的持倉 / 掛單(不限一個 symbol),只讀(2026-10-09)。"""
+
+    def test_list_positions_returns_only_non_zero_positions_for_usdt_contracts(self):
+        http = FakeHTTP()
+        http.positions_response = {"result": {"list": [
+            {"symbol": "SUIUSDT", "side": "Buy", "size": "60", "avgPrice": "1.2254", "unrealisedPnl": "-5.9", "leverage": "10"},
+            {"symbol": "BTCUSDT", "side": "", "size": "0"},
+        ]}}
+        rows = make_client(http).list_positions()
+        assert [r["symbol"] for r in rows] == ["SUIUSDT"]
+        name, kwargs = http.calls[-1]
+        assert name == "get_positions" and kwargs["settleCoin"] == "USDT" and "symbol" not in kwargs
+
+    def test_list_open_orders_for_usdt_contracts(self):
+        http = FakeHTTP()
+        http.open_orders_response = {"result": {"list": [{"symbol": "SUIUSDT", "orderId": "a"}]}}
+        rows = make_client(http).list_open_orders()
+        assert [r["orderId"] for r in rows] == ["a"]
+        name, kwargs = http.calls[-1]
+        assert name == "get_open_orders" and kwargs["settleCoin"] == "USDT" and "symbol" not in kwargs

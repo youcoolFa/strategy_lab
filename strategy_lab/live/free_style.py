@@ -309,14 +309,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         result = stop(db_url, client, symbol, now)
         text = summary_message(result)
         print(text)
-        _send_telegram(text)
+        send_telegram(text)
         return 0
     except FreeStyleError as e:
         print(f"❌ {e}")
         return 1
 
 
-def _send_telegram(text: str) -> None:
+def send_telegram(text: str) -> None:
     from strategy_lab.log.logger_setup import get_notifier
 
     notifier = get_notifier()

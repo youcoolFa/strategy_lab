@@ -12,7 +12,8 @@ time_window(排程時間窗)、kill_switch(市場行為觸發的終止條件,選
 **現況(2026-10-09)**:另外疊加的 `strategy_lab/live/` 已經在 Bybit
 mainnet 小額帳戶實盤(分注策略 `scale_in_ladder`,preflight → 背景 daemon),
 交易紀錄寫進共用的 `trading` PostgreSQL(§6.21),Telegram 通知(§6.24);
-另有不用策略 YAML、只記帳的 free style(§6.27)與每注持倉計時(§6.28)。
+另有不用策略 YAML、只記帳的 free style(§6.27)、每注持倉計時(§6.28),
+以及 Streamlit 介面(§6.29:狀態頁 + 策略分頁:選策略 → 填參數 → 開始 / 改參數 / 停止,只做真正的交易環境)。
 Live 層的元件關係見 §1.1。
 
 本文件涵蓋元件關係、核心狀態機、單次執行流程、目前已知的設計限制,
@@ -103,7 +104,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph Entry["入口(使用者在終端機執行)"]
+    subgraph Entry["入口(終端機,或 Streamlit 頁面 ui/app.py)"]
+        UI["ui/app.py + actions.py / data.py<br/>Streamlit(只綁 127.0.0.1)"]
         PF["live/preflight.py<br/>啟動前預覽 + 輸入 yes"]
         DM["live/daemon.py<br/>start / stop / detach / status"]
         CT["live/control.py<br/>運作中改參數(請求檔)"]
@@ -136,6 +138,10 @@ flowchart TD
         TG["log/ logger_setup + telegram_notifier<br/>@fa_strategy_lab_bot"]
     end
 
+    UI -->|"預覽 / 啟動(使用者打 yes)"| PF
+    UI -->|"改參數"| CT
+    UI -->|"停止 STOP / 脫離 DETACH"| DM
+    UI -.->|"唯讀:狀態、帳戶、紀錄"| DB
     PF -->|"使用者 yes"| DM --> MAIN
     CT -.->|"請求檔,tick 之間套用"| MAIN
     CFG --> MAIN
@@ -513,6 +519,8 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 接手現有持倉與脫離 | 新增 `live/adopt.py`(`plan_adoption`/`apply_adoption`,對不上就 `AdoptionError`);`ExecutionConfig.adopt_existing_position`;`ensure_clean_start(adopt=)`、`adopt_existing()`;SIGUSR1 → `runner.request_detach()`、`run_forever` 不收尾結束;`daemon detach`;`BybitClient.get_position_avg_price()`;preflight 預覽接手內容 | 新增 §6.26 | 已完成 |
 | free style + 資料表中文說明 | 新增 `live/free_style.py`(`start`/`stop`/`status`;只讀 Bybit,stop 時用 `EventTracker` 重播成交切出每一輪,`purpose = manual`、`end_reason = free_style_stop`;7 天分段查詢);`BybitClient.list_order_history()`;`storage/models.py` 每張表/欄位加 `comment`,`setup_db` 用 COMMENT ON 寫進 Postgres | 新增 §6.27 | 已完成 |
 | 持倉計時(時間暴露)+ 預估持倉時間 | 新增 `engine/hold_time.py`(`LotHold`、`format_hold`、`parse_expected_hold`、`hold_summary`);策略 YAML `expected_hold`(只限分注);`Lot.filled_at`/`hold_warned`、`ScaleInRunner.lot_holds`/`expected_hold`、超時 WARNING 一次、收尾強制平倉也計時;`OrderRecord.hold_seconds` → `sl_order.hold_seconds`;🟢 平倉成交、⚪ 狀態、🟣 結束總結顯示 | 新增 §6.28 | 已完成 |
+| Streamlit 介面(第一、二階段) | 新增 `strategy_lab/ui/`:`data.py`(唯讀資料層:daemon 狀態 / 程式版本 / log 新鮮度、Bybit 帳戶、sl_run / sl_event、log 內容)、`actions.py`(動作層:改設定檔保留註解、preflight 預覽 / 啟動、control 改參數、daemon 停止 / 脫離)、`app.py`(畫面);`BybitClient.list_positions()` / `list_open_orders()`;`free_style.send_telegram()`;requirements 加 streamlit | 新增 §6.29 | 已完成 |
+| Streamlit 策略分頁改版 + 只做真正交易環境 | 「free style」「實盤控制」合併成「策略」分頁:進行中清單(`data.active_runs`)+ 選策略 → 填參數 → 開始;`actions.config_for` / `prepare_config`(自動找或建 `live_<策略>_<幣種>.yaml`,一律 `dry_run: false`、`testnet: false`);`data.project_root()`;拿掉 dry_run / testnet 開關 | 改寫 §6.29 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1653,3 +1661,73 @@ Superset 的 dataset 欄位描述另外從資料庫同步過一次(不會自動�
 **細節**:收尾(時間窗 / 停止)時還拿著的注,持倉算到市價平倉那一刻(`forced`);接手的注(§6.26)實際建倉
 時間拿不到,從接手時算起。時間以 tick 為準(輪詢間隔 5 秒;Mac 睡眠時 tick 會延後,見 TODO)。
 
+### 6.29 Streamlit 介面(`strategy_lab/ui/`,2026-10-09)
+
+```
+cd /Users/mac/strategy_lab && .venv/bin/streamlit run strategy_lab/ui/app.py --server.address 127.0.0.1
+```
+
+建議在終端機分頁跑(不要掛在會被關掉的預覽面板底下:伺服器一停,頁面顯示 CONNECTING,展開箭頭的圖示字型
+載不到會印出 `_arrow_right` 之類的文字,重跑上面的指令即可)。只綁本機 127.0.0.1(頁面上有會動到實盤的按鈕,
+不能開到區域網路)。頁面啟動時 `os.chdir` 到專案根目錄(設定檔裡的 `strategies/*.yaml` 是相對路徑)。
+背景程式(daemon)跟頁面完全無關:關掉頁面不影響交易。程式改了要**重開伺服器**(背後的模組不會自動重新載入)。
+
+**三層**:`app.py` 只負責畫面;`data.py`(唯讀)與 `actions.py`(動作)不 import streamlit,可以單獨測試;
+動作全部走跟終端機同一套程式——**頁面只是外殼,不另外寫交易邏輯**。
+
+| 分頁 | 內容 | 動到什麼 |
+|---|---|---|
+| 總覽 | 每份 `live_*.yaml` 的 daemon 是否在跑、PID、**程式版本**(跑的 commit 不是 HEAD 標 ⚠️ 舊碼,由 `sl_run.git_commit` 判斷:新功能要重新開始才生效)、最後寫 log 時間(運作中 > 70 分鐘沒寫 log 標 ⚠️:每小時一定有 ⚪ 狀態,沒寫通常是 Mac 睡著);Bybit 權益 / 持倉 / 掛單(整個帳戶 USDT 永續,30 秒快取) | 只讀 |
+| 交易紀錄 | 最近的 `sl_run`、`sl_event` | 只讀 |
+| Log | 選設定檔看 console log 最後 N 行 | 只讀 |
+| **策略** | 進行中清單 + 選策略 → 填參數 → 開始(見下) | **實盤**;free style 只寫 trading DB |
+
+#### 策略分頁(同一天改版:原本的「free style」「實盤控制」兩個分頁合併)
+
+使用者的流程是 **選策略 → 填參數 → 開始 → 結束**,free style 是其中一個選項。設定檔(`live_*.yaml`)是底層細節,
+頁面自動處理,使用者不用管。
+
+**① 進行中**(`data.active_runs`):在跑的策略 daemon + 進行中的 free style,每一列是一個可展開的區塊,
+標題 `🔴 實盤|SUIUSDT|scale_in_ladder|10-07 04:16 開始`。所有按鈕的 key 都帶設定檔名 / 幣種,一頁可以有好幾列。
+- 策略列:
+  - **改參數**(建倉價 / 平倉距離 / loop)→ `control.main()`:預覽變更 → 打 `yes` → 送請求給背景程式,下一個 tick
+    套用、寫回設定檔(最多等 90 秒,沒回應自動撤回)。預覽後又改了參數 → 要重新預覽。
+  - **停止**(收尾:取消掛單、市價平倉)要打 `STOP`;**脫離**(不收尾,單留在交易所)要打 `DETACH`
+    → `daemon.stop` / `daemon.detach`。
+- free style 列:勾「我確認」→ 結束(§6.27 的 stop,發 🟣 Telegram)。
+
+**② 開始新的**:選策略(`strategies/*.yaml` 全部 + `free style`)
+- free style:幣種(+ 選填補記時間)→ 勾確認 → 開始。
+- 一般策略:填幣種 → `actions.config_for` 找設定檔:已有「同策略 + 同幣種」的 `live_*.yaml` 就沿用,沒有就
+  自動命名 `live_<策略>_<幣種>.yaml`(例 `live_scale_in_ladder_wldusdt.yaml`)。那份已經在跑 → 只顯示
+  「已經在跑,請用進行中清單」,不能再開始。填數量模式 / 數量、接手現有持倉、(分注)各注建倉價、平倉距離、loop
+  → **「寫入參數並預覽」**(`actions.prepare_config` 寫設定檔 + `preflight_preview`)→ 打 `yes` →
+  **「以真實資金開始」**(`preflight_start`)。
+
+**頁面只做真正的交易環境**(使用者要求):沒有 dry_run / testnet 開關;`prepare_config` 一律寫
+`dry_run: false`、`testnet: false`(原本是 dry-run 的設定檔從頁面開始也會變成真錢),settings 帶這兩個直接拒絕。
+dry-run / 測試網仍可從終端機用 preflight。
+
+**接手現有持倉**(`adopt_existing_position`,§6.26):交易所上這個幣已有持倉 / 掛單時,平常會拒絕開始;勾了就把
+那些單認成各注(對不上仍拒絕),不平倉直接接著管理。用途:換新版程式但保留持倉(脫離 → 勾接手 → 重新開始)。
+
+**`actions.py` 的保護**(終端機版沒有、頁面才需要的):
+- `prepare_config`:先全部驗證(建倉價用 `validate_entry_prices`、loop 型別)才寫;新建到一半失敗會刪掉,不留半成品;
+  `set_config_values` 逐行替換值、**保留註解**,寫入前用 `yaml.safe_load` 驗證每個值;設定檔在跑時拒絕。
+- `preflight_start`:先預覽、預覽的檢查都通過(走到「輸入 yes」那一步)、**10 分鐘內**、設定檔內容(sha256)跟預覽時
+  相同;打的字原樣交給 preflight(它自己判斷 `yes`);打錯字沒開始時保留預覽可以直接再試。
+- `stop` / `detach`:要打 `STOP` / `DETACH`(大寫)。
+
+**測試**:
+- `tests/unit/test_ui_data.py`、`test_ui_actions.py`:資料層 / 動作層(假 client / 假 start_fn)。
+- `tests/unit/test_ui_app.py`:streamlit `AppTest` 真的跑整頁、按每一個按鈕(資料 / 動作換成假的):沒預覽沒有開始
+  按鈕、沒打 yes 不會開始、預覽後改參數要重新預覽、已在跑的不能再開始、沒有 dry_run / testnet 開關、
+  打 `stop` 不會停止…;每個測試都做過反向檢查(拿掉它保護的程式會失敗)。曾抓到「改參數預覽結果與按鈕
+  同名被 Streamlit 蓋掉,套用按鈕永遠不出現」的 bug。
+- `tests/integration/test_ui_daemon_lifecycle.py`:從頁面走完整流程到**真的設定檔 + 真的背景程式**:選策略 →
+  填參數 → 真的從範本建立設定檔(真錢設定)→ 預覽 → 打 yes → 真的 `daemon.start`(pid 檔、進行中清單出現)
+  → 打 STOP → 真的 SIGTERM、收尾結束;DETACH 不收尾;打錯字不開始。只有背景程式是假的
+  (`_fake_live_program.py`,不連交易所),設定檔 / pid / log 都在臨時資料夾。
+
+**還沒做**:`expected_hold` 在策略 YAML,頁面還不能改;`strategy_overrides` 只支援 loop / 平倉距離;
+頁面上真的按「以真實資金開始」還沒有實際操作過(要使用者自己按)。

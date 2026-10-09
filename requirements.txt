@@ -13,3 +13,5 @@ python-dotenv>=1.0
 sqlalchemy>=1.4,<2.1
 psycopg2-binary>=2.9
 
+# Streamlit 狀態頁(strategy_lab/ui/,2026-10-09):
+streamlit>=1.30
