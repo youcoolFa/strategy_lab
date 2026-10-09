@@ -9,11 +9,12 @@ time_window(排程時間窗)、kill_switch(市場行為觸發的終止條件,選
 `rules/`、`dsl/`、`engine/`)只對內建的模擬交易所(paper broker)與合成
 價格產生器運作,不連任何真實交易所。
 
-**現況(2026-10-09)**:另外疊加的 `strategy_lab/live/` 已經在 Bybit
+**現況(2026-10-10)**:另外疊加的 `strategy_lab/live/` 已經在 Bybit
 mainnet 小額帳戶實盤(分注策略 `scale_in_ladder`,preflight → 背景 daemon),
 交易紀錄寫進共用的 `trading` PostgreSQL(§6.21),Telegram 通知(§6.24);
 另有不用策略 YAML、只記帳的 free style(§6.27)、每注持倉計時(§6.28),
-以及 Streamlit 介面(§6.29:狀態頁 + 策略分頁:選策略 → 填參數 → 開始 / 改參數 / 停止,只做真正的交易環境)。
+以及 Streamlit 介面(§6.29:狀態頁 + 策略分頁:選策略 → 填參數 → 開始 / 改參數 / 停止,只做真正的交易環境)、
+上下同時掛單的區間策略 `weekend_band_reversion`(§6.30)。`weekend_mean_reversion` 已刪除(§6.30)。
 Live 層的元件關係見 §1.1。
 
 本文件涵蓋元件關係、核心狀態機、單次執行流程、目前已知的設計限制,
@@ -124,6 +125,7 @@ flowchart TD
         SIR["scale_in_runner.py ScaleInRunner<br/>分注:依序掛單、每注平倉"]
         EV["events.py EventTracker<br/>部位 0→0 = 一輪"]
         HT["hold_time.py<br/>每注持倉計時 / expected_hold"]
+        BR["band_runner.py BandRunner<br/>區間:上下各一張、成交就在對面補一張"]
     end
 
     subgraph Exchange["交易所"]
@@ -147,6 +149,8 @@ flowchart TD
     CFG --> MAIN
     MAIN --> SIR
     SIR -->|繼承| SR
+    BR -->|繼承| SR
+    BR --> EV
     SR --> EV
     SIR --> HT
     MAIN --> ADOPT --> SIR
@@ -521,6 +525,9 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 持倉計時(時間暴露)+ 預估持倉時間 | 新增 `engine/hold_time.py`(`LotHold`、`format_hold`、`parse_expected_hold`、`hold_summary`);策略 YAML `expected_hold`(只限分注);`Lot.filled_at`/`hold_warned`、`ScaleInRunner.lot_holds`/`expected_hold`、超時 WARNING 一次、收尾強制平倉也計時;`OrderRecord.hold_seconds` → `sl_order.hold_seconds`;🟢 平倉成交、⚪ 狀態、🟣 結束總結顯示 | 新增 §6.28 | 已完成 |
 | Streamlit 介面(第一、二階段) | 新增 `strategy_lab/ui/`:`data.py`(唯讀資料層:daemon 狀態 / 程式版本 / log 新鮮度、Bybit 帳戶、sl_run / sl_event、log 內容)、`actions.py`(動作層:改設定檔保留註解、preflight 預覽 / 啟動、control 改參數、daemon 停止 / 脫離)、`app.py`(畫面);`BybitClient.list_positions()` / `list_open_orders()`;`free_style.send_telegram()`;requirements 加 streamlit | 新增 §6.29 | 已完成 |
 | Streamlit 策略分頁改版 + 只做真正交易環境 | 「free style」「實盤控制」合併成「策略」分頁:進行中清單(`data.active_runs`)+ 選策略 → 填參數 → 開始;`actions.config_for` / `prepare_config`(自動找或建 `live_<策略>_<幣種>.yaml`,一律 `dry_run: false`、`testnet: false`);`data.project_root()`;拿掉 dry_run / testnet 開關 | 改寫 §6.29 | 已完成 |
+| 區間策略改版(上下同時掛單)| `weekend_band_reversion.yaml` 改寫;新增 `engine/band_runner.py`、plugin `entry/band.py` / `exit/band.py`;schema `band` + `direction: both`;loader 檢查;`live/main` 建 BandRunner(不支援接手)、Telegram「區間」;`status` 啟動訊息;`estimates`:`OrderPlan.band_sell_price`、`build_band_plan`、掛單計畫 / 風險 / 每輪損益;`preflight` 分支;`strategy_overrides.band`(apply / write_back);頁面買賣 % 欄位、進行中只能停止 | 新增 §6.30 | 已完成 |
+| 刪除 `weekend_mean_reversion` | 檔案搬到垃圾桶;測試改用 `mean_reversion_breakout_guard`;`ExecutionConfig.strategy_path` 預設改 `scale_in_ladder`;demo / README / 範本設定檔 / 策略註解;`tests/unit/test_demo_run_from_yaml.py` | §6.14 加註、§6.30 | 已完成 |
+| 總覽啟動 / 預估結束 / 預估長度 | `ui/data.py` 的 `schedule`、`fmt_time`、`fmt_duration`(只到分鐘;UTC → HKT)| 改 §6.29 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1118,6 +1125,9 @@ docstring 明講理由:「sat_strategy 的策略只交易 USDT 永續合約,不�
 
 ### 6.14 `weekend_mean_reversion` 改回 sat_strategy 的機制:一啟動就掛單
 
+> **2026-10-10:`weekend_mean_reversion.yaml` 已刪除**(使用者要求)。同一套進出場邏輯仍在
+> `mean_reversion_breakout_guard.yaml`(多一個 kill_switch);下面保留當時的紀錄。見 §6.30。
+
 **為什麼**:2026-09-26 對照 `sat_strategy/app/bot.py` 發現兩邊的進出場
 時機不同。sat_strategy 一啟動就把限價買單掛在簿上等價格下來,買單成交
 後馬上掛平倉單;strategy_lab 從 Phase 2 起改成「每 tick 先檢查價格有沒有
@@ -1193,6 +1203,9 @@ reduceOnly 賣單,交易所拒單,空單永遠平不掉。§6.11 的空單支援
 後才會真的被踩到。
 
 ### 6.16 `weekend_band_reversion`:平倉點穿過 origin 再往獲利方向偏
+
+> **2026-10-10 已改版**:`weekend_band_reversion.yaml` 改成上下同時掛單的區間策略(§6.30);
+> 下面是舊版(單邊、`resting_offset_from_reference`)的紀錄,plugin 仍保留。
 
 `weekend_mean_reversion` 的進階版,使用者提出。進場不變(long 掛買在
 `origin × (1 − deviation_pct%)`),平倉不是回到 origin,而是
@@ -1677,7 +1690,7 @@ cd /Users/mac/strategy_lab && .venv/bin/streamlit run strategy_lab/ui/app.py --s
 
 | 分頁 | 內容 | 動到什麼 |
 |---|---|---|
-| 總覽 | 每份 `live_*.yaml` 的 daemon 是否在跑、PID、**程式版本**(跑的 commit 不是 HEAD 標 ⚠️ 舊碼,由 `sl_run.git_commit` 判斷:新功能要重新開始才生效)、最後寫 log 時間(運作中 > 70 分鐘沒寫 log 標 ⚠️:每小時一定有 ⚪ 狀態,沒寫通常是 Mac 睡著);Bybit 權益 / 持倉 / 掛單(整個帳戶 USDT 永續,30 秒快取) | 只讀 |
+| 總覽 | 每份 `live_*.yaml` 的 daemon 是否在跑、PID、**啟動時間 / 預估結束 / 預估長度**(`data.schedule`:預估結束 = 策略時間窗的強制收尾時間;資料庫存 UTC,先換成 HKT 再套時間窗,2026-10-10 修了差 8 小時的 bug;畫面上的時間一律只到分鐘,長度用截到分鐘的啟動時間算)、**程式版本**(跑的 commit 不是 HEAD 標 ⚠️ 舊碼,由 `sl_run.git_commit` 判斷:新功能要重新開始才生效)、最後寫 log 時間(運作中 > 70 分鐘沒寫 log 標 ⚠️:每小時一定有 ⚪ 狀態,沒寫通常是 Mac 睡著);Bybit 權益 / 持倉 / 掛單(整個帳戶 USDT 永續,30 秒快取) | 只讀 |
 | 交易紀錄 | 最近的 `sl_run`、`sl_event` | 只讀 |
 | Log | 選設定檔看 console log 最後 N 行 | 只讀 |
 | **策略** | 進行中清單 + 選策略 → 填參數 → 開始(見下) | **實盤**;free style 只寫 trading DB |
@@ -1731,3 +1744,57 @@ dry-run / 測試網仍可從終端機用 preflight。
 
 **還沒做**:`expected_hold` 在策略 YAML,頁面還不能改;`strategy_overrides` 只支援 loop / 平倉距離;
 頁面上真的按「以真實資金開始」還沒有實際操作過(要使用者自己按)。
+
+### 6.30 區間策略 `weekend_band_reversion` 改版:上下同時掛單(2026-10-10)
+
+使用者要求:long、short 同時進行。舊版(§6.16)是單邊;新版:
+
+1. 開始時決定 origin(設定檔 `origin_price` 有填用手動值,沒填用當下價格),**上下各掛一張限價單**:
+   買 = origin × (1 − `buy_pct`%)、賣 = origin × (1 + `sell_pct`%)(買賣 % 分開設)
+2. 其中一張成交 → 在**對面價位**補一張同數量的單
+3. 循環,直到時間窗結束(或 kill switch / 手動停止):取消所有掛單、市價平倉
+
+```
+origin 100、buy/sell 0.1%、數量 1:
+開始       買 99.9 ×1   賣 100.1 ×1                 持倉 0
+跌到 99.9  買單成交 → 100.1 共 2 張賣單              持倉 +1
+漲到 100.1 2 張賣單成交 = 平多(賺 0.2)+ 開空        持倉 −1(99.9 共 2 張買單)
+跌到 99.9  2 張買單成交 = 平空(賺 0.2)+ 開多        持倉 +1 …
+```
+
+第一張成交後持倉一直在 ±數量 之間切換(使用者確認);每次穿過整個區間賺一次價差;沒有停損。
+
+**設計決定**:
+- **Bybit 單向持倉**(使用者確認,不用 Hedge Mode):買賣單是淨部位的加減。
+- **每張單都不是 reduceOnly**:持倉 +1 時,賣價上有「原本的那張」和「補的那張」;交易所成交順序不一定,
+  若平倉那張是 reduceOnly 而排在後面,會因為部位已經歸 0 被取消,翻不成空單。
+- **成交照順序一筆一筆記進 `EventTracker`**(每張單數量 = 部位大小,不會一筆成交就翻倉):多 +1 → 一張賣單
+  成交 = 這一輪結束(sl_event);下一張 = 新的一輪(空)。`sl_order.purpose = "band"`(Telegram 標「區間」)。
+- 被外部取消的單(例如在 Bybit App 手動取消)→ 原價位重新掛回去。
+- `loop` 必須是 null(一直做到收尾);不支援 `adopt_existing_position`(preflight / build_runner 拒絕);
+  只能 `order_type: limit`。
+
+**元件**:
+| 檔 | 內容 |
+|---|---|
+| `plugins/entry/band.py` | `BandEntry(buy_pct, sell_pct)`:驗證 0 < % < 100,`prices(origin)` → (買, 賣) |
+| `plugins/exit/band.py` | `BandExit`:標記(策略 YAML 規定要有 exit),沒有參數 |
+| `dsl/schema.py` / `loader.py` | `band: bool`、`direction: both`;band ⇔ entry/exit 都是 band、direction both、loop null |
+| `engine/band_runner.py` | `BandRunner(StrategyRunner)`:第一個 tick 上下各掛一張;`_sync` 處理成交 → 對面補一張 |
+| `live/main.py` | `band: true` → BandRunner;`apply_strategy_overrides` 支援 `strategy_overrides.band` |
+| `live/control.py` | `write_back` 支援 `band`(頁面寫的買賣 %;運作中不能改) |
+| `live/status.py` | 啟動訊息列出買、賣價與規則;掛單標「區間」 |
+| `estimates/plan.py` / `model.py` | `build_band_plan`:direction long、entry = 買價、take_profit = 賣價(每輪損益照多單算,空單價差相同)、`band_sell_price` |
+| `estimates/metrics/*` | 掛單計畫列出兩張單與規則、現價已在區間外警告;風險註明持倉可能是多或空;每輪損益標「每次穿過區間」 |
+| `live/preflight.py` | 區間分支;交易所上有殘留就拒絕(不支援接手) |
+| `ui/actions.py` / `app.py` | `strategy_info` 帶出 band 與 %;`prepare_config` 寫 `strategy_overrides.band`、不寫 loop;頁面欄位「買單 % / 賣單 %」(沒有建倉價 / loop / 接手);進行中的區間策略**只能停止**(不能改參數;不提供脫離,因為脫離後不能接手) |
+
+**測試**:`tests/integration/test_band_runner.py`(PaperBroker:上下各一張、買單成交對面補一張、穿過區間翻倉並記價差、
+連續循環、賣單先成交、區間內不動、外部取消重掛、收尾取消並平倉);`test_plugins_band.py`、`test_estimates_band.py`、
+`test_dsl_loader.py` / `test_dsl_schema.py` / `test_live_main.py` / `test_live_status.py` / `test_live_preflight.py` /
+`test_live_control.py` / `test_ui_actions.py` / `test_ui_app.py` 的 band 部分。**沒有回測過**;預設 buy / sell 0.1%。
+
+**同一天刪除 `weekend_mean_reversion`**(使用者要求):檔案搬到 `~/.Trash`;它的邏輯在
+`mean_reversion_breakout_guard.yaml` 裡完全一樣(多一個 kill_switch),原本拿它當範例的 14 個測試改用 guard;
+`ExecutionConfig.strategy_path` 預設改成 `scale_in_ladder`;`tests/unit/test_demo_run_from_yaml.py` 防止 demo 寫死不存在的策略名。
+
