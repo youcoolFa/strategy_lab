@@ -294,6 +294,22 @@ class BybitClient:
                 return rows
             params["cursor"] = cursor
 
+    def list_order_history(self, symbol: str, start: datetime, end: datetime) -> list:
+        """一段時間內的訂單歷史(已成交 / 已取消…;free style 停止時用)。
+        Bybit 一次最多回 50 筆,用 nextPageCursor 翻頁;查詢區間上限 7 天。"""
+        params = dict(
+            category=self._category, symbol=symbol, limit=50,
+            startTime=int(start.timestamp() * 1000), endTime=int(end.timestamp() * 1000),
+        )
+        rows: list = []
+        while True:
+            resp = self._call_with_retry(self._http.get_order_history, **params)
+            rows.extend(resp["result"]["list"])
+            cursor = resp["result"].get("nextPageCursor")
+            if not cursor:
+                return rows
+            params["cursor"] = cursor
+
     def get_open_orders(self, symbol: str) -> list:
         resp = self._call_with_retry(self._http.get_open_orders, category=self._category, symbol=symbol)
         return resp["result"]["list"]

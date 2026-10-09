@@ -440,6 +440,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 淨利與手續費比率 | `TradeRecorder.event_costs()`(Bybit 真實手續費/資金費);`live/status.py` 新增 `cost_totals`/`fee_ratio`/`net_summary`/`px`/`usd`;loop 結算、累計、每小時狀態、結束總結改成淨利 + 手續費佔利益(虧損)比率;價格 4 位、金額 2 位;「收尾還有」改成「距強制收尾還有」 | §6.24 新增「損益一律顯示淨利」「數字格式」「強制收尾」 | 已完成 |
 | 運作中改參數 | 新增 `live/control.py`(`set entry_prices/distance/loop`:預覽 + yes、請求檔/結果檔、等 90 秒、逾時撤回、超過 10 分鐘的請求不套用);`StrategyRunner`/`ScaleInRunner.apply_changes()`(先全部驗證、取消重掛、取消前已成交不重掛、越過現價拒絕);`ExecutionConfig.strategy_overrides` + `apply_strategy_overrides()`(啟動與 preflight 套用);`run_forever` 在 tick 之間 `process_control()` | 新增 §6.25 | 已完成 |
 | 接手現有持倉與脫離 | 新增 `live/adopt.py`(`plan_adoption`/`apply_adoption`,對不上就 `AdoptionError`);`ExecutionConfig.adopt_existing_position`;`ensure_clean_start(adopt=)`、`adopt_existing()`;SIGUSR1 → `runner.request_detach()`、`run_forever` 不收尾結束;`daemon detach`;`BybitClient.get_position_avg_price()`;preflight 預覽接手內容 | 新增 §6.26 | 已完成 |
+| free style + 資料表中文說明 | 新增 `live/free_style.py`(`start`/`stop`/`status`;只讀 Bybit,stop 時用 `EventTracker` 重播成交切出每一輪,`purpose = manual`、`end_reason = free_style_stop`;7 天分段查詢);`BybitClient.list_order_history()`;`storage/models.py` 每張表/欄位加 `comment`,`setup_db` 用 COMMENT ON 寫進 Postgres | 新增 §6.27 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1529,3 +1530,33 @@ preflight 同樣先預覽「會接手什麼」,對不上就拒絕。只支援分
 - 平倉價是「**設定的**建倉價 ± 距離」,不是實際成本:三注一掛就吃單、實際成本 1.22542 比設定的 1.2297 低,
   平倉單仍掛在 1.231 附近。就算用 §6.25 把距離調小,平倉價也只會降一點點;要真正依實際成本出場,需要另外
   加「平倉價照實際成本算」的選項。
+
+### 6.27 free style(手動交易的紀錄,`live/free_style.py`,2026-10-09)
+
+使用者自己在 Bybit App / 網頁下單,strategy_lab 只記帳,不用策略 YAML:
+
+```
+.venv/bin/python -m strategy_lab.live.free_style start --symbol ETHUSDT   # 可加 --since "2026-10-09 14:00"(HKT,補記)
+.venv/bin/python -m strategy_lab.live.free_style stop --symbol ETHUSDT
+.venv/bin/python -m strategy_lab.live.free_style status
+```
+
+- **start**:只在 `sl_run` 寫一列就結束——`strategy_name = "free style"`、`symbol`、`started_at`;
+  `strategy_path` / `strategy_yaml` / `direction` / `order_type` = `NA`,`strategy_params = {}`,
+  `qty` / `loop` / `origin_price` / `preflight` = NULL。**中間沒有程式在跑**,Mac 合蓋睡眠不影響。
+- **stop**:到 Bybit 拉「開始 → 現在、這個幣種」的訂單歷史(`list_order_history` + 還掛著的
+  `get_open_orders`)與成交明細(`get_executions`,含資金費),照時間重播成交、用跟實盤同一套
+  `EventTracker` 切出每一輪,寫進 `sl_order`(`purpose = manual`、`lot = NULL`)/ `sl_fill` /
+  `sl_event`,補上 `sl_run` 的結束時間、`end_reason = free_style_stop` 與損益,發 🟣 Telegram 總結。
+  每張單歸到「它第一筆成交時那一輪」;沒成交的單歸到下單時正在進行 / 下一個開始的那一輪。
+- **只讀 Bybit**:不下單、不取消。
+
+**規則**:同一個幣同時只能有一段還沒結束的 run(`ended_at` 與 `end_reason` 都是 NULL;另一段 free style
+或 strategy_lab 實盤),否則單會混在一起;start 時這個幣要沒有持倉、沒有掛單(否則不知道原本的成本);
+stop 時還有持倉 → 這一輪不算進 `sl_event`(成交明細照寫),總結會提醒。資料庫連不上不能 start
+(要靠 `sl_run` 記開始時間)。Bybit 的訂單歷史 / 成交明細一次最多查 7 天 → 自動分段、用 id 去重。
+
+**資料表中文說明**(同一天):`storage/models.py` 每張表、每個欄位都有 `comment`;`setup_db` 每次
+執行都用 `COMMENT ON` 寫進 Postgres(說明有冒號,用 `exec_driver_sql` 原樣送出,不能用 `text()`;psycopg2 會把 `%` 當格式符號,送出前改成 `%%`)。
+Superset 的 dataset 欄位描述另外從資料庫同步過一次(不會自動同步,改了說明要再同步)。
+

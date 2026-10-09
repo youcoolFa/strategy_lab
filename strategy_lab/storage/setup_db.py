@@ -15,7 +15,7 @@ import os
 from typing import List, Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import MetaData, create_engine, inspect, text
 
 from strategy_lab.storage.models import Base
 
@@ -24,7 +24,35 @@ def setup(db_url: str) -> List[str]:
     engine = create_engine(db_url, future=True)
     Base.metadata.create_all(engine)
     _add_missing_columns(engine)
-    return sorted(t for t in inspect(engine).get_table_names() if t.startswith("sl_"))
+    _apply_comments(engine)
+    tables = sorted(t for t in inspect(engine).get_table_names() if t.startswith("sl_"))
+    engine.dispose()
+    return tables
+
+
+def _quote(text_: str) -> str:
+    return "'" + text_.replace("'", "''") + "'"
+
+
+def comment_statements(metadata: MetaData) -> List[str]:
+    """把 models.py 的中文說明變成 COMMENT ON 語句。create_all 只在建表時帶 comment,
+    已存在的表(或之後改了說明)要靠這些語句更新;重跑只是覆蓋成同樣內容。"""
+    stmts: List[str] = []
+    for table in metadata.sorted_tables:
+        if table.comment:
+            stmts.append(f"COMMENT ON TABLE {table.name} IS {_quote(table.comment)}")
+        stmts += [f"COMMENT ON COLUMN {table.name}.{c.name} IS {_quote(c.comment)}" for c in table.columns if c.comment]
+    return stmts
+
+
+def _apply_comments(engine) -> None:
+    if engine.dialect.name != "postgresql":  # SQLite 沒有 COMMENT ON(測試用)
+        return
+    # 用 exec_driver_sql 原樣送出:說明裡有「(USDT):正數」這種冒號,text() 會當成 :正數 參數;
+    # psycopg2 會把 % 當格式符號,要寫成 %%
+    with engine.begin() as conn:
+        for stmt in comment_statements(Base.metadata):
+            conn.exec_driver_sql(stmt.replace("%", "%%"))
 
 
 def _add_missing_columns(engine) -> None:

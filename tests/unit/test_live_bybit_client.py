@@ -515,6 +515,35 @@ class TestGetExecutions:
         assert "cursor" not in first and second["cursor"] == "c2"
 
 
+class TestListOrderHistory:
+    """free style 停止時要拉回期間內所有的單(2026-10-09)。"""
+
+    def test_pages_through_with_cursor_and_passes_the_time_range(self):
+        from datetime import datetime, timezone
+
+        http = FakeHTTP()
+        pages = [
+            {"result": {"list": [{"orderId": "a"}], "nextPageCursor": "c2"}},
+            {"result": {"list": [{"orderId": "b"}], "nextPageCursor": ""}},
+        ]
+
+        def get_order_history(**kwargs):
+            http.calls.append(("get_order_history", kwargs))
+            return pages.pop(0)
+
+        http.get_order_history = get_order_history
+        start = datetime(2026, 10, 4, 4, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 10, 5, 4, 0, tzinfo=timezone.utc)
+
+        rows = make_client(http).list_order_history("ETHUSDT", start, end)
+
+        assert [r["orderId"] for r in rows] == ["a", "b"]
+        first, second = http.calls[0][1], http.calls[1][1]
+        assert first["symbol"] == "ETHUSDT" and first["category"] == "linear"
+        assert first["startTime"] == int(start.timestamp() * 1000) and first["endTime"] == int(end.timestamp() * 1000)
+        assert "cursor" not in first and second["cursor"] == "c2"
+
+
 class TestNeverGiveUpOnNetworkErrors:
     """2026-10-05 對齊 sat_strategy(docs/ARCHITECTURE.md §6.23)。"""
 

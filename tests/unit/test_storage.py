@@ -197,6 +197,95 @@ class TestSetupDb:
         assert setup(url) == ["sl_event", "sl_fill", "sl_order", "sl_run"]
 
 
+class TestTableComments:
+    """每張表、每個欄位都有中文說明,setup 時寫進 Postgres(COMMENT ON),
+    在 Superset / 任何 DB 工具打開表就看得到,不用翻程式。"""
+
+    def test_every_table_and_column_has_a_comment(self):
+        missing = [t.name for t in Base.metadata.sorted_tables if not (t.comment or "").strip()]
+        missing += [f"{t.name}.{c.name}" for t in Base.metadata.sorted_tables
+                    for c in t.columns if not (c.comment or "").strip()]
+        assert missing == []
+
+    def test_comment_statements_cover_every_table_and_column(self):
+        from strategy_lab.storage.setup_db import comment_statements
+
+        stmts = comment_statements(Base.metadata)
+        columns = sum(len(t.columns) for t in Base.metadata.sorted_tables)
+        assert len(stmts) == len(Base.metadata.sorted_tables) + columns
+        assert any(s.startswith("COMMENT ON TABLE sl_run IS '") for s in stmts)
+        assert any(s.startswith("COMMENT ON COLUMN sl_fill.fee IS '") for s in stmts)
+
+    def test_single_quote_in_a_comment_is_escaped(self):
+        from sqlalchemy import Column, Integer, MetaData, Table
+
+        from strategy_lab.storage.setup_db import comment_statements
+
+        md = MetaData()
+        Table("x", md, Column("a", Integer, primary_key=True, comment="it's"), comment="表")
+        assert comment_statements(md) == ["COMMENT ON TABLE x IS '表'", "COMMENT ON COLUMN x.a IS 'it''s'"]
+
+    def test_comments_are_sent_as_raw_sql_so_colons_are_not_bind_params(self):
+        """說明裡有「(USDT):正數」這種冒號,用 sqlalchemy text() 會被當成 :正數 參數而失敗
+        (2026-10-09 套用到真 DB 時發生),所以要用 exec_driver_sql 原樣送出。"""
+        from strategy_lab.storage import setup_db
+
+        sent = []
+
+        class FakeConn:
+            def exec_driver_sql(self, sql):
+                sent.append(sql)
+
+            def execute(self, *a, **k):
+                raise AssertionError("不要用 text()/execute 送 COMMENT")
+
+        class FakeBegin:
+            def __enter__(self):
+                return FakeConn()
+
+            def __exit__(self, *exc):
+                return False
+
+        class FakeEngine:
+            class dialect:
+                name = "postgresql"
+
+            def begin(self):
+                return FakeBegin()
+
+        setup_db._apply_comments(FakeEngine())
+        assert sent == [s.replace("%", "%%") for s in setup_db.comment_statements(Base.metadata)]
+        assert any("):正數" in s for s in sent)
+
+    def test_percent_signs_are_doubled_for_psycopg2(self, monkeypatch):
+        """psycopg2 的 exec_driver_sql 會把 % 當格式符號(crypto_database 2026-10-09 踩到),要寫成 %%"""
+        from strategy_lab.storage import setup_db
+
+        sent = []
+
+        class FakeConn:
+            def exec_driver_sql(self, sql):
+                sent.append(sql)
+
+        class FakeBegin:
+            def __enter__(self):
+                return FakeConn()
+
+            def __exit__(self, *exc):
+                return False
+
+        class FakeEngine:
+            class dialect:
+                name = "postgresql"
+
+            def begin(self):
+                return FakeBegin()
+
+        monkeypatch.setattr(setup_db, "comment_statements", lambda md: ["COMMENT ON COLUMN x.a IS '勝率(%)'"])
+        setup_db._apply_comments(FakeEngine())
+        assert sent == ["COMMENT ON COLUMN x.a IS '勝率(%%)'"]
+
+
 class TestLotColumn:
     def test_order_lot_is_stored(self, db, tmp_path):
         rec = make_recorder(db, tmp_path)
