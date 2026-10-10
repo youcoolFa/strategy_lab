@@ -55,6 +55,9 @@ class RunInfo:
     preflight: Optional[Dict[str, Any]]
     log_path: Optional[str]
     started_at: datetime
+    expected_end_at: Optional[datetime] = None  # 策略時間窗的強制收尾時間
+    expected_duration_seconds: Optional[int] = None
+    expected_hold_seconds: Optional[int] = None  # 策略 YAML 的 expected_hold
 
 
 def _strip_secrets(value: Any) -> Any:
@@ -83,6 +86,10 @@ def decode_row(table: str, row: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(column.type, TIMESTAMP) and isinstance(out.get(column.name), str):
             out[column.name] = datetime.fromisoformat(out[column.name])
     return out
+
+
+def _seconds(delta: timedelta) -> int:
+    return round(delta.total_seconds())
 
 
 def _ms_to_dt(ms: Any) -> datetime:
@@ -162,6 +169,7 @@ class TradeRecorder:
         self._run.update(
             ended_at=now, end_reason=reason, events_count=stats.count, gross_pnl=stats.total_pnl,
             net_pnl=sum(r["net_pnl"] for r in event_rows), max_drawdown=stats.max_drawdown,
+            duration_seconds=_seconds(now - self._run["started_at"]),
         )
         self._write("sl_run", self._run)
 
@@ -218,6 +226,8 @@ class TradeRecorder:
             "max_position": event.max_position, "avg_entry": event.avg_entry, "avg_exit": event.avg_exit,
             "realized_pnl": event.realized_pnl, "fees": fees, "funding": funding,
             "net_pnl": event.realized_pnl - fees - funding, "max_drawdown": event.max_drawdown, "forced": event.forced,
+            "hold_seconds": _seconds(event.end_time - event.start_time),
+            "expected_hold_seconds": self._run.get("expected_hold_seconds"),
         }
 
     def _write(self, table: str, row: Dict[str, Any]) -> None:

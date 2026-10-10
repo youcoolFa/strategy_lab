@@ -97,3 +97,38 @@ class TestStopReason:
         runner, _ = make_runner()
         runner.tick(at(0), 1000.0)
         assert runner.stop_reason is None
+
+
+class TestHoldSeconds:
+    """減倉的成交單記持倉秒數(這輪開始有倉 → 這張成交,2026-10-11);建倉單、掛單、取消都是 None。"""
+
+    def test_exit_fill_has_hold_seconds_entry_does_not(self):
+        runner, records = make_runner()
+        runner.tick(at(0), 1000.0)
+        runner.tick(at(1), 985.0)  # 建倉成交
+        runner.tick(at(2), 985.0)
+        runner.tick(at(31), 1000.0)  # 平倉成交
+
+        holds = [(r.purpose, r.status, r.hold_seconds) for r in records]
+        assert holds == [
+            ("entry", "open", None), ("entry", "closed", None),
+            ("exit", "open", None), ("exit", "closed", 30 * 60),
+        ]
+
+    def test_short_exit_also_has_hold_seconds(self):
+        runner, records = make_runner(direction="short")
+        runner.tick(at(0), 1000.0)
+        runner.tick(at(1), 1015.0)  # 賣出建倉成交
+        runner.tick(at(2), 1015.0)
+        runner.tick(at(11), 1000.0)  # 買回平倉成交
+        assert records[-1].status == "closed" and records[-1].hold_seconds == 10 * 60
+
+    def test_forced_close_has_hold_seconds(self):
+        runner, records = make_runner()
+        runner.tick(at(0), 1000.0)
+        runner.tick(at(1), 985.0)  # 買進成交
+        cleanup_at = runner.window_end - timedelta(minutes=1)
+        runner.tick(cleanup_at, 970.0)
+
+        [forced] = [r for r in records if r.purpose == "forced_close" and r.status == "closed"]
+        assert forced.hold_seconds == (cleanup_at - at(1)).total_seconds()

@@ -52,6 +52,11 @@ class SlRun(Base):
     gross_pnl = Column(MONEY, comment="價差毛利總和(USDT,未扣手續費、資金費)")
     net_pnl = Column(MONEY, comment="淨利總和(USDT)= 毛利 − 手續費 − 資金費")
     max_drawdown = Column(MONEY, comment="整段執行的最大回撤(USDT,<= 0)")
+    duration_seconds = Column(Integer, comment="實際執行秒數 = ended_at − started_at;還在跑時為 NULL(2026-10-11 起才有)")
+    expected_end_at = Column(TS, comment="預估結束時間:啟動當下算出的策略時間窗強制收尾時間(取消掛單、市價平倉);"
+                                         "loop 做完、手動停止會更早結束(2026-10-11 起才有)")
+    expected_duration_seconds = Column(Integer, comment="預估執行秒數 = expected_end_at − started_at(2026-10-11 起才有)")
+    expected_hold_seconds = Column(Integer, comment="策略 YAML 的 expected_hold(預估每注持倉時間)換算成秒;沒設定為 NULL(2026-10-11 起才有)")
 
 
 class SlOrder(Base):
@@ -73,8 +78,9 @@ class SlOrder(Base):
     filled_qty = Column(MONEY, comment="已成交數量")
     created_at = Column(TS, nullable=False, comment="下單時間")
     updated_at = Column(TS, nullable=False, comment="最後一次狀態更新時間(成交 / 取消)")
-    hold_seconds = Column(Integer, comment="持倉秒數(時間暴露):這一注建倉成交 → 平倉成交;只有分注策略的平倉單有值,"
-                                           "接手的注從接手時算起")
+    hold_seconds = Column(Integer, comment="持倉秒數(時間暴露):只有減倉的成交單有值(平倉 / 收尾強制平倉 / 區間策略平掉部位的那張);"
+                                           "分注策略 = 這一注建倉成交 → 平倉成交,其他 = 這輪開始有倉 → 這張成交;"
+                                           "接手的部位從接手時算起。2026-10-11 前只有分注策略的平倉單有值")
 
 
 class SlFill(Base):
@@ -113,6 +119,9 @@ class SlEvent(Base):
     net_pnl = Column(MONEY, nullable=False, comment="淨利(USDT)= realized_pnl − fees − funding")
     max_drawdown = Column(MONEY, nullable=False, comment="這輪持倉期間最大浮虧(USDT,<= 0)")
     forced = Column(Boolean, nullable=False, comment="true = 這輪是收尾時市價強制平倉結束的")
+    hold_seconds = Column(Integer, comment="實際持倉秒數 = end_time − start_time(2026-10-11 起才有)")
+    expected_hold_seconds = Column(Integer, comment="預估持倉秒數:策略 YAML 的 expected_hold(同 sl_run.expected_hold_seconds);"
+                                                    "沒設定為 NULL(2026-10-11 起才有)")
 
 
 MODELS = {m.__tablename__: m for m in (SlRun, SlOrder, SlFill, SlEvent)}
