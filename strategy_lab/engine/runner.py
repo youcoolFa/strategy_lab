@@ -84,7 +84,7 @@ class OrderRecord:
     filled_qty: float
     time: datetime
     lot: Optional[int] = None  # 分注策略的第幾注(1 起算);非分注策略為 None
-    hold_seconds: Optional[float] = None  # 平倉成交時:這一注持倉多久(建倉成交 → 平倉成交);其他為 None
+    hold_seconds: Optional[float] = None  # 減倉成交時:持倉多久(分注 = 這一注建倉成交起;其他 = 這輪開始有倉起);其他為 None
 
 
 _ORDER_STATUS_LABEL = {"open": "下單", "closed": "成交", "canceled": "取消"}
@@ -368,9 +368,21 @@ class StrategyRunner:
         prev = self._open_records.get(order_id)
         if prev is None:
             return
+        if status == "closed" and hold_seconds is None:
+            hold_seconds = self._closing_hold_seconds(now, prev.side)
         rec = OrderRecord(**{**prev.__dict__, "status": status, "avg_price": avg_price, "filled_qty": filled_qty,
                              "time": now, "hold_seconds": hold_seconds})
         self._remember(rec)
+
+    def _closing_hold_seconds(self, now: datetime, side: str) -> Optional[float]:
+        """這張成交是減倉(方向跟目前部位相反)→ 從這輪開始有倉算到現在的秒數;建倉單 → None。
+        要在 _record_fill 之前呼叫(那時 tracker 還是成交前的部位)。分注策略的平倉單自己傳每注的
+        持倉時間;收尾一次平掉好幾注的那張,算的是最早那注(這輪開始)到現在。"""
+        since = self._tracker.open_since
+        position = self._tracker.position
+        if since is None or position == 0 or (position > 0) == (side == "Buy"):
+            return None
+        return (now - since).total_seconds()
 
     def _remember(self, rec: OrderRecord) -> None:
         if rec.status == "open":

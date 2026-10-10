@@ -132,3 +132,18 @@ class TestEndOfWindow:
         runner = make(records, origin=200.0)
         runner.tick(at(0), 200.0)
         assert resting(records) == [("Buy", pytest.approx(198.0), QTY), ("Sell", pytest.approx(202.0), QTY)]
+
+
+class TestHoldSeconds:
+    def test_only_the_fill_that_flattens_has_hold_seconds(self):
+        """+1 時兩張賣單都成交:第一張平掉多單(有持倉秒數)、第二張開出空單(None)。"""
+        records = []
+        runner = make(records)
+        runner.tick(at(0), 100.0)
+        runner.tick(at(5), 98.9)  # 買單成交 → +1
+        runner.tick(at(30), 101.5)  # 兩張賣單都成交 → 0 → −1
+
+        sells = [r for r in records if r.side == "Sell" and r.status == "closed"]
+        assert [r.hold_seconds for r in sells] == [25 * 60, None]
+        buy = next(r for r in records if r.side == "Buy" and r.status == "closed")
+        assert buy.hold_seconds is None

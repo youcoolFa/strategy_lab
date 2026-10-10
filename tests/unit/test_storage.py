@@ -324,6 +324,64 @@ class TestSetupAddsNewColumns:
         assert "lot" in {c["name"] for c in inspect(create_engine(url)).get_columns("sl_order")}
 
 
+
+class TestRawDurations:
+    """時長、預估時長以原始欄位存進資料庫(2026-10-11),不用在 Superset 算。"""
+
+    def test_event_hold_and_expected_hold_seconds(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path)
+        rec.start_run(run_info(expected_hold_seconds=4 * 3600))
+        rec.record_event(event(start=0, end=90))
+        [e] = rows(db, SlEvent)
+        assert e.hold_seconds == 90 * 60
+        assert e.expected_hold_seconds == 4 * 3600
+
+    def test_event_without_expected_hold_is_null(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path)
+        rec.start_run(run_info())
+        rec.record_event(event(start=0, end=30))
+        [e] = rows(db, SlEvent)
+        assert e.hold_seconds == 1800 and e.expected_hold_seconds is None
+
+    def test_run_expected_end_and_actual_duration(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path)
+        rec.start_run(run_info(expected_end_at=t(600), expected_duration_seconds=600 * 60))
+        [run] = rows(db, SlRun)
+        assert run.duration_seconds is None  # 還在跑
+        assert run.expected_duration_seconds == 36000
+        rec.end_run(t(125), "stop_requested")
+        [run] = rows(db, SlRun)
+        assert run.duration_seconds == 125 * 60
+        assert run.expected_end_at.replace(tzinfo=timezone.utc) == t(600)  # SQLite 不存時區
+
+    def test_new_columns_survive_the_local_file_and_backfill(self, db, tmp_path):
+        rec = make_recorder(None, tmp_path)
+        rec.start_run(run_info(expected_end_at=t(600), expected_duration_seconds=36000, expected_hold_seconds=60))
+        rec.record_event(event(start=0, end=30))
+        rec.end_run(t(60), "loop_done")
+        backfill(db, tmp_path / "pending")
+        [run], [e] = rows(db, SlRun), rows(db, SlEvent)
+        assert (run.duration_seconds, run.expected_duration_seconds, run.expected_hold_seconds) == (3600, 36000, 60)
+        assert (e.hold_seconds, e.expected_hold_seconds) == (1800, 60)
+
+    def test_setup_adds_the_new_columns_to_existing_tables(self, tmp_path):
+        from sqlalchemy import inspect, text
+
+        from strategy_lab.storage.setup_db import setup
+
+        url = f"sqlite:///{tmp_path / 'old.db'}"
+        engine = create_engine(url, future=True)
+        with engine.begin() as conn:  # 加欄位之前的舊表(只留主鍵)
+            conn.execute(text("CREATE TABLE sl_run (run_id VARCHAR(36) PRIMARY KEY)"))
+            conn.execute(text("CREATE TABLE sl_event (run_id VARCHAR(36), event_index INTEGER, PRIMARY KEY (run_id, event_index))"))
+        setup(url)
+        inspector = inspect(create_engine(url))
+        run_cols = {c["name"] for c in inspector.get_columns("sl_run")}
+        event_cols = {c["name"] for c in inspector.get_columns("sl_event")}
+        assert {"duration_seconds", "expected_end_at", "expected_duration_seconds", "expected_hold_seconds"} <= run_cols
+        assert {"hold_seconds", "expected_hold_seconds"} <= event_cols
+
+
 class TestCostsForNotifications:
     """Telegram 的 loop 結算要顯示淨利:手續費/資金費用 Bybit 成交明細的真實數字。"""
 

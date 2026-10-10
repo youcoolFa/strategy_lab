@@ -247,13 +247,27 @@ def _run_info(runner: StrategyRunner, config: ExecutionConfig, symbol: str, orig
 
     strategy_yaml = Path(config.strategy_path).read_text(encoding="utf-8")
     params = yaml.safe_load(strategy_yaml) or {}
+    expected_end = _expected_end(runner, started_at)
+    hold = getattr(runner, "expected_hold", None)
     return RunInfo(
         strategy_name=params.get("name", Path(config.strategy_path).stem), strategy_path=config.strategy_path,
         strategy_yaml=strategy_yaml, strategy_params=params, config=config.to_dict(), symbol=symbol,
         category=config.category, direction=runner.direction, origin_price=origin, origin_source=origin_source,
         qty=runner.order_qty, order_type=config.order_type, loop=runner.loop, testnet=config.testnet,
         preflight=preflight, log_path=str(log_path) if log_path else None, started_at=started_at,
+        expected_end_at=expected_end, expected_hold_seconds=round(hold.total_seconds()) if hold else None,
+        expected_duration_seconds=round((expected_end - started_at).total_seconds()) if expected_end else None,
     )
+
+
+def _expected_end(runner: StrategyRunner, started_at: datetime) -> Optional[datetime]:
+    """預估結束 = 策略時間窗的強制收尾時間(跟 UI overview、live/status.py 同一個算法)。算不出來就 None,不影響啟動。"""
+    try:
+        window = runner.time_window
+        return window.window_end(started_at) - timedelta(minutes=getattr(window, "cleanup_buffer_minutes", 0))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"算不出預估結束時間,sl_run.expected_end_at 留空:{e}")
+        return None
 
 
 _PURPOSE_LABELS = {"entry": "進場", "exit": "平倉", "forced_close": "強制平倉", "band": "區間"}

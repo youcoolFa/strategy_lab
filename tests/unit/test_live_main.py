@@ -605,6 +605,43 @@ class TestScaleInWiring:
             build_runner_and_symbol(config)
 
 
+
+class TestRunInfoExpectedDurations:
+    """sl_run 存預估結束、預估長度、預估每注持倉(2026-10-11),跟 UI overview 同一個算法。"""
+
+    def test_expected_end_is_the_window_cleanup_time(self, monkeypatch):
+        from strategy_lab.live.main import _run_info
+
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        config = ExecutionConfig(strategy_path="strategies/mean_reversion_breakout_guard.yaml", dry_run=True)
+        runner, symbol = build_runner_and_symbol(config)
+        now = datetime(2026, 8, 1, 4, 0, tzinfo=HKT)
+
+        info = _run_info(runner, config, symbol, None, None, now, None, None)
+
+        window = runner.time_window
+        expected = window.window_end(now) - timedelta(minutes=getattr(window, "cleanup_buffer_minutes", 0))
+        assert info.expected_end_at == expected
+        assert info.expected_duration_seconds == round((expected - now).total_seconds())
+        assert info.expected_hold_seconds is None
+
+    def test_scale_in_expected_hold_in_seconds(self, monkeypatch):
+        from strategy_lab.live.main import _run_info
+
+        monkeypatch.setenv("BYBIT_API_KEY", "dummy")
+        monkeypatch.setenv("BYBIT_API_SECRET", "dummy")
+        config = ExecutionConfig(strategy_path="strategies/scale_in_ladder.yaml", dry_run=True,
+                                 entry_prices=[1000.0, 990.0, 980.0],
+                                 position_sizing=PositionSizing(mode="fixed_qty", value=0.004))
+        runner, symbol = build_runner_and_symbol(config)
+        runner.expected_hold = timedelta(hours=4)  # 策略檔預設 null
+
+        info = _run_info(runner, config, symbol, None, None, datetime(2026, 8, 1, 4, 0, tzinfo=HKT), None, None)
+
+        assert info.expected_hold_seconds == 4 * 3600
+
+
 BAND_YAML = """name: band_example
 symbol: BTC/USDT
 direction: both

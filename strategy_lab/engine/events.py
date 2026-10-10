@@ -101,6 +101,11 @@ class EventTracker:
             forced=forced,
         )
 
+    @property
+    def open_since(self) -> Optional[datetime]:
+        """這輪開始有倉的時間(第一筆成交;接手的部位 = 接手時間);沒有倉為 None。"""
+        return self._open.start_time if self._open is not None else None
+
     def on_price(self, time: datetime, price: float) -> None:
         if self._open is not None:
             self._mark(price)
