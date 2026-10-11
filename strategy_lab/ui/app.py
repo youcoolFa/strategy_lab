@@ -305,7 +305,7 @@ def _free_style_row(row):
             st.error(f"❌ {e}")
 
 
-def _start_free_style(account):
+def _start_free_style(accounts):
     st.caption("自己在 Bybit 手動交易,這裡只負責記帳:開始只記時間,結束時從 Bybit 拉回這段期間的單寫進資料庫。不會下單或取消。")
     symbol = st.text_input("幣種(Bybit 格式)", placeholder="ETHUSDT", key="fs_symbol").strip().upper()
     since = st.text_input("補記開始時間(HKT,選填)", placeholder="2026-10-09 14:00", key="fs_since").strip()
@@ -318,15 +318,18 @@ def _start_free_style(account):
         else:
             try:
                 when = fs._parse_since(since) if since else datetime.now(timezone.utc)
-                run_id = fs.start(DB_URL, data.make_client(account), symbol, when, account=account)
-                st.success(f"✅ {symbol} free style 開始(帳戶 {account},{hkt(when)} HKT,run_id {run_id[:8]})")
-            except fs.FreeStyleError as e:
-                st.error(f"❌ {e}")
             except ValueError:
                 st.error("補記時間格式要像 2026-10-09 14:00")
+                return
+            for account in accounts:  # 每個帳戶各記一段;某個失敗不影響其他
+                try:
+                    run_id = fs.start(DB_URL, data.make_client(account), symbol, when, account=account)
+                    st.success(f"✅ {symbol} free style 開始(帳戶 {account},{hkt(when)} HKT,run_id {run_id[:8]})")
+                except Exception as e:  # noqa: BLE001  FreeStyleError / AccountError
+                    st.error(f"❌ 帳戶 {account}:{e}")
 
 
-def _start_strategy(choice, root, account):
+def _start_strategy(choice, root, accounts):
     strategy_path = f"strategies/{choice}.yaml"
     info = _strategy_info(root, strategy_path)
     st.caption(f"方向 {info.get('direction')}" + (f"|分注 {info['lots']} 注" if info.get("scale_in") else ""))
@@ -334,13 +337,20 @@ def _start_strategy(choice, root, account):
     if not symbol:
         st.caption("填幣種後繼續")
         return
-    path = actions.config_for(root, strategy_path, symbol, account)
-    existing = path.exists()
-    if existing and actions.daemon_running(path):
-        st.info(f"{choice} / {symbol} / 帳戶 {account} 已經在跑(設定檔 {path.name});要改參數或停止,請用上面的進行中清單")
+    paths = {}
+    for account in accounts:
+        path = actions.config_for(root, strategy_path, symbol, account)
+        if path.exists() and actions.daemon_running(path):
+            st.info(f"{choice} / {symbol} / 帳戶 {account} 已經在跑(設定檔 {path.name});要改參數或停止,請用上面的進行中清單")
+        else:
+            paths[account] = path
+    if not paths:
         return
-    cfg = _read_yaml(path) if existing else {}
-    st.caption(f"設定檔:{path.name}({'沿用現有的' if existing else '新建,從範本建立'})")
+    accounts = list(paths)
+    many = len(accounts) > 1
+    path = paths[accounts[0]]
+    cfg = _read_yaml(path) if path.exists() else {}
+    st.caption("設定檔:" + "、".join(f"{p.name}({'沿用' if p.exists() else '新建'})" for p in paths.values()))
 
     st.warning("🔴 這裡開始的策略一律是**真正的交易環境**(Bybit 正式站、真實資金);dry-run / 測試網請用終端機")
     band = bool(info.get("band"))
@@ -353,8 +363,14 @@ def _start_strategy(choice, root, account):
                             value=bool(cfg.get("adopt_existing_position", False)), key="new_adopt")
     sizing = cfg.get("position_sizing") or {}
     modes = ["fixed_qty", "fixed_quote_amount", "account_percentage"]
-    mode = st.selectbox("數量模式", modes, index=modes.index(sizing.get("mode", "fixed_qty")), key="new_mode")
-    value = st.number_input("數量(分注 = 第一注)", value=float(sizing.get("value") or 0), format="%g", key="new_value")
+    if many:  # 帳戶大小差很多,多個帳戶一律用權益百分比(使用者決定)
+        mode = "account_percentage"
+        st.caption(f"選了 {len(accounts)} 個帳戶:數量一律用**權益百分比**,每個帳戶各自依自己的權益計算")
+        default = float(sizing.get("value") or 0) if sizing.get("mode") == mode else 0.0
+        value = st.number_input("權益百分比 %(分注 = 第一注)", value=default, format="%g", key="new_value")
+    else:
+        mode = st.selectbox("數量模式", modes, index=modes.index(sizing.get("mode", "fixed_qty")), key="new_mode")
+        value = st.number_input("數量(分注 = 第一注)", value=float(sizing.get("value") or 0), format="%g", key="new_value")
 
     params = {}
     try:
@@ -386,14 +402,13 @@ def _start_strategy(choice, root, account):
     settings = {"position_sizing.mode": mode, "position_sizing.value": float(value)}
     if not band:
         settings["adopt_existing_position"] = adopt
-    signature = (path.name, account, settings, params)
+    signature = (tuple(paths[a].name for a in accounts), settings, params)
 
     if st.button("💾 寫入參數並預覽", key="new_prepare"):
         try:
             with st.spinner("寫入設定檔、查詢市場資料…"):
-                written = actions.prepare_config(root, strategy_path, symbol, settings, params, account=account)
-                preview = actions.preflight_preview(written)
-            st.session_state["new_preview"] = {"sig": signature, "path": str(written), "preview": preview}
+                plans = actions.prepare_many(root, strategy_path, symbol, settings, params, accounts)
+            st.session_state["new_preview"] = {"sig": signature, "plans": plans}
         except ValueError as e:
             st.session_state.pop("new_preview", None)
             st.error(str(e))
@@ -403,23 +418,34 @@ def _start_strategy(choice, root, account):
     if pending["sig"] != signature:
         st.warning("參數在預覽之後改過了,請重新按「寫入參數並預覽」")
         return
-    preview = pending["preview"]
-    st.code(preview.text, language=None)
-    if not preview.ready:
-        st.error("預覽的檢查沒有通過,不能開始(看上面的 ✗ 原因)")
+    plans = pending["plans"]
+    for plan in plans:
+        st.markdown(f"**帳戶 {plan.account}**" + ("" if plan.ready else " ✗ 不會開始"))
+        if plan.error:
+            st.error(plan.error)
+        else:
+            st.code(plan.preview.text, language=None)
+            if not plan.preview.ready:
+                st.error(f"帳戶 {plan.account} 的預覽檢查沒有通過(看上面的 ✗ 原因)")
+    ready = [p.account for p in plans if p.ready]
+    if not ready:
+        st.error("沒有任何帳戶的預覽通過,不能開始")
         return
     word, label = "yes", "以真實資金開始"
-    typed = st.text_input(f"確認{label}:輸入 {word}", key="new_typed")
+    who = "、".join(ready)
+    typed = st.text_input(f"確認{label}(帳戶 {who}):輸入 {word}", key="new_typed")
     if st.button(f"🚀 {label}", key="new_start"):
         try:
             with st.spinner("啟動中(會再查一次市場、確認背景程式沒有立刻結束)…"):
-                ok, text = actions.preflight_start(Path(pending["path"]), preview, typed)
-            (st.success if ok else st.error)("已在背景開始" if ok else "沒有開始")
-            st.code(text, language=None)
-            if ok:  # 打錯字之類沒開始:保留預覽,可以直接再試
-                st.session_state.pop("new_preview", None)
+                results = actions.start_many(plans, typed)
         except ValueError as e:
             st.error(str(e))
+            return
+        for r in results:
+            (st.success if r.ok else st.error)(f"帳戶 {r.account}:" + ("已在背景開始" if r.ok else "沒有開始"))
+            st.code(r.text, language=None)
+        if any(r.ok for r in results):  # 打錯字之類全部沒開始:保留預覽,可以直接再試
+            st.session_state.pop("new_preview", None)
 
 
 with tab_strategy:
@@ -442,11 +468,15 @@ with tab_strategy:
                 _running_strategy_row(row, root)
 
     st.subheader("開始新的")
-    account = st.selectbox("帳戶(.env 的 ACCOUNT = …)", data.list_accounts(), key="new_account")
+    account_names = data.list_accounts()
+    accounts = st.multiselect("帳戶(可以選多個,每個帳戶各跑一支)", account_names, default=account_names[:1],
+                              key="new_accounts")
     names = [p.stem for p in actions.list_strategies(ROOT)] + [FREE]
     choice = st.radio("① 選策略", names, key="new_strategy", horizontal=True)
     st.markdown("**② 填參數 → ③ 開始**")
-    if choice == FREE:
-        _start_free_style(account)
+    if not accounts:
+        st.caption("請至少選一個帳戶")
+    elif choice == FREE:
+        _start_free_style(accounts)
     else:
-        _start_strategy(choice, root, account)
+        _start_strategy(choice, root, accounts)

@@ -365,7 +365,7 @@ def test_bybit_snapshot_follows_the_selected_account(fake):
 def test_free_style_start_uses_the_selected_account(fake):
     calls, _ = fake
     at = run()
-    at.selectbox(key="new_account").set_value("MAIN").run()
+    at.multiselect(key="new_accounts").set_value(["MAIN"]).run()
     at.radio(key="new_strategy").set_value("free style").run()
     at.text_input(key="fs_symbol").input("ethusdt")
     at.checkbox(key="fs_start_confirm").check()
@@ -387,7 +387,57 @@ def test_free_style_row_stops_on_its_own_account(fake):
 def test_new_strategy_is_prepared_for_the_selected_account(fake):
     calls, _ = fake
     at = run()
-    at.selectbox(key="new_account").set_value("MAIN").run()
+    at.multiselect(key="new_accounts").set_value(["MAIN"]).run()
     fill_scale_in(at)
     at.button(key="new_prepare").click().run()
     assert ("prepare_account", "MAIN") in calls and not at.exception
+
+
+# ---------------------------------------------------------------- 一次多個帳戶(2026-10-12)
+
+def test_accounts_default_to_test1_only(fake):
+    at = run()
+    ms = at.multiselect(key="new_accounts")
+    assert list(ms.options) == ["test1", "MAIN"] and list(ms.value) == ["test1"]
+
+
+def test_many_accounts_use_account_percentage_and_prepare_each(fake):
+    calls, _ = fake
+    at = run()
+    at.multiselect(key="new_accounts").set_value(["test1", "MAIN"]).run()
+    fill_scale_in(at)
+    assert "new_mode" not in [s.key for s in at.selectbox]  # 多帳戶:數量模式固定權益百分比
+    at.button(key="new_prepare").click().run()
+    prepared = [c for c in calls if c[0] == "prepare"]
+    assert len(prepared) == 2 and all(c[3]["position_sizing.mode"] == "account_percentage" for c in prepared)
+    assert [c[1] for c in calls if c[0] == "prepare_account"] == ["test1", "MAIN"]
+    assert not at.exception
+
+
+def test_many_accounts_start_only_those_that_passed(fake, monkeypatch):
+    calls, _ = fake
+    monkeypatch.setattr(actions, "prepare_config", lambda root_, strategy, symbol, settings, params, **k: calls.append(
+        ("prepare_account", k.get("account"))) or (data.project_root() / f"live_x_{k.get('account').lower()}.yaml"))
+    monkeypatch.setattr(actions, "preflight_preview", lambda path: actions.PreviewResult(
+        text=f"預覽 {Path(path).name}", ready="main" not in Path(path).name, fingerprint="fp", at=time.time()))
+    at = run()
+    at.multiselect(key="new_accounts").set_value(["test1", "MAIN"]).run()
+    fill_scale_in(at)
+    at.button(key="new_prepare").click().run()
+    page = " ".join(str(m.value) for m in at.markdown) + " ".join(str(e.value) for e in at.error)
+    assert "MAIN" in page
+    at.text_input(key="new_typed").input("yes")
+    at.button(key="new_start").click().run()
+    assert [c for c in calls if c[0] == "start"] == [("start", "live_x_test1.yaml", "yes")]
+    assert not at.exception
+
+
+def test_free_style_on_many_accounts_starts_each(fake):
+    calls, _ = fake
+    at = run()
+    at.multiselect(key="new_accounts").set_value(["test1", "MAIN"]).run()
+    at.radio(key="new_strategy").set_value("free style").run()
+    at.text_input(key="fs_symbol").input("ethusdt")
+    at.checkbox(key="fs_start_confirm").check()
+    at.button(key="fs_start").click().run()
+    assert [c[1] for c in calls if c[0] == "fs_account"] == ["test1", "MAIN"] and not at.exception

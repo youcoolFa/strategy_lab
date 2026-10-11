@@ -339,3 +339,64 @@ class TestAccountConfig:
         assert path.name == "live_scale_in_ladder_suiusdt_main.yaml"
         assert yaml.safe_load(path.read_text())["account"] == "MAIN"
         assert "account" not in yaml.safe_load((root / "live_execution_config.yaml").read_text())  # test1 那份沒動
+
+
+class TestManyAccounts:
+    """一次選多個帳戶跑同一個策略(2026-10-12):每個帳戶一份設定檔、一支程式;
+    多個帳戶時數量只能用權益百分比;預覽沒過的帳戶不啟動,其他照樣開始(使用者決定)。"""
+
+    PCT = {"position_sizing.mode": "account_percentage", "position_sizing.value": 5.0}
+
+    @pytest.fixture
+    def previews(self, monkeypatch):
+        """MAIN 的預覽不通過,其他通過;啟動記進 started。"""
+        started = []
+        monkeypatch.setattr(actions, "preflight_preview", lambda path: actions.PreviewResult(
+            text=f"預覽 {Path(path).name}", ready="main" not in Path(path).name, fingerprint="fp", at=time.time()))
+        monkeypatch.setattr(actions, "preflight_start", lambda path, preview, typed: started.append(
+            (Path(path).name, typed)) or (typed == "yes", "已在背景啟動"))
+        return started
+
+    def prepare(self, root, accounts_, settings=None):
+        return actions.prepare_many(root, "strategies/scale_in_ladder.yaml", "WLDUSDT", settings or self.PCT,
+                                    {}, accounts_, example=root / "live_execution_config.example.yaml")
+
+    def test_each_account_gets_its_own_config_and_preview(self, root, previews):
+        plans = self.prepare(root, ["test1", "MAIN"])
+        assert [(p.account, p.path.name, p.ready) for p in plans] == [
+            ("test1", "live_scale_in_ladder_wldusdt.yaml", True),
+            ("MAIN", "live_scale_in_ladder_wldusdt_main.yaml", False)]
+        assert yaml.safe_load(plans[1].path.read_text())["account"] == "MAIN"
+
+    def test_more_than_one_account_requires_account_percentage(self, root, previews):
+        with pytest.raises(ValueError, match="權益百分比"):
+            self.prepare(root, ["test1", "MAIN"], TestPrepareConfig.SETTINGS)
+        assert not (root / "live_scale_in_ladder_wldusdt_main.yaml").exists()  # 什麼都沒寫
+        assert self.prepare(root, ["test1"], TestPrepareConfig.SETTINGS)[0].ready  # 單一帳戶照舊
+
+    def test_at_least_one_account(self, root, previews):
+        with pytest.raises(ValueError, match="帳戶"):
+            self.prepare(root, [])
+
+    def test_one_account_failing_to_prepare_does_not_stop_the_others(self, root, previews, monkeypatch):
+        real = actions.prepare_config
+
+        def prepare_config(*a, account=None, **k):
+            if account == "MAIN":
+                raise ValueError("live_scale_in_ladder_wldusdt_main 正在跑")
+            return real(*a, account=account, **k)
+
+        monkeypatch.setattr(actions, "prepare_config", prepare_config)
+        test1, main = self.prepare(root, ["test1", "MAIN"])
+        assert test1.ready and not main.ready and "正在跑" in main.error and main.preview is None
+
+    def test_start_only_the_accounts_that_passed(self, root, previews):
+        plans = self.prepare(root, ["test1", "MAIN"])
+        results = actions.start_many(plans, "yes")
+        assert previews == [("live_scale_in_ladder_wldusdt.yaml", "yes")]
+        assert [(r.account, r.ok) for r in results] == [("test1", True), ("MAIN", False)]
+        assert "沒有開始" in results[1].text
+
+    def test_nothing_ready_means_nothing_to_start(self, root, previews):
+        with pytest.raises(ValueError, match="沒有"):
+            actions.start_many(self.prepare(root, ["MAIN"]), "yes")

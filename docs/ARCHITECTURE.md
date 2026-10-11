@@ -1881,3 +1881,19 @@ BYBIT_MAIN_UID=...
 **測試**:`test_live_accounts.py`(20 個;conftest 換成假的 .env,測試絕不讀真的)、`test_live_bybit_client.py`(TestApiKeyInfo)、
 `test_live_config.py`、`test_storage.py`(欄位 / recorder / 補值)、`test_live_main.py`(TestAccountWiring / TestMainVerifiesTheAccount)、
 `test_live_preflight.py`、`test_free_style.py`(TestAccounts、CLI `--account`、總結)、`test_ui_data.py` / `test_ui_actions.py` / `test_ui_app.py` 的多帳戶部分。
+
+#### 一次多個帳戶跑同一個策略(同一天)
+
+「開始新的」的帳戶改成**多選**(預設只有 test1)。每個帳戶仍是自己的一份設定檔、一支背景程式;頁面只是幫每個帳戶各做一次。
+使用者的決定:
+- **多個帳戶時數量一律用權益百分比**(`account_percentage`):test1 和 MAIN 權益差很多,每個帳戶依自己的權益計算。
+  只選一個帳戶時照舊可以選數量模式。
+- **預覽沒過的帳戶不開始,其他照樣開始**:每個帳戶的預覽 / 錯誤分開列出;輸入一次 `yes`,只啟動通過的帳戶,
+  每個帳戶仍各自走 `preflight_start` 的全部檢查(10 分鐘內的預覽、設定檔沒改過、實盤 yes)。
+
+| 檔 | 內容 |
+|---|---|
+| `ui/actions.py` | `prepare_many(…, accounts)` → `[AccountPlan(account, path, preview, error)]`:先驗證(至少一個帳戶;多個要 account_percentage),某個帳戶準備失敗(例:正在跑)記在 error、不影響其他;`start_many(plans, typed)` → `[StartResult(account, ok, text)]`,沒有任何帳戶通過就報錯 |
+| `ui/app.py` | `new_accounts` 多選;已經在跑的帳戶列出並排除;多帳戶時沒有數量模式選單、數量欄改成「權益百分比 %」;free style 多選 = 每個帳戶各記一段 |
+
+測試:`test_ui_actions.py::TestManyAccounts`、`test_ui_app.py` 的「一次多個帳戶」。

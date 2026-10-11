@@ -270,6 +270,68 @@ def preflight_start(config_path: Path, preview: Optional[PreviewResult], typed: 
 
 
 # ---------------------------------------------------------------------------
+# 一次多個帳戶(2026-10-12)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AccountPlan:
+    """一個帳戶的準備結果:設定檔 + 預覽;準備失敗時 error 有原因、preview 是 None。"""
+    account: str
+    path: Optional[Path] = None
+    preview: Optional[PreviewResult] = None
+    error: Optional[str] = None
+
+    @property
+    def ready(self) -> bool:
+        return self.error is None and self.preview is not None and self.preview.ready
+
+
+@dataclass
+class StartResult:
+    account: str
+    ok: bool
+    text: str
+
+
+def prepare_many(project_root: Path, strategy_path: str, symbol: str, settings: Dict[str, Any],
+                 params: Dict[str, Any], accounts: List[str], example: Path = EXAMPLE_CONFIG) -> List[AccountPlan]:
+    """同一個策略、同一組參數,替每個帳戶各準備一份設定檔並預覽。
+    多個帳戶時數量只能用權益百分比(帳戶大小差很多,使用者決定);某個帳戶準備或預覽失敗,其他照常。"""
+    if not accounts:
+        raise ValueError("請至少選一個帳戶")
+    if len(accounts) > 1 and settings.get("position_sizing.mode") != "account_percentage":
+        raise ValueError("選多個帳戶時,數量只能用權益百分比(account_percentage)")
+    plans = []
+    for account in accounts:
+        plan = AccountPlan(account=account)
+        try:
+            plan.path = prepare_config(project_root, strategy_path, symbol, settings, params,
+                                       example=example, account=account)
+            plan.preview = preflight_preview(plan.path)
+        except ValueError as e:
+            plan.error = str(e)
+        plans.append(plan)
+    return plans
+
+
+def start_many(plans: List[AccountPlan], typed: str) -> List[StartResult]:
+    """只啟動預覽通過的帳戶(使用者決定:沒過的不擋其他帳戶);每個帳戶照樣走 preflight_start 的所有檢查。"""
+    if not any(p.ready for p in plans):
+        raise ValueError("沒有任何帳戶的預覽通過,不能開始")
+    results = []
+    for plan in plans:
+        if not plan.ready:
+            results.append(StartResult(plan.account, False, f"沒有開始:{plan.error or '預覽的檢查沒有通過'}"))
+            continue
+        try:
+            ok, text = preflight_start(plan.path, plan.preview, typed)
+        except ValueError as e:
+            ok, text = False, str(e)
+        results.append(StartResult(plan.account, ok, text))
+    return results
+
+
+# ---------------------------------------------------------------------------
 # 運作中改參數(control)
 # ---------------------------------------------------------------------------
 
