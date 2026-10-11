@@ -64,17 +64,17 @@ with tab_overview:
     st.subheader("背景程式(daemon)")
     try:
         daemons = data.list_daemons()
-        unfinished = data.unfinished_by_symbol(DB_URL) if DB_URL else {}
+        unfinished = data.unfinished_runs(DB_URL) if DB_URL else {}
     except Exception as e:  # noqa: BLE001
         daemons, unfinished = [], {}
         st.error(f"讀取狀態失敗:{e}")
     if daemons:
         rows = []
         for d in daemons:
-            run = unfinished.get(d.symbol) if d.alive else None
+            run = unfinished.get((data.account_key(d.account), d.symbol)) if d.alive else None
             plan = data.schedule(data.config_path(d.config), run["started_at"]) if run else None
             rows.append({
-                "設定檔": d.config, "幣種": d.symbol or "—",
+                "設定檔": d.config, "帳戶": d.account, "幣種": d.symbol or "—",
                 "狀態": "🟢 運作中" if d.alive else "⚪ 沒在跑", "PID": d.pid if d.alive else None,
                 "策略": run["strategy_name"] if run else "—",
                 "啟動時間": data.fmt_time(plan["start"]) if plan else "—",
@@ -87,18 +87,19 @@ with tab_overview:
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
         st.caption("預估結束 = 策略時間窗的強制收尾時間(取消掛單、市價平倉);預估長度 = 預估結束 − 啟動時間。"
                    "「舊碼」= 正在跑的程式不是最新 commit,新功能要下次啟動才生效。"
-                   "每小時一定會寫 ⚪ 狀態,超過 70 分鐘沒寫 log 通常是 Mac 睡著了。")
+                   "每小時一定會寫 ⚫ 狀態,超過 70 分鐘沒寫 log 通常是 Mac 睡著了。")
     else:
         st.info("沒有 live_*.yaml 執行設定")
 
     st.subheader("Bybit 帳戶(只讀,30 秒快取)")
+    snap_account = st.selectbox("帳戶", data.list_accounts(), key="snap_account")
 
     @st.cache_data(ttl=30, show_spinner="查詢 Bybit…")
-    def snapshot():
-        return data.account_snapshot(data.make_client())
+    def snapshot(account):
+        return data.account_snapshot(data.make_client(account))
 
     try:
-        snap = snapshot()
+        snap = snapshot(snap_account)
         st.metric("帳戶權益(USDT)", f"{snap['equity']:.2f}")
         c1, c2 = st.columns(2)
         c1.markdown("**持倉**")
@@ -287,15 +288,15 @@ def _stop_buttons(c, path, allow_detach=True):
 
 
 def _free_style_row(row):
-    sym = row["symbol"]
-    ok = st.checkbox("我確認要結束(從 Bybit 拉回訂單寫進資料庫、發 Telegram)", key=f"fs_stop_confirm_{sym}")
-    if st.button("⏹️ 結束 free style", key=f"fs_stop_{sym}"):
+    sym, account = row["symbol"], row.get("account")
+    ok = st.checkbox("我確認要結束(從 Bybit 拉回訂單寫進資料庫、發 Telegram)", key=f"fs_stop_confirm_{account}_{sym}")
+    if st.button("⏹️ 結束 free style", key=f"fs_stop_{account}_{sym}"):
         if not ok:
             st.warning("請先勾「我確認」")
             return
         try:
             with st.spinner("從 Bybit 拉回訂單與成交…"):
-                result = fs.stop(DB_URL, data.make_client(), sym, datetime.now(timezone.utc))
+                result = fs.stop(DB_URL, data.make_client(account), sym, datetime.now(timezone.utc), account=account)
             text = fs.summary_message(result)
             fs.send_telegram(text)
             st.success("完成")
@@ -304,7 +305,7 @@ def _free_style_row(row):
             st.error(f"❌ {e}")
 
 
-def _start_free_style():
+def _start_free_style(account):
     st.caption("自己在 Bybit 手動交易,這裡只負責記帳:開始只記時間,結束時從 Bybit 拉回這段期間的單寫進資料庫。不會下單或取消。")
     symbol = st.text_input("幣種(Bybit 格式)", placeholder="ETHUSDT", key="fs_symbol").strip().upper()
     since = st.text_input("補記開始時間(HKT,選填)", placeholder="2026-10-09 14:00", key="fs_since").strip()
@@ -317,15 +318,15 @@ def _start_free_style():
         else:
             try:
                 when = fs._parse_since(since) if since else datetime.now(timezone.utc)
-                run_id = fs.start(DB_URL, data.make_client(), symbol, when)
-                st.success(f"✅ {symbol} free style 開始({hkt(when)} HKT,run_id {run_id[:8]})")
+                run_id = fs.start(DB_URL, data.make_client(account), symbol, when, account=account)
+                st.success(f"✅ {symbol} free style 開始(帳戶 {account},{hkt(when)} HKT,run_id {run_id[:8]})")
             except fs.FreeStyleError as e:
                 st.error(f"❌ {e}")
             except ValueError:
                 st.error("補記時間格式要像 2026-10-09 14:00")
 
 
-def _start_strategy(choice, root):
+def _start_strategy(choice, root, account):
     strategy_path = f"strategies/{choice}.yaml"
     info = _strategy_info(root, strategy_path)
     st.caption(f"方向 {info.get('direction')}" + (f"|分注 {info['lots']} 注" if info.get("scale_in") else ""))
@@ -333,10 +334,10 @@ def _start_strategy(choice, root):
     if not symbol:
         st.caption("填幣種後繼續")
         return
-    path = actions.config_for(root, strategy_path, symbol)
+    path = actions.config_for(root, strategy_path, symbol, account)
     existing = path.exists()
     if existing and actions.daemon_running(path):
-        st.info(f"{choice} / {symbol} 已經在跑(設定檔 {path.name});要改參數或停止,請用上面的進行中清單")
+        st.info(f"{choice} / {symbol} / 帳戶 {account} 已經在跑(設定檔 {path.name});要改參數或停止,請用上面的進行中清單")
         return
     cfg = _read_yaml(path) if existing else {}
     st.caption(f"設定檔:{path.name}({'沿用現有的' if existing else '新建,從範本建立'})")
@@ -385,12 +386,12 @@ def _start_strategy(choice, root):
     settings = {"position_sizing.mode": mode, "position_sizing.value": float(value)}
     if not band:
         settings["adopt_existing_position"] = adopt
-    signature = (path.name, settings, params)
+    signature = (path.name, account, settings, params)
 
     if st.button("💾 寫入參數並預覽", key="new_prepare"):
         try:
             with st.spinner("寫入設定檔、查詢市場資料…"):
-                written = actions.prepare_config(root, strategy_path, symbol, settings, params)
+                written = actions.prepare_config(root, strategy_path, symbol, settings, params, account=account)
                 preview = actions.preflight_preview(written)
             st.session_state["new_preview"] = {"sig": signature, "path": str(written), "preview": preview}
         except ValueError as e:
@@ -432,7 +433,7 @@ with tab_strategy:
     if not active:
         st.caption("沒有進行中的策略")
     for row in active:
-        title = f"{row['mode']}|{row['symbol']}|{row['strategy']}" + (
+        title = f"{row['mode']}|帳戶 {row.get('account') or '—'}|{row['symbol']}|{row['strategy']}" + (
             f"|{hkt(row['started_at'])} 開始" if row.get("started_at") else "")
         with st.expander(title):
             if row["kind"] == FREE:
@@ -441,10 +442,11 @@ with tab_strategy:
                 _running_strategy_row(row, root)
 
     st.subheader("開始新的")
+    account = st.selectbox("帳戶(.env 的 ACCOUNT = …)", data.list_accounts(), key="new_account")
     names = [p.stem for p in actions.list_strategies(ROOT)] + [FREE]
     choice = st.radio("① 選策略", names, key="new_strategy", horizontal=True)
     st.markdown("**② 填參數 → ③ 開始**")
     if choice == FREE:
-        _start_free_style()
+        _start_free_style(account)
     else:
-        _start_strategy(choice, root)
+        _start_strategy(choice, root, account)

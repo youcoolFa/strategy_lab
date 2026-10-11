@@ -67,7 +67,12 @@ def load_snapshot(config_path: Path, snapshot_dir: Optional[Path] = None) -> Opt
 
 
 def _default_client(config: ExecutionConfig) -> BybitClient:
+    from strategy_lab.live import accounts
+
+    account = accounts.resolve(config.account)  # 多帳戶(2026-10-12):用設定檔指定帳戶的 key
     return BybitClient(
+        api_key=account.api_key,
+        api_secret=account.api_secret,
         testnet=config.testnet,
         max_retries=config.max_api_retries,
         retry_backoff_cap_seconds=config.retry_backoff_cap_seconds,
@@ -119,6 +124,26 @@ def main(
     )
 
     print_fn(f"策略 {strategy.name}({strategy.direction}) | {symbol} | 設定檔 {config_path}")
+    from strategy_lab.live import accounts
+
+    try:
+        account = accounts.resolve(config.account)
+    except accounts.AccountError as e:
+        print_fn(f"✗ {e}。沒有啟動。")
+        return 1
+    if not config.dry_run and hasattr(client, "api_key_info"):  # 實盤:先核對 key 屬於這個帳戶、能下單
+        info = client.api_key_info()
+        errors, warnings = accounts.verify(account, info, now)
+        for w in warnings:
+            print_fn(f"⚠ {w}")
+        if errors:
+            for e in errors:
+                print_fn(f"✗ {e}")
+            print_fn("沒有啟動。")
+            return 1
+        print_fn(f"帳戶 {account.name}(Bybit UID {info.get('uid')},已核對)")
+    else:
+        print_fn(f"帳戶 {account.name}")
     if config.dry_run:
         print_fn("=== DRY RUN 模式:不會真的下單 ===")
     else:

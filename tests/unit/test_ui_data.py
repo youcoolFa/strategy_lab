@@ -75,12 +75,13 @@ def db(tmp_path):
     return url
 
 
-def add_run(db, tmp_path, name, symbol, started, git="abc1234", ended=None):
+def add_run(db, tmp_path, name, symbol, started, git="abc1234", ended=None, account=None):
     rec = TradeRecorder(db_url=db, pending_dir=tmp_path / "p", fetch_executions=lambda *a: [])
     run_id = rec.start_run(RunInfo(
         strategy_name=name, strategy_path="NA", strategy_yaml="NA", strategy_params={}, config={},
         symbol=symbol, category="linear", direction="long", origin_price=None, origin_source=None, qty=None,
-        order_type="limit", loop=None, testnet=False, preflight=None, log_path=None, started_at=started))
+        order_type="limit", loop=None, testnet=False, preflight=None, log_path=None, started_at=started,
+        account=account))
     rec._run["git_commit"] = git
     rec._write("sl_run", rec._run)
     if ended is not None:
@@ -89,7 +90,7 @@ def add_run(db, tmp_path, name, symbol, started, git="abc1234", ended=None):
 
 
 class TestRuns:
-    def test_recent_runs_newest_first_and_unfinished_by_symbol(self, db, tmp_path):
+    def test_recent_runs_newest_first_and_unfinished_runs(self, db, tmp_path):
         add_run(db, tmp_path, "scale_in_ladder", "SUIUSDT", NOW - timedelta(days=3), ended=NOW - timedelta(days=2))
         add_run(db, tmp_path, "scale_in_ladder", "SUIUSDT", NOW - timedelta(days=1), git="f251f84")
         add_run(db, tmp_path, "free style", "ETHUSDT", NOW - timedelta(hours=1))
@@ -98,9 +99,9 @@ class TestRuns:
         assert [r["strategy_name"] for r in runs] == ["free style", "scale_in_ladder", "scale_in_ladder"]
         assert runs[0]["started_at"].tzinfo is not None
 
-        unfinished = data.unfinished_by_symbol(db)
-        assert set(unfinished) == {"SUIUSDT", "ETHUSDT"}
-        assert unfinished["SUIUSDT"]["git_commit"] == "f251f84"
+        unfinished = data.unfinished_runs(db)
+        assert set(unfinished) == {("TEST1", "SUIUSDT"), ("TEST1", "ETHUSDT")}
+        assert unfinished[("TEST1", "SUIUSDT")]["git_commit"] == "f251f84"
 
     def test_free_style_running(self, db, tmp_path):
         add_run(db, tmp_path, "free style", "ETHUSDT", NOW - timedelta(hours=1))
@@ -225,3 +226,51 @@ class TestMinuteFormatting:
         assert data.fmt_time(None) == "—"
         assert data.fmt_duration(timedelta(days=4, hours=1, minutes=38, seconds=59)) == "4 天 1 小時 38 分"
         assert data.fmt_duration(None) == "—"
+
+
+class TestMultiAccount:
+    """多帳戶(2026-10-12):同一個幣可以在兩個帳戶各跑一段;畫面要分得出是哪個帳戶。"""
+
+    def test_daemon_rows_carry_the_account(self, project):
+        (project / "live_main_eth.yaml").write_text("symbol_override: ETHUSDT\naccount: MAIN\n")
+        rows = {r.config: r.account for r in data.list_daemons(project)}
+        assert rows == {"live_execution_config": "test1", "live_main_eth": "MAIN", "live_wld_long": "test1"}
+
+    def test_unfinished_runs_keyed_by_account_and_symbol(self, db, tmp_path):
+        add_run(db, tmp_path, "scale_in_ladder", "SUIUSDT", NOW - timedelta(days=1))  # 舊紀錄沒帳戶 = test1
+        add_run(db, tmp_path, "free style", "SUIUSDT", NOW - timedelta(hours=1), account="MAIN")
+        runs = data.unfinished_runs(db)
+        assert set(runs) == {("TEST1", "SUIUSDT"), ("MAIN", "SUIUSDT")}
+        assert [(r["symbol"], r["account"]) for r in data.free_style_running(db)] == [("SUIUSDT", "MAIN")]
+
+    def test_active_runs_match_daemon_by_account(self, project, db, tmp_path, monkeypatch):
+        (project / "live_main_sui.yaml").write_text(
+            "strategy_path: strategies/weekend_band.yaml\nsymbol_override: SUIUSDT\naccount: main\ndry_run: false\n")
+        (project / "run" / "live_main_sui.pid").write_text("888")
+        monkeypatch.setattr(data, "is_alive", lambda pid: pid == 888)
+        add_run(db, tmp_path, "scale_in_ladder", "SUIUSDT", NOW - timedelta(days=1))  # test1 的,不是這個 daemon
+        add_run(db, tmp_path, "weekend_band", "SUIUSDT", NOW - timedelta(hours=2), account="MAIN")
+        add_run(db, tmp_path, "free style", "ETHUSDT", NOW - timedelta(hours=1))
+
+        rows = data.active_runs(db, project)
+
+        assert [(r["account"], r["symbol"], r["strategy"], r["started_at"]) for r in rows] == [
+            ("main", "SUIUSDT", "weekend_band", NOW - timedelta(hours=2)),
+            ("test1", "ETHUSDT", "free style", NOW - timedelta(hours=1))]
+
+    def test_list_accounts_always_has_the_default(self, tmp_path, monkeypatch):
+        from strategy_lab.live import accounts
+
+        env = tmp_path / ".env"
+        env.write_text("ACCOUNT = MAIN\nBYBIT_MAIN_API_KEY=k\nBYBIT_MAIN_API_SECRET=s\n")
+        monkeypatch.setattr(accounts, "ENV_PATH", env)
+        assert data.list_accounts() == ["test1", "MAIN"]
+
+    def test_make_client_uses_that_accounts_keys(self, tmp_path, monkeypatch):
+        from strategy_lab.live import accounts
+
+        env = tmp_path / ".env"
+        env.write_text("BYBIT_API_KEY=legacy\nBYBIT_API_SECRET=x\nACCOUNT = MAIN\nBYBIT_MAIN_API_KEY=mainkey\nBYBIT_MAIN_API_SECRET=s\n")
+        monkeypatch.setattr(accounts, "ENV_PATH", env)
+        assert data.make_client("main")._http.api_key == "mainkey"
+        assert data.make_client()._http.api_key == "legacy"

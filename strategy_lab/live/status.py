@@ -6,7 +6,7 @@ Telegram 上「看得懂現在在幹嘛」的訊息(2026-10-06):
     - status_message():每小時的狀態回報(心跳)——狀態、部位與未實現盈虧、掛單與距現價、
       第幾個 loop、累計損益、離收尾多久。收到 = 還活著;超過時間沒收到 = 出事了。
     - StatusReporter:run_forever() 每個 tick 呼叫 maybe_report(),時間到才發
-      (⚪ #狀態)。間隔:.env 的 STATUS_INTERVAL_MINUTES,預設 60,0 = 關閉。
+      (⚫ #狀態)。間隔:.env 的 STATUS_INTERVAL_MINUTES,預設 60,0 = 關閉。
 
 用語統一叫 loop:runner 裡的 event(部位 0 → 0 一整輪)就是一個 loop。
 

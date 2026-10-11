@@ -13,11 +13,12 @@ import yaml
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from strategy_lab.live.accounts import DEFAULT_ACCOUNT
 from strategy_lab.live.daemon import _read_pid, _tail, is_alive
 from strategy_lab.storage.models import SlEvent, SlRun
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-# 每小時一定有一則 ⚪ 狀態回報;運作中卻超過這麼久沒寫 log → Mac 睡著或程式卡住
+# 每小時一定有一則 ⚫ 狀態回報;運作中卻超過這麼久沒寫 log → Mac 睡著或程式卡住
 STALE_AFTER = timedelta(minutes=70)
 FREE_STYLE = "free style"
 
@@ -34,6 +35,7 @@ class DaemonRow:
     alive: bool
     console_log: Path
     last_log_at: Optional[datetime]
+    account: str = DEFAULT_ACCOUNT  # 設定檔的 account:(沒寫 = test1)
 
 
 def list_daemons(project_root: Path = PROJECT_ROOT) -> List[DaemonRow]:
@@ -49,7 +51,7 @@ def list_daemons(project_root: Path = PROJECT_ROOT) -> List[DaemonRow]:
         rows.append(DaemonRow(
             config=config.stem, symbol=_symbol_of(config), pid=pid, alive=bool(pid) and is_alive(pid),
             console_log=project_root / "logs" / f"{config.stem}.console.log",
-            last_log_at=max(times) if times else None,
+            last_log_at=max(times) if times else None, account=_account_of(config),
         ))
     return rows
 
@@ -59,6 +61,18 @@ def _symbol_of(config: Path) -> Optional[str]:
         return (yaml.safe_load(config.read_text(encoding="utf-8")) or {}).get("symbol_override")
     except Exception:  # noqa: BLE001  設定檔壞掉不能讓整頁掛掉
         return None
+
+
+def _account_of(config: Path) -> str:
+    try:
+        return str((yaml.safe_load(config.read_text(encoding="utf-8")) or {}).get("account") or DEFAULT_ACCOUNT).strip()
+    except Exception:  # noqa: BLE001
+        return DEFAULT_ACCOUNT
+
+
+def account_key(account: Optional[str]) -> str:
+    """比對用:不分大小寫,舊紀錄沒帳戶 = test1。"""
+    return (account or DEFAULT_ACCOUNT).strip().upper()
 
 
 def stale_warning(alive: bool, last_log_at: Optional[datetime], now: datetime) -> Optional[str]:
@@ -126,15 +140,20 @@ def recent_events(db_url: str, limit: int = 20) -> List[Dict[str, Any]]:
     return _rows(db_url, select(SlEvent).order_by(SlEvent.end_time.desc()).limit(limit))
 
 
-def unfinished_by_symbol(db_url: str) -> Dict[str, Dict[str, Any]]:
-    """每個幣最新一段還沒結束的 run(ended_at 與 end_reason 都是 NULL)。"""
+def unfinished_runs(db_url: str) -> Dict[tuple, Dict[str, Any]]:
+    """(帳戶大寫, 幣) → 最新一段還沒結束的 run;同一個幣可以在不同帳戶各有一段(2026-10-12)。
+    舊紀錄沒帳戶的,account 補成 test1 顯示。"""
     runs = _rows(db_url, select(SlRun).where(SlRun.ended_at.is_(None), SlRun.end_reason.is_(None))
                  .order_by(SlRun.started_at.asc()))
-    return {r["symbol"]: r for r in runs}  # 同一個幣有好幾段時,後面(較新)的蓋掉前面
+    out = {}
+    for r in runs:
+        r["account"] = r.get("account") or DEFAULT_ACCOUNT
+        out[(account_key(r["account"]), r["symbol"])] = r
+    return out
 
 
 def free_style_running(db_url: str) -> List[Dict[str, Any]]:
-    return [r for r in unfinished_by_symbol(db_url).values() if r["strategy_name"] == FREE_STYLE]
+    return [r for r in unfinished_runs(db_url).values() if r["strategy_name"] == FREE_STYLE]
 
 
 HKT_ZONE = "Asia/Hong_Kong"
@@ -194,22 +213,22 @@ def mode_label(config_path: Path) -> str:
 
 def active_runs(db_url: Optional[str], project_root: Path = PROJECT_ROOT) -> List[Dict[str, Any]]:
     """「策略」分頁的進行中清單:在跑的策略 daemon,加上進行中的 free style。"""
-    unfinished = unfinished_by_symbol(db_url) if db_url else {}
+    unfinished = unfinished_runs(db_url) if db_url else {}
     rows = []
     for d in list_daemons(project_root):
         if not d.alive:
             continue
-        run = unfinished.get(d.symbol)
+        run = unfinished.get((account_key(d.account), d.symbol))
         if run and run["strategy_name"] != FREE_STYLE:
             strategy, started = run["strategy_name"], run["started_at"]
         else:
             path = (yaml.safe_load((project_root / f"{d.config}.yaml").read_text(encoding="utf-8")) or {}).get("strategy_path")
             strategy, started = (Path(path).stem if path else "—"), None
-        rows.append({"kind": "strategy", "config": d.config, "symbol": d.symbol, "strategy": strategy,
+        rows.append({"kind": "strategy", "config": d.config, "account": d.account, "symbol": d.symbol, "strategy": strategy,
                      "mode": mode_label(project_root / f"{d.config}.yaml"), "started_at": started})
     for r in unfinished.values():
         if r["strategy_name"] == FREE_STYLE:
-            rows.append({"kind": "free style", "config": None, "symbol": r["symbol"], "strategy": FREE_STYLE,
+            rows.append({"kind": "free style", "config": None, "account": r["account"], "symbol": r["symbol"], "strategy": FREE_STYLE,
                          "mode": "⏺ 記錄中", "started_at": r["started_at"]})
     return rows
 
@@ -253,11 +272,26 @@ def db_url() -> Optional[str]:
     return os.getenv("TRADING_DB_URL")
 
 
-def make_client() -> Any:
-    """只讀用的 Bybit client(mainnet);介面上不會呼叫任何下單 / 取消。"""
+def list_accounts() -> List[str]:
+    """.env 裡的帳戶名稱;預設帳戶 test1 永遠排第一(它可以用原本的 BYBIT_API_KEY)。"""
+    from strategy_lab.live import accounts
+
+    try:
+        found = accounts.list_accounts()
+    except OSError:  # 沒有 .env
+        found = []
+    rest = [a for a in found if a.upper() != DEFAULT_ACCOUNT.upper()]
+    first = next((a for a in found if a.upper() == DEFAULT_ACCOUNT.upper()), DEFAULT_ACCOUNT)
+    return [first, *rest]
+
+
+def make_client(account: Optional[str] = None) -> Any:
+    """只讀用的 Bybit client(mainnet),用這個帳戶的 key(None = test1);介面上不會呼叫任何下單 / 取消。"""
+    from strategy_lab.live import accounts
     from strategy_lab.live.bybit_client import BybitClient
 
-    return BybitClient(testnet=False)
+    creds = accounts.resolve(account)
+    return BybitClient(api_key=creds.api_key, api_secret=creds.api_secret, testnet=False)
 
 
 def project_root() -> Path:

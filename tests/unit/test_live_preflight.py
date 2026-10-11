@@ -229,3 +229,41 @@ class TestBandPreflight:
         code, out, started = run(tmp_path, client, "yes", monkeypatch, config=write_band_config(tmp_path, adopt="true"))
         assert code == 1 and started == []
         assert "區間策略" in out and "接手" in out
+
+
+class TestPreflightAccount:
+    """多帳戶(2026-10-12):預覽用設定檔指定帳戶的 key 連線、顯示帳戶名稱;實盤先核對 key(對不上就不啟動)。"""
+
+    @pytest.fixture
+    def env(self, tmp_path, monkeypatch):
+        from strategy_lab.live import accounts
+
+        path = tmp_path / ".env"
+        path.write_text("BYBIT_API_KEY=legacykey\nBYBIT_API_SECRET=legacysecret\nACCOUNT = test1\n"
+                        "ACCOUNT = MAIN\nBYBIT_MAIN_API_KEY=mainkey\nBYBIT_MAIN_API_SECRET=mainsecret\nBYBIT_MAIN_UID=22222222\n")
+        monkeypatch.setattr(accounts, "ENV_PATH", path)
+
+    def _config(self, tmp_path):
+        path = write_config(tmp_path)
+        path.write_text(path.read_text() + "account: main\n")
+        return path
+
+    def test_default_client_uses_the_accounts_keys(self, env, tmp_path):
+        from strategy_lab.live.config import load_execution_config
+
+        client = preflight._default_client(load_execution_config(config_path=self._config(tmp_path)))
+        assert client._http.api_key == "mainkey"
+
+    def test_preview_names_the_account_and_starts_after_yes(self, env, tmp_path, monkeypatch):
+        client = FakeClient(price=84950.0)
+        client.api_key_info = lambda: {"uid": "22222222", "read_only": False, "can_withdraw": False, "expires_at": None}
+        code, out, started = run(tmp_path, client, "yes", monkeypatch, config=self._config(tmp_path))
+        assert code == 0 and len(started) == 1
+        assert "帳戶 MAIN" in out and "22222222" in out
+
+    def test_key_of_another_account_is_refused(self, env, tmp_path, monkeypatch):
+        client = FakeClient(price=84950.0)
+        client.api_key_info = lambda: {"uid": "11111111", "read_only": False, "can_withdraw": False, "expires_at": None}
+        code, out, started = run(tmp_path, client, "yes", monkeypatch, config=self._config(tmp_path))
+        assert code == 1 and started == []
+        assert "11111111" in out and "沒有啟動" in out

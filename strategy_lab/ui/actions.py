@@ -32,7 +32,7 @@ EXAMPLE_CONFIG = PROJECT_ROOT / "live_execution_config.example.yaml"
 PREVIEW_MAX_AGE_SECONDS = 10 * 60
 
 # 頁面上可以改的基本設定(其他欄位請直接編輯檔案);position_sizing.* 是巢狀欄位
-EDITABLE = {"strategy_path", "symbol_override", "dry_run", "testnet", "adopt_existing_position",
+EDITABLE = {"strategy_path", "symbol_override", "account", "dry_run", "testnet", "adopt_existing_position",
             "position_sizing.mode", "position_sizing.value"}
 
 
@@ -114,9 +114,18 @@ def _symbol_of(path: Path) -> Optional[str]:
         return None
 
 
-def config_for(project_root: Path, strategy_path: str, symbol: str) -> Path:
-    """選策略 + 幣種 → 用哪一份 live_*.yaml:已經有同策略同幣種的就沿用,沒有就自動命名
-    live_<策略>_<幣種>.yaml(還不建立)。使用者不用管設定檔(2026-10-09)。"""
+def _account_key(account: Optional[str]) -> str:
+    from strategy_lab.live.accounts import DEFAULT_ACCOUNT
+
+    return str(account or DEFAULT_ACCOUNT).strip().upper()
+
+
+def config_for(project_root: Path, strategy_path: str, symbol: str, account: Optional[str] = None) -> Path:
+    """選策略 + 幣種 + 帳戶 → 用哪一份 live_*.yaml:已經有同策略同幣種同帳戶的就沿用,沒有就自動命名
+    live_<策略>_<幣種>.yaml(test1)/ live_<策略>_<幣種>_<帳戶>.yaml(其他帳戶),還不建立。
+    設定檔沒寫 account = test1;帳戶不分大小寫(2026-10-09,帳戶 2026-10-12)。"""
+    from strategy_lab.live.accounts import DEFAULT_ACCOUNT
+
     symbol = (symbol or "").strip().upper()
     if not symbol:
         raise ValueError("請填幣種")
@@ -127,9 +136,11 @@ def config_for(project_root: Path, strategy_path: str, symbol: str) -> Path:
             cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except Exception:  # noqa: BLE001
             continue
-        if cfg.get("strategy_path") == strategy_path and str(cfg.get("symbol_override") or "").upper() == symbol:
+        if cfg.get("strategy_path") == strategy_path and str(cfg.get("symbol_override") or "").upper() == symbol \
+                and _account_key(cfg.get("account")) == _account_key(account):
             return path
-    return Path(project_root) / f"live_{Path(strategy_path).stem}_{symbol.lower()}.yaml"
+    suffix = "" if _account_key(account) == DEFAULT_ACCOUNT.upper() else f"_{_account_key(account).lower()}"
+    return Path(project_root) / f"live_{Path(strategy_path).stem}_{symbol.lower()}{suffix}.yaml"
 
 
 def _strategy_file(project_root: Path, strategy_path: str) -> Path:
@@ -138,7 +149,7 @@ def _strategy_file(project_root: Path, strategy_path: str) -> Path:
 
 
 def prepare_config(project_root: Path, strategy_path: str, symbol: str, settings: Dict[str, Any],
-                   params: Dict[str, Any], example: Path = EXAMPLE_CONFIG) -> Path:
+                   params: Dict[str, Any], example: Path = EXAMPLE_CONFIG, account: Optional[str] = None) -> Path:
     """把頁面上填的策略、幣種、基本設定(settings,見 EDITABLE)與策略參數(params:entry_prices /
     distance / loop)寫進對應的設定檔;沒有就從範本建立。先全部驗證,不合法什麼都不寫。
     頁面只做真正的交易環境:一律寫 dry_run: false、testnet: false,settings 不能帶這兩個
@@ -146,7 +157,7 @@ def prepare_config(project_root: Path, strategy_path: str, symbol: str, settings
     live_only = sorted({"dry_run", "testnet"} & set(settings))
     if live_only:
         raise ValueError(f"頁面只做真正的交易環境,不能設定 {live_only}(dry-run / 測試網請用終端機)")
-    path = config_for(project_root, strategy_path, symbol)
+    path = config_for(project_root, strategy_path, symbol, account)
     if path.exists() and daemon_running(path):
         raise ValueError(f"{path.stem} 正在跑,不能改設定(要改參數請用進行中清單的「改參數」)")
     info = strategy_info(_strategy_file(project_root, strategy_path))
@@ -173,6 +184,8 @@ def prepare_config(project_root: Path, strategy_path: str, symbol: str, settings
     if created:
         shutil.copyfile(example, path)
     try:
+        if account:  # 沒選帳戶 = 不寫(= test1),舊設定檔維持原樣
+            settings = {**settings, "account": str(account).strip()}
         set_config_values(path, {**settings, "strategy_path": strategy_path,
                                  "symbol_override": symbol.strip().upper(),
                                  "dry_run": False, "testnet": False})  # 頁面只做真正的交易環境(2026-10-09)

@@ -169,3 +169,15 @@ class TestEntryPrices:
         path = tmp_path / "config.yaml"
         path.write_text(yaml.dump({"entry_prices": [1000, 990, 980]}))
         assert load_execution_config(config_path=path).entry_prices == [1000, 990, 980]
+
+
+class TestAccount:
+    """多帳戶(2026-10-12):設定檔的 account: 指定用哪個 Bybit 帳戶;沒寫 = None(= test1,見 live/accounts.py)。"""
+
+    def test_defaults_to_none(self):
+        assert ExecutionConfig().account is None
+
+    def test_loaded_from_yaml(self, tmp_path):
+        path = tmp_path / "live_x.yaml"
+        path.write_text("account: MAIN\n")
+        assert load_execution_config(config_path=path).account == "MAIN"

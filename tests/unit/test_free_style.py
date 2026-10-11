@@ -238,3 +238,51 @@ class TestSummaryMessage:
         assert "free style" in text and "ETHUSDT" in text
         assert "2 輪" in text and "+2.35" in text and "2 小時 5 分" in text
         assert "還有持倉 0.1" in text
+
+
+class TestAccounts:
+    """多帳戶(2026-10-12):free style 記帳戶名稱;「同一個帳戶的同一個幣」只能有一段,不同帳戶可以同時記同一個幣。"""
+
+    def test_start_records_the_account(self, db, tmp_path):
+        fs.start(db, FakeClient(), "ETHUSDT", T0, pending_dir=tmp_path, account="MAIN")
+        [run] = rows(db, SlRun)
+        assert run.account == "MAIN"
+
+    def test_no_account_means_test1(self, db, tmp_path):
+        fs.start(db, FakeClient(), "ETHUSDT", T0, pending_dir=tmp_path)
+        assert rows(db, SlRun)[0].account == "test1"
+
+    def test_same_symbol_on_two_accounts_is_allowed_but_not_twice_on_one(self, db, tmp_path):
+        fs.start(db, FakeClient(), "ETHUSDT", T0, pending_dir=tmp_path, account="MAIN")
+        fs.start(db, FakeClient(), "ETHUSDT", T0, pending_dir=tmp_path, account="test1")
+        with pytest.raises(fs.FreeStyleError, match="還沒結束"):
+            fs.start(db, FakeClient(), "ETHUSDT", t(5), pending_dir=tmp_path, account="main")  # 不分大小寫
+
+    def test_stop_ends_only_that_accounts_run(self, db, tmp_path):
+        fs.start(db, FakeClient(), "ETHUSDT", T0, pending_dir=tmp_path, account="MAIN")
+        fs.start(db, FakeClient(), "ETHUSDT", T0, pending_dir=tmp_path, account="test1")
+        result = fs.stop(db, FakeClient(), "ETHUSDT", t(60), pending_dir=tmp_path, account="MAIN")
+        runs = {r.account: r for r in rows(db, SlRun)}
+        assert runs["MAIN"].ended_at is not None and runs["test1"].ended_at is None
+        assert result.account == "MAIN"
+
+
+def test_summary_names_the_account():
+    result = fs.StopResult(run_id="r", symbol="ETHUSDT", started_at=T0, ended_at=t(60), events=1, orders=2,
+                           gross_pnl=1.0, fees=0.1, funding=0.0, net_pnl=0.9, open_position=0, account="MAIN")
+    assert "帳戶 MAIN" in fs.summary_message(result)
+
+
+def test_cli_account_option_uses_that_accounts_keys(monkeypatch, tmp_path):
+    from strategy_lab.live import accounts
+
+    env = tmp_path / ".env"
+    env.write_text("ACCOUNT = MAIN\nBYBIT_MAIN_API_KEY=mainkey\nBYBIT_MAIN_API_SECRET=mainsecret\n")
+    monkeypatch.setattr(accounts, "ENV_PATH", env)
+    monkeypatch.setattr(fs, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("TRADING_DB_URL", "sqlite://")
+    seen = {}
+    monkeypatch.setattr(fs, "start", lambda db, client, symbol, when, **k: seen.update(
+        key=client._http.api_key, account=k.get("account"), symbol=symbol) or "run-1")
+    assert fs.main(["start", "--symbol", "ethusdt", "--account", "main"]) == 0
+    assert seen == {"key": "mainkey", "account": "main", "symbol": "ETHUSDT"}

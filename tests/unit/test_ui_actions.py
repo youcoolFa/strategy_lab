@@ -314,3 +314,28 @@ class TestBandStrategyFromThePage:
                                    {"band": {"buy_pct": 0, "sell_pct": 0.5}},
                                    example=root / "live_execution_config.example.yaml")
         assert not (root / "live_weekend_band_reversion_xrpusdt.yaml").exists()
+
+
+class TestAccountConfig:
+    """多帳戶(2026-10-12):策略 + 幣種 + 帳戶 → 一份設定檔;帳戶寫進設定檔的 account:。"""
+
+    def test_existing_config_without_account_belongs_to_test1(self, root):
+        path = root / "live_execution_config.yaml"
+        assert actions.config_for(root, "strategies/scale_in_ladder.yaml", "SUIUSDT", "TEST1") == path
+        assert actions.config_for(root, "strategies/scale_in_ladder.yaml", "SUIUSDT") == path
+
+    def test_other_account_gets_its_own_config(self, root):
+        path = actions.config_for(root, "strategies/scale_in_ladder.yaml", "SUIUSDT", "MAIN")
+        assert path.name == "live_scale_in_ladder_suiusdt_main.yaml" and not path.exists()
+
+    def test_existing_config_matched_by_account_case_insensitively(self, root):
+        other = root / "live_mine.yaml"
+        other.write_text("strategy_path: strategies/scale_in_ladder.yaml\nsymbol_override: SUIUSDT\naccount: MAIN\n")
+        assert actions.config_for(root, "strategies/scale_in_ladder.yaml", "SUIUSDT", "main") == other
+
+    def test_prepare_config_writes_the_account(self, root):
+        path = actions.prepare_config(root, "strategies/scale_in_ladder.yaml", "SUIUSDT", TestPrepareConfig.SETTINGS,
+                                      {}, example=root / "live_execution_config.example.yaml", account="MAIN")
+        assert path.name == "live_scale_in_ladder_suiusdt_main.yaml"
+        assert yaml.safe_load(path.read_text())["account"] == "MAIN"
+        assert "account" not in yaml.safe_load((root / "live_execution_config.yaml").read_text())  # test1 那份沒動

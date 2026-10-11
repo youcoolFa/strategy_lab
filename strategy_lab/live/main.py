@@ -180,7 +180,12 @@ def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = N
     strategy = apply_strategy_overrides(load_strategy(config.strategy_path), config)
     symbol = config.symbol_override or to_bybit_symbol(strategy.symbol)
 
+    from strategy_lab.live import accounts as accounts_mod
+
+    account = accounts_mod.resolve(config.account)  # 多帳戶(2026-10-12):找不到 key 就 AccountError,不改用別的帳戶
     bybit_client = BybitClient(
+        api_key=account.api_key,
+        api_secret=account.api_secret,
         testnet=config.testnet,
         max_retries=config.max_api_retries,
         retry_backoff_cap_seconds=config.retry_backoff_cap_seconds,
@@ -205,6 +210,7 @@ def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = N
         from strategy_lab.engine.band_runner import BandRunner
 
         runner = BandRunner(order_qty=_resolve_order_qty(config, bybit_client, symbol), **common)
+        runner.account = account
         attach_recorder(runner, recorder)
         return runner, symbol
     if strategy.scale_in:
@@ -216,6 +222,7 @@ def build_runner_and_symbol(config: ExecutionConfig, recorder: Optional[Any] = N
     else:
         order_qty = _resolve_order_qty(config, bybit_client, symbol)
         runner = StrategyRunner(order_qty=order_qty, **common)
+    runner.account = account  # 帳戶名稱 / UID(不含 key 的字串表示),給 sl_run 與 Telegram 用
     attach_recorder(runner, recorder)
     return runner, symbol
 
@@ -257,7 +264,31 @@ def _run_info(runner: StrategyRunner, config: ExecutionConfig, symbol: str, orig
         preflight=preflight, log_path=str(log_path) if log_path else None, started_at=started_at,
         expected_end_at=expected_end, expected_hold_seconds=round(hold.total_seconds()) if hold else None,
         expected_duration_seconds=round((expected_end - started_at).total_seconds()) if expected_end else None,
+        account=getattr(getattr(runner, "account", None), "name", None),
+        bybit_uid=getattr(runner, "account_uid", None),
     )
+
+
+TELEGRAM_PROJECT = "Strategy Lab"
+
+
+def telegram_project(account_name: Optional[str]) -> str:
+    """Telegram 標題的專案名稱帶帳戶(2026-10-12):「🟢 #成交|Strategy Lab|MAIN」。"""
+    return f"{TELEGRAM_PROJECT}｜{account_name}" if account_name else TELEGRAM_PROJECT
+
+
+def verify_account(client: Any, account: Any, now: datetime) -> Optional[str]:
+    """實盤啟動前向 Bybit 核對這組 key(/v5/user/query-api,只讀):UID 對不上、唯讀、已過期 → AccountError
+    (拒絕啟動);有提幣權限、快到期、沒設 UID → WARNING。回傳 Bybit 回報的 UID(寫進 sl_run)。"""
+    from strategy_lab.live import accounts as accounts_mod
+
+    info = client.api_key_info()
+    errors, warnings = accounts_mod.verify(account, info, now)
+    for w in warnings:
+        logger.warning(w)
+    if errors:
+        raise accounts_mod.AccountError("\n".join(errors))
+    return info.get("uid")
 
 
 def _expected_end(runner: StrategyRunner, started_at: datetime) -> Optional[datetime]:
@@ -280,7 +311,7 @@ def attach_notifications(runner: Any, dry_run: bool, costs: Any = None) -> None:
         return
     prev_order, prev_event = runner.on_order, runner.on_event
     fills = logger.bind(telegram=True, category="fill")  # 🟢 #成交
-    pnl = logger.bind(telegram=True, category="pnl")  # 🟣 #損益
+    pnl = logger.bind(telegram=True, category="pnl")  # 🔵 #損益
 
     def on_order(rec: Any) -> None:
         if prev_order is not None:
@@ -475,7 +506,7 @@ def run_forever(
                 _warn_tick_network_error(config, e)
                 continue
             _tick_tolerating_network_errors(runner, now, price, config)
-            reporter.maybe_report(now, price)  # 每 STATUS_INTERVAL_MINUTES 分鐘一則 ⚪ #狀態
+            reporter.maybe_report(now, price)  # 每 STATUS_INTERVAL_MINUTES 分鐘一則 ⚫ #狀態
             # 運作中改參數(live/control.py 寫的請求檔):在兩個 tick 之間套用,不會跟成交處理互相干擾
             if runner.state != RunState.STOPPED:
                 process_control(runner, config_path, now, price, control_run_dir or CONTROL_RUN_DIR)
@@ -552,14 +583,32 @@ def main(argv: Optional[List[str]] = None) -> None:
     preflight = load_snapshot(config_path or Path(__file__).resolve().parents[2] / "live_execution_config.yaml")
     try:
         runner, symbol = build_runner_and_symbol(config)
+        account = getattr(runner, "account", None)
+        if account is not None:  # 多帳戶(2026-10-12)
+            from strategy_lab.log.logger_setup import get_notifier
+
+            get_notifier().project = telegram_project(account.name)
+            logger.info(f"Bybit 帳戶:{account}")
+            if not config.dry_run:  # 實盤:先向 Bybit 核對 key 屬於這個帳戶、能下單,對不上就不啟動
+                runner.account_uid = verify_account(runner.broker.client, account, datetime.now(HKT))
         recorder = None if config.dry_run else make_recorder(config, runner.broker.client)
         attach_recorder(runner, recorder)
         attach_notifications(runner, config.dry_run, costs=recorder)
         run_forever(runner, config, symbol, recorder=recorder, log_path=log_path, preflight=preflight,
                     config_path=config_path or Path(__file__).resolve().parents[2] / "live_execution_config.yaml")
-    except Exception:
-        logger.exception("live runner 異常結束(沒有走收尾流程,請檢查交易所上的掛單/持倉)")
+    except Exception as e:
+        # 交易所拒絕(餘額不足、下單 / 平倉被拒)= 確定的成交失敗 → 交易快報;其他(程式 bug…)→ 系統警報(2026-10-11)
+        logger.bind(trade=_is_exchange_rejection(e)).exception(
+            "live runner 異常結束(沒有走收尾流程,請檢查交易所上的掛單/持倉)")
         raise
+
+
+def _is_exchange_rejection(error: BaseException) -> bool:
+    from pybit.exceptions import InvalidRequestError
+
+    from strategy_lab.live.bybit_client import BybitAPIError
+
+    return isinstance(error, (InvalidRequestError, BybitAPIError))
 
 
 if __name__ == "__main__":

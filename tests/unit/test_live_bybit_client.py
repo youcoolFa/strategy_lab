@@ -674,3 +674,27 @@ class TestAccountWideQueries:
         assert [r["orderId"] for r in rows] == ["a"]
         name, kwargs = http.calls[-1]
         assert name == "get_open_orders" and kwargs["settleCoin"] == "USDT" and "symbol" not in kwargs
+
+
+class TestApiKeyInfo:
+    """多帳戶(2026-10-12):向 Bybit 查這組 key 屬於哪個 UID、有什麼權限(/v5/user/query-api,只讀)。"""
+
+    def test_returns_uid_permissions_readonly_and_expiry(self):
+        http = FakeHTTP()
+
+        def get_api_key_information(**kwargs):
+            http.calls.append(("get_api_key_information", kwargs))
+            return {"result": {"userID": 22222222, "readOnly": 0, "permissions": {"ContractTrade": ["Order", "Position"],
+                    "Wallet": ["AccountTransfer"], "Withdraw": []}, "expiredAt": "2027-01-01T00:00:00Z", "ips": ["*"]}}
+
+        http.get_api_key_information = get_api_key_information
+        info = make_client(http).api_key_info()
+        assert info["uid"] == "22222222" and info["read_only"] is False
+        assert info["can_withdraw"] is False and info["expires_at"] == "2027-01-01T00:00:00Z"
+
+    def test_withdraw_permission_is_detected(self):
+        http = FakeHTTP()
+        http.get_api_key_information = lambda **k: {"result": {"userID": 1, "readOnly": 1,
+                                                               "permissions": {"Withdraw": ["Withdraw"]}}}
+        info = make_client(http).api_key_info()
+        assert info["read_only"] is True and info["can_withdraw"] is True and info["expires_at"] is None

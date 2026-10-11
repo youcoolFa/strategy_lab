@@ -45,9 +45,9 @@ class FakeClient:
         return []
 
 
-SUI_ROW = {"kind": "strategy", "config": "live_execution_config", "symbol": "SUIUSDT", "strategy": "scale_in_ladder",
+SUI_ROW = {"kind": "strategy", "config": "live_execution_config", "account": "test1", "symbol": "SUIUSDT", "strategy": "scale_in_ladder",
            "mode": "🔴 實盤", "started_at": NOW}
-ETH_ROW = {"kind": "free style", "config": None, "symbol": "ETHUSDT", "strategy": "free style",
+ETH_ROW = {"kind": "free style", "config": None, "account": "test1", "symbol": "ETHUSDT", "strategy": "free style",
            "mode": "⏺ 記錄中", "started_at": NOW}
 
 
@@ -65,26 +65,30 @@ def fake(monkeypatch, tmp_path):
 
     monkeypatch.setattr(data, "load_env", lambda: None)
     monkeypatch.setattr(data, "db_url", lambda: "sqlite://")
-    monkeypatch.setattr(data, "make_client", lambda: FakeClient())
+    monkeypatch.setattr(data, "make_client", lambda account=None: calls.append(("client", account)) or FakeClient())
+    monkeypatch.setattr(data, "list_accounts", lambda: ["test1", "MAIN"])
     monkeypatch.setattr(data, "git_head", lambda *a: "9cf3920")
     monkeypatch.setattr(data, "project_root", lambda: root)
     monkeypatch.setattr(data, "list_daemons", lambda *a: [data.DaemonRow(
         config="live_execution_config", symbol="SUIUSDT", pid=54931, alive=True,
         console_log=tmp_path / "c.log", last_log_at=NOW - timedelta(minutes=90))])
-    monkeypatch.setattr(data, "unfinished_by_symbol", lambda url: {"SUIUSDT": {
-        "symbol": "SUIUSDT", "strategy_name": "scale_in_ladder", "git_commit": "f251f84399", "started_at": NOW}})
+    monkeypatch.setattr(data, "unfinished_runs", lambda url: {("TEST1", "SUIUSDT"): {
+        "symbol": "SUIUSDT", "account": "test1", "strategy_name": "scale_in_ladder", "git_commit": "f251f84399",
+        "started_at": NOW}})
     monkeypatch.setattr(data, "recent_runs", lambda url, limit=20: [])
     monkeypatch.setattr(data, "recent_events", lambda url, limit=20: [])
     monkeypatch.setattr(data, "active_runs", lambda url, root=None: list(state["active"]))
 
-    monkeypatch.setattr(fs, "start", lambda *a, **k: calls.append(("fs_start", a[2])) or "run-1")
-    monkeypatch.setattr(fs, "stop", lambda *a, **k: calls.append(("fs_stop", a[2])) or "RESULT")
+    monkeypatch.setattr(fs, "start", lambda *a, **k: calls.append(("fs_start", a[2])) or
+                        calls.append(("fs_account", k.get("account"))) or "run-1")
+    monkeypatch.setattr(fs, "stop", lambda *a, **k: calls.append(("fs_stop", a[2])) or
+                        calls.append(("fs_account", k.get("account"))) or "RESULT")
     monkeypatch.setattr(fs, "summary_message", lambda r: f"🏁 free style 結束|{r}")
     monkeypatch.setattr(fs, "send_telegram", lambda text: calls.append(("telegram", text)))
 
     monkeypatch.setattr(actions, "daemon_running", lambda path: Path(path).name == "live_execution_config.yaml")
     monkeypatch.setattr(actions, "prepare_config", lambda root_, strategy, symbol, settings, params, **k: calls.append(
-        ("prepare", strategy, symbol, settings, params)) or (root / f"live_{Path(strategy).stem}_{symbol.lower()}.yaml"))
+        ("prepare", strategy, symbol, settings, params)) or calls.append(("prepare_account", k.get("account"))) or (root / f"live_{Path(strategy).stem}_{symbol.lower()}.yaml"))
     monkeypatch.setattr(actions, "preflight_preview", lambda path: calls.append(("preview", Path(path).name)) or
                         actions.PreviewResult(text="【掛單計畫】(假的)", ready=True, fingerprint="fp", at=time.time()))
     monkeypatch.setattr(actions, "preflight_start", lambda path, preview, typed: calls.append(
@@ -117,7 +121,7 @@ def test_overview_shows_daemon_old_code_stale_log_and_account(fake):
 
 def test_refresh_queries_bybit_again(fake, monkeypatch):
     made = []
-    monkeypatch.setattr(data, "make_client", lambda: made.append(1) or FakeClient())
+    monkeypatch.setattr(data, "make_client", lambda account=None: made.append(1) or FakeClient())
     at = run()
     before = len(made)
     at.button(key="refresh").click().run()
@@ -156,10 +160,10 @@ def test_free_style_row_end_requires_confirmation_and_sends_summary(fake):
     calls, state = fake
     state["active"] = [SUI_ROW, ETH_ROW]
     at = run()
-    at.button(key="fs_stop_ETHUSDT").click().run()
+    at.button(key="fs_stop_test1_ETHUSDT").click().run()
     assert ("fs_stop", "ETHUSDT") not in calls
-    at.checkbox(key="fs_stop_confirm_ETHUSDT").check()
-    at.button(key="fs_stop_ETHUSDT").click().run()
+    at.checkbox(key="fs_stop_confirm_test1_ETHUSDT").check()
+    at.button(key="fs_stop_test1_ETHUSDT").click().run()
     assert ("fs_stop", "ETHUSDT") in calls
     assert ("telegram", "🏁 free style 結束|RESULT") in calls and not at.exception
 
@@ -330,8 +334,9 @@ def test_overview_shows_start_estimated_end_and_length_to_the_minute(fake, monke
 
     hkt = ZoneInfo("Asia/Hong_Kong")
     started = datetime(2026, 10, 7, 4, 16, 41, tzinfo=hkt)
-    monkeypatch.setattr(data, "unfinished_by_symbol", lambda url: {"SUIUSDT": {
-        "symbol": "SUIUSDT", "strategy_name": "scale_in_ladder", "git_commit": "f251f84399", "started_at": started}})
+    monkeypatch.setattr(data, "unfinished_runs", lambda url: {("TEST1", "SUIUSDT"): {
+        "symbol": "SUIUSDT", "account": "test1", "strategy_name": "scale_in_ladder", "git_commit": "f251f84399",
+        "started_at": started}})
     at = run()
     df = at.dataframe[0].value
     row = df[df["設定檔"] == "live_execution_config"].iloc[0]
@@ -339,3 +344,50 @@ def test_overview_shows_start_estimated_end_and_length_to_the_minute(fake, monke
     assert row["預估結束"] == "10-12 05:55"
     assert row["預估長度"] == "5 天 1 小時 39 分"
     assert not any(re.search(r"\d\d:\d\d:\d\d", str(v)) for v in row.values)  # 沒有秒
+
+
+# ---------------------------------------------------------------- 多帳戶(2026-10-12)
+
+def test_overview_daemon_table_shows_the_account(fake):
+    at = run()
+    df = at.dataframe[0].value
+    assert df[df["設定檔"] == "live_execution_config"].iloc[0]["帳戶"] == "test1"
+
+
+def test_bybit_snapshot_follows_the_selected_account(fake):
+    calls, _ = fake
+    at = run()
+    assert list(at.selectbox(key="snap_account").options) == ["test1", "MAIN"]
+    at.selectbox(key="snap_account").set_value("MAIN").run()
+    assert ("client", "MAIN") in calls and not at.exception
+
+
+def test_free_style_start_uses_the_selected_account(fake):
+    calls, _ = fake
+    at = run()
+    at.selectbox(key="new_account").set_value("MAIN").run()
+    at.radio(key="new_strategy").set_value("free style").run()
+    at.text_input(key="fs_symbol").input("ethusdt")
+    at.checkbox(key="fs_start_confirm").check()
+    at.button(key="fs_start").click().run()
+    assert ("fs_start", "ETHUSDT") in calls and ("fs_account", "MAIN") in calls
+    assert ("client", "MAIN") in calls and not at.exception
+
+
+def test_free_style_row_stops_on_its_own_account(fake):
+    calls, state = fake
+    state["active"] = [{**ETH_ROW, "account": "MAIN"}]
+    at = run()
+    assert any("MAIN" in e.label for e in at.expander)
+    at.checkbox(key="fs_stop_confirm_MAIN_ETHUSDT").check()
+    at.button(key="fs_stop_MAIN_ETHUSDT").click().run()
+    assert ("fs_account", "MAIN") in calls and ("client", "MAIN") in calls and not at.exception
+
+
+def test_new_strategy_is_prepared_for_the_selected_account(fake):
+    calls, _ = fake
+    at = run()
+    at.selectbox(key="new_account").set_value("MAIN").run()
+    fill_scale_in(at)
+    at.button(key="new_prepare").click().run()
+    assert ("prepare_account", "MAIN") in calls and not at.exception

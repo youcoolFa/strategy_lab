@@ -58,6 +58,8 @@ class RunInfo:
     expected_end_at: Optional[datetime] = None  # 策略時間窗的強制收尾時間
     expected_duration_seconds: Optional[int] = None
     expected_hold_seconds: Optional[int] = None  # 策略 YAML 的 expected_hold
+    account: Optional[str] = None  # 用哪個 Bybit 帳戶(名稱,不是 key;2026-10-12)
+    bybit_uid: Optional[str] = None  # 這個帳戶的 Bybit UID(啟動時向 Bybit 查到的)
 
 
 def _strip_secrets(value: Any) -> Any:
@@ -228,6 +230,7 @@ class TradeRecorder:
             "net_pnl": event.realized_pnl - fees - funding, "max_drawdown": event.max_drawdown, "forced": event.forced,
             "hold_seconds": _seconds(event.end_time - event.start_time),
             "expected_hold_seconds": self._run.get("expected_hold_seconds"),
+            "account": self._run.get("account"), "strategy_name": self._run.get("strategy_name"),
         }
 
     def _write(self, table: str, row: Dict[str, Any]) -> None:

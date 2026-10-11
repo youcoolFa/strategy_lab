@@ -708,3 +708,176 @@ class TestBandWiring:
         finally:
             logger.remove(sink)
         assert "區間" in sent[0] and "band" not in sent[0]
+
+
+class TestCrashRouting:
+    """2026-10-11:交易所拒絕(InvalidRequestError / BybitAPIError:餘額不足、下單 / 平倉被拒)造成的異常結束
+    = 確定的成交失敗 → logger.bind(trade=True),送「交易快報」;其他錯誤(程式 bug…)→ 系統警報。"""
+
+    def _run_main_raising(self, monkeypatch, tmp_path, error):
+        import strategy_lab.live.main as main_module
+        from loguru import logger
+
+        records = []
+        sink = logger.add(lambda m: records.append(m.record), level="ERROR")
+        monkeypatch.setattr(main_module, "load_dotenv", lambda: None)
+        monkeypatch.setattr(main_module, "build_runner_and_symbol", lambda config: (None, "X"))
+        monkeypatch.setattr(main_module, "setup_logger", lambda name, log_dir=None: (tmp_path / "x.log", 0))  # 不重設 log
+
+        def boom(*a, **k):
+            raise error
+
+        monkeypatch.setattr(main_module, "run_forever", boom)
+        path = tmp_path / "live_x.yaml"
+        path.write_text("strategy_path: strategies/scale_in_ladder.yaml\ndry_run: true\n")
+        try:
+            with pytest.raises(type(error)):
+                main(["--config", str(path)])
+        finally:
+            logger.remove(sink)
+        [crash] = [r for r in records if "異常結束" in r["message"]]
+        return crash
+
+    def test_exchange_rejection_is_a_trade_failure(self, monkeypatch, tmp_path):
+        from pybit.exceptions import InvalidRequestError
+
+        error = InvalidRequestError(request="place_order", message="ab not enough for new order", status_code=110007,
+                                    time="0", resp_headers={})
+        crash = self._run_main_raising(monkeypatch, tmp_path, error)
+        assert crash["extra"].get("trade") is True
+
+    def test_wrapped_bybit_api_error_is_a_trade_failure(self, monkeypatch, tmp_path):
+        from strategy_lab.live.bybit_client import BybitAPIError
+
+        crash = self._run_main_raising(monkeypatch, tmp_path, BybitAPIError("取消訂單失敗"))
+        assert crash["extra"].get("trade") is True
+
+    def test_other_crashes_are_system_problems(self, monkeypatch, tmp_path):
+        crash = self._run_main_raising(monkeypatch, tmp_path, RuntimeError("bug"))
+        assert crash["extra"].get("trade") is not True
+
+
+NOW = datetime(2026, 10, 12, 4, 0, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+ACCOUNTS_ENV = """BYBIT_API_KEY=legacykey
+BYBIT_API_SECRET=legacysecret
+ACCOUNT = test1
+BYBIT_test1_UID=11111111
+ACCOUNT = MAIN
+BYBIT_MAIN_API_KEY=mainkey
+BYBIT_MAIN_API_SECRET=mainsecret
+BYBIT_MAIN_UID=22222222
+"""
+
+
+class TestAccountWiring:
+    """多帳戶(2026-10-12):設定檔的 account → 用那個帳戶的 key 建 Bybit 連線;實盤啟動前向 Bybit 核對;
+    帳戶名稱 / UID 寫進 sl_run;Telegram 標題帶帳戶名稱。"""
+
+    @pytest.fixture
+    def env(self, tmp_path, monkeypatch):
+        from strategy_lab.live import accounts
+
+        path = tmp_path / ".env"
+        path.write_text(ACCOUNTS_ENV)
+        monkeypatch.setattr(accounts, "ENV_PATH", path)
+        return path
+
+    def test_runner_uses_the_accounts_keys(self, env):
+        config = ExecutionConfig(strategy_path="strategies/scale_in_ladder.yaml", dry_run=True, account="main",
+                                 entry_prices=[1.2, 1.19, 1.18], symbol_override="XRPUSDT")
+        runner, _ = build_runner_and_symbol(config)
+        assert runner.account.name == "MAIN" and runner.account.uid == "22222222"
+        assert runner.broker.client._http.api_key == "mainkey"
+
+    def test_no_account_is_test1_with_the_original_key(self, env):
+        config = ExecutionConfig(strategy_path="strategies/scale_in_ladder.yaml", dry_run=True,
+                                 entry_prices=[1.2, 1.19, 1.18], symbol_override="XRPUSDT")
+        runner, _ = build_runner_and_symbol(config)
+        assert runner.account.name == "test1" and runner.broker.client._http.api_key == "legacykey"
+
+    def test_unknown_account_refuses_to_build(self, env):
+        from strategy_lab.live.accounts import AccountError
+
+        config = ExecutionConfig(strategy_path="strategies/scale_in_ladder.yaml", account="nope",
+                                 entry_prices=[1.2, 1.19, 1.18])
+        with pytest.raises(AccountError):
+            build_runner_and_symbol(config)
+
+    def test_verify_account_returns_uid_and_refuses_a_mismatch(self, env):
+        from strategy_lab.live import accounts
+        from strategy_lab.live.main import verify_account
+
+        class Client:
+            def __init__(self, uid):
+                self.uid = uid
+
+            def api_key_info(self):
+                return {"uid": self.uid, "read_only": False, "can_withdraw": False, "expires_at": None}
+
+        main_acc = accounts.resolve("MAIN")
+        assert verify_account(Client("22222222"), main_acc, NOW) == "22222222"
+        with pytest.raises(accounts.AccountError, match="11111111"):
+            verify_account(Client("11111111"), main_acc, NOW)
+
+    def test_run_info_records_account_and_uid(self, env):
+        from strategy_lab.live.main import _run_info
+
+        config = ExecutionConfig(strategy_path="strategies/scale_in_ladder.yaml", dry_run=True, account="MAIN",
+                                 entry_prices=[1.2, 1.19, 1.18], symbol_override="XRPUSDT")
+        runner, symbol = build_runner_and_symbol(config)
+        runner.start(NOW, 1.25)
+        runner.account_uid = "22222222"
+        info = _run_info(runner, config, symbol, None, None, NOW, None, None)
+        assert (info.account, info.bybit_uid) == ("MAIN", "22222222")
+
+    def test_telegram_title_names_the_account(self):
+        from strategy_lab.live.main import telegram_project
+
+        assert telegram_project("MAIN") == "Strategy Lab｜MAIN"
+
+
+class TestMainVerifiesTheAccount:
+    def _run(self, monkeypatch, tmp_path, uid, dry_run=False):
+        import strategy_lab.live.main as main_module
+        from strategy_lab.live import accounts
+        from strategy_lab.log import logger_setup
+
+        calls = []
+
+        class Client:
+            def api_key_info(self):
+                calls.append("api_key_info")
+                return {"uid": uid, "read_only": False, "can_withdraw": False, "expires_at": None}
+
+        class Runner:
+            account = accounts.AccountCredentials(name="MAIN", api_key="k", api_secret="s", uid="22222222")
+            broker = type("B", (), {"client": Client()})()
+
+        runner = Runner()
+        monkeypatch.setattr(main_module, "load_dotenv", lambda: None)
+        monkeypatch.setattr(main_module, "setup_logger", lambda name, log_dir=None: (tmp_path / "x.log", 0))
+        monkeypatch.setattr(main_module, "build_runner_and_symbol", lambda config: (runner, "X"))
+        monkeypatch.setattr(main_module, "make_recorder", lambda config, client: None)
+        monkeypatch.setattr(main_module, "attach_notifications", lambda *a, **k: None)
+        monkeypatch.setattr(main_module, "run_forever", lambda *a, **k: calls.append("run_forever"))
+        monkeypatch.setattr(logger_setup, "_notifier", None)
+        path = tmp_path / "live_x.yaml"
+        path.write_text(f"strategy_path: strategies/scale_in_ladder.yaml\ndry_run: {str(dry_run).lower()}\naccount: MAIN\n")
+        return main_module, runner, calls, path
+
+    def test_live_run_checks_the_key_then_runs_and_titles_telegram(self, monkeypatch, tmp_path):
+        from strategy_lab.log.logger_setup import get_notifier
+
+        main_module, runner, calls, path = self._run(monkeypatch, tmp_path, "22222222")
+        main_module.main(["--config", str(path)])
+        assert calls == ["api_key_info", "run_forever"]
+        assert runner.account_uid == "22222222"
+        assert get_notifier().project == "Strategy Lab｜MAIN"
+
+    def test_wrong_key_refuses_before_running(self, monkeypatch, tmp_path):
+        from strategy_lab.live.accounts import AccountError
+
+        main_module, _, calls, path = self._run(monkeypatch, tmp_path, "11111111")
+        with pytest.raises(AccountError):
+            main_module.main(["--config", str(path)])
+        assert "run_forever" not in calls

@@ -244,6 +244,18 @@ class BybitClient:
                 logger.warning(f"取消訂單 {order_id} 網路持續失敗,{self._persist_retry_seconds} 秒後重試,不放棄: {e}")
                 time.sleep(self._persist_retry_seconds)
 
+    def api_key_info(self) -> dict:
+        """這組 key 屬於哪個 UID、是不是唯讀、有沒有提幣權限、什麼時候到期(/v5/user/query-api,只讀)。
+        多帳戶(2026-10-12)啟動前核對用;不回傳 key 本身。"""
+        r = self._call_with_retry(self._http.get_api_key_information)["result"]
+        perms = r.get("permissions") or {}
+        return {
+            "uid": str(r.get("userID")) if r.get("userID") is not None else None,
+            "read_only": bool(int(r.get("readOnly") or 0)),
+            "can_withdraw": bool(perms.get("Withdraw")),
+            "expires_at": r.get("expiredAt") or None,
+        }
+
     def list_positions(self) -> list:
         """整個帳戶的 USDT 永續持倉(只回有部位的;Streamlit 狀態頁用,只讀)。"""
         resp = self._call_with_retry(self._http.get_positions, category=self._category, settleCoin="USDT")

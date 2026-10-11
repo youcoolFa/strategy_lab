@@ -402,3 +402,52 @@ class TestCostsForNotifications:
         rec.record_event(event())
         fees, funding = rec.event_costs(1)
         assert fees == pytest.approx(0.4) and funding == pytest.approx(0.05)
+
+
+class TestAccountColumns:
+    """多帳戶(2026-10-12):sl_run 記帳戶名稱與 Bybit UID;sl_event 也記帳戶與策略名稱,
+    Superset 畫圖直接篩「哪個帳戶、哪個策略」,不用 join。只存名稱 / UID,不存 key。"""
+
+    def test_columns_exist_and_are_nullable(self):
+        from strategy_lab.storage.models import SlEvent, SlRun
+
+        for model, cols in ((SlRun, ("account", "bybit_uid")), (SlEvent, ("account", "strategy_name"))):
+            for col in cols:
+                assert col in model.__table__.columns, f"{model.__tablename__}.{col}"
+                assert model.__table__.columns[col].nullable is True
+
+
+class TestRecorderWritesAccount:
+    def test_run_and_each_event_carry_account_and_strategy(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path, FakeExecutions([]))
+        rec.start_run(run_info(account="MAIN", bybit_uid="22222222"))
+        rec.record_event(event())
+        [r] = rows(db, SlRun)
+        assert (r.account, r.bybit_uid) == ("MAIN", "22222222")
+        [e] = rows(db, SlEvent)
+        assert (e.account, e.strategy_name) == ("MAIN", "weekend_band_reversion")
+
+    def test_account_defaults_to_none_for_old_callers(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path, FakeExecutions([]))
+        rec.start_run(run_info())
+        assert rows(db, SlRun)[0].account is None
+
+
+class TestBackfillAccount:
+    def test_setup_fills_old_rows_with_test1_and_copies_to_events(self, db, tmp_path):
+        """2026-10-12 前的紀錄都是用 test1(原本那組 key)交易的;setup 補上,已經有的不動。"""
+        from strategy_lab.storage.setup_db import setup
+
+        old = make_recorder(db, tmp_path, FakeExecutions([]))
+        old.start_run(run_info())  # 舊紀錄:沒有帳戶
+        old.record_event(event())
+        new = make_recorder(db, tmp_path, FakeExecutions([]))
+        new.start_run(run_info(account="MAIN", strategy_name="scale_in_ladder"))
+
+        setup(db)
+        setup(db)  # 重跑也一樣
+
+        runs = {r.run_id: r for r in rows(db, SlRun)}
+        assert runs[old.run_id].account == "test1" and runs[new.run_id].account == "MAIN"
+        [e] = rows(db, SlEvent)
+        assert (e.account, e.strategy_name) == ("test1", "weekend_band_reversion")

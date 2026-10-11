@@ -67,16 +67,26 @@ class StopResult:
     funding: float
     net_pnl: float
     open_position: float
+    account: str = "test1"  # 用哪個 Bybit 帳戶(2026-10-12)
 
 
 # ---------------------------------------------------------------------------
 # start / stop
 # ---------------------------------------------------------------------------
 
-def start(db_url: Optional[str], client: Any, symbol: str, now: datetime, pending_dir: Path = PENDING_DIR) -> str:
+def _account_name(account: Optional[str]) -> str:
+    from strategy_lab.live.accounts import DEFAULT_ACCOUNT
+
+    return (account or DEFAULT_ACCOUNT).strip()
+
+
+def start(db_url: Optional[str], client: Any, symbol: str, now: datetime, pending_dir: Path = PENDING_DIR,
+          account: Optional[str] = None) -> str:
+    """account:用哪個 Bybit 帳戶(None = test1);client 要是用那個帳戶的 key 建的(CLI / 頁面會處理)。"""
+    account = _account_name(account)
     engine = _engine(db_url)
     try:
-        running = _unfinished_runs(engine, symbol)
+        running = _unfinished_runs(engine, symbol, account)
         if running:
             r = running[0]
             raise FreeStyleError(f"{symbol} 已經有一段還沒結束的紀錄({r.strategy_name},{_hkt(r.started_at)} 開始,"
@@ -97,14 +107,16 @@ def start(db_url: Optional[str], client: Any, symbol: str, now: datetime, pendin
         strategy_name=FREE_STYLE, strategy_path=NA, strategy_yaml=NA, strategy_params={},
         config={"mode": FREE_STYLE, "symbol": symbol}, symbol=symbol, category="linear", direction=NA,
         origin_price=None, origin_source=None, qty=None, order_type=NA, loop=None, testnet=False,
-        preflight=None, log_path=None, started_at=now,
+        preflight=None, log_path=None, started_at=now, account=account,
     ))
 
 
-def stop(db_url: Optional[str], client: Any, symbol: str, now: datetime, pending_dir: Path = PENDING_DIR) -> StopResult:
+def stop(db_url: Optional[str], client: Any, symbol: str, now: datetime, pending_dir: Path = PENDING_DIR,
+         account: Optional[str] = None) -> StopResult:
+    account = _account_name(account)
     engine = _engine(db_url)
     try:
-        run = _running_free_style(engine, symbol)
+        run = _running_free_style(engine, symbol, account)
         if run is None:
             raise FreeStyleError(f"{symbol} 沒有進行中的 free style(要先 start)")
         run_row = {c.name: getattr(run, c.name) for c in SlRun.__table__.columns}
@@ -132,13 +144,13 @@ def stop(db_url: Optional[str], client: Any, symbol: str, now: datetime, pending
     return StopResult(
         run_id=run_row["run_id"], symbol=symbol, started_at=started, ended_at=now, events=len(events),
         orders=len(orders), gross_pnl=gross, fees=fees, funding=funding, net_pnl=gross - fees - funding,
-        open_position=client.get_position_qty(symbol),
+        open_position=client.get_position_qty(symbol), account=run_row.get("account") or account,
     )
 
 
 def summary_message(r: StopResult) -> str:
     lines = [
-        f"🏁 free style 結束|{r.symbol}",
+        f"🏁 free style 結束|{r.symbol}|帳戶 {r.account}",
         f"{_hkt(r.started_at)} → {_hkt(r.ended_at)}(共 {_duration(r.ended_at - r.started_at)})",
         f"完成 {r.events} 輪|訂單 {r.orders} 張",
         f"合計淨利 {r.net_pnl:+.2f} USDT(毛利 {r.gross_pnl:+.2f} − 手續費 {r.fees:.4f} − 資金費 {r.funding:.4f})",
@@ -159,17 +171,19 @@ def _engine(db_url: Optional[str]):
     return create_engine(db_url, connect_args=connect_args, future=True)
 
 
-def _unfinished_runs(engine, symbol: str) -> List[SlRun]:
+def _unfinished_runs(engine, symbol: str, account: str) -> List[SlRun]:
+    """這個帳戶、這個幣還沒結束的 run(帳戶不分大小寫;舊紀錄沒有帳戶 = test1)。"""
     try:
         with Session(engine) as s:
-            return list(s.scalars(select(SlRun).where(SlRun.symbol == symbol, SlRun.ended_at.is_(None))
+            runs = list(s.scalars(select(SlRun).where(SlRun.symbol == symbol, SlRun.ended_at.is_(None))
                                   .where(SlRun.end_reason.is_(None))))
     except Exception as e:  # noqa: BLE001
         raise FreeStyleError(f"交易資料庫連不上:{e}") from None
+    return [r for r in runs if _account_name(r.account).upper() == account.upper()]
 
 
-def _running_free_style(engine, symbol: str) -> Optional[SlRun]:
-    runs = [r for r in _unfinished_runs(engine, symbol) if r.strategy_name == FREE_STYLE]
+def _running_free_style(engine, symbol: str, account: str) -> Optional[SlRun]:
+    runs = [r for r in _unfinished_runs(engine, symbol, account) if r.strategy_name == FREE_STYLE]
     return max(runs, key=lambda r: _utc(r.started_at)) if runs else None
 
 
@@ -285,9 +299,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p_start = sub.add_parser("start", help="開始一段 free style")
     p_start.add_argument("--symbol", required=True, help="Bybit 交易對,例 ETHUSDT")
+    p_start.add_argument("--account", help="Bybit 帳戶名稱(.env 的 ACCOUNT = ...);不填 = test1")
     p_start.add_argument("--since", help="補記:從這個時間開始(HKT,格式 \"2026-10-09 14:00\");不填 = 現在")
     p_stop = sub.add_parser("stop", help="結束,從 Bybit 拉回期間的訂單 / 成交寫進資料庫")
     p_stop.add_argument("--symbol", required=True)
+    p_stop.add_argument("--account", help="Bybit 帳戶名稱;不填 = test1")
     sub.add_parser("status", help="列出進行中的 free style")
     args = parser.parse_args(argv)
 
@@ -296,17 +312,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "status":
             print(_status(db_url))
             return 0
+        from strategy_lab.live import accounts
         from strategy_lab.live.bybit_client import BybitClient  # 只讀;不下單
-        client = BybitClient(testnet=False)
+        try:
+            account = accounts.resolve(args.account)
+        except accounts.AccountError as e:
+            raise FreeStyleError(str(e)) from e
+        client = BybitClient(api_key=account.api_key, api_secret=account.api_secret, testnet=False)
         symbol = args.symbol.upper()
         now = datetime.now(timezone.utc)
         if args.command == "start":
             when = _parse_since(args.since) if args.since else now
-            run_id = start(db_url, client, symbol, when)
-            print(f"✅ free style 開始:{symbol},{_hkt(when)} HKT(run_id {run_id})\n"
-                  f"   自己去 Bybit 交易;結束時跑:.venv/bin/python -m strategy_lab.live.free_style stop --symbol {symbol}")
+            run_id = start(db_url, client, symbol, when, account=args.account)
+            acct_opt = f" --account {account.name}" if args.account else ""
+            print(f"✅ free style 開始:{symbol},{account},{_hkt(when)} HKT(run_id {run_id})\n"
+                  f"   自己去 Bybit 交易;結束時跑:.venv/bin/python -m strategy_lab.live.free_style stop --symbol {symbol}{acct_opt}")
             return 0
-        result = stop(db_url, client, symbol, now)
+        result = stop(db_url, client, symbol, now, account=args.account)
         text = summary_message(result)
         print(text)
         send_telegram(text)

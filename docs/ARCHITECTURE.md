@@ -137,7 +137,7 @@ flowchart TD
     subgraph Store["storage/ + log/"]
         REC["storage/recorder.py TradeRecorder"]
         DB[("trading PostgreSQL :5434<br/>sl_run / sl_order / sl_fill / sl_event")]
-        TG["log/ logger_setup + telegram_notifier<br/>@fa_strategy_lab_bot"]
+        TG["log/ logger_setup + telegram_notifier<br/>@fa_strategy_lab_bot(靜音)<br/>交易快報 @Fa_trade_notice_bot / 系統警報 @Fa_sys_alert_bot"]
     end
 
     UI -->|"預覽 / 啟動(使用者打 yes)"| PF
@@ -528,6 +528,8 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 區間策略改版(上下同時掛單)| `weekend_band_reversion.yaml` 改寫;新增 `engine/band_runner.py`、plugin `entry/band.py` / `exit/band.py`;schema `band` + `direction: both`;loader 檢查;`live/main` 建 BandRunner(不支援接手)、Telegram「區間」;`status` 啟動訊息;`estimates`:`OrderPlan.band_sell_price`、`build_band_plan`、掛單計畫 / 風險 / 每輪損益;`preflight` 分支;`strategy_overrides.band`(apply / write_back);頁面買賣 % 欄位、進行中只能停止 | 新增 §6.30 | 已完成 |
 | 刪除 `weekend_mean_reversion` | 檔案搬到垃圾桶;測試改用 `mean_reversion_breakout_guard`;`ExecutionConfig.strategy_path` 預設改 `scale_in_ladder`;demo / README / 範本設定檔 / 策略註解;`tests/unit/test_demo_run_from_yaml.py` | §6.14 加註、§6.30 | 已完成 |
 | 總覽啟動 / 預估結束 / 預估長度 | `ui/data.py` 的 `schedule`、`fmt_time`、`fmt_duration`(只到分鐘;UTC → HKT)| 改 §6.29 | 已完成 |
+| Telegram 交易快報 / 系統警報 + 新顏色 | `log/telegram_notifier.py`:`trade_*` / `system_*` bot(env `TELEGRAM_TRADE_*` / `TELEGRAM_SYSTEM_*`)、`route()`、`TRADE_CATEGORIES`、`notify(route=)`、`CATEGORY_STYLES` 新顏色;`live/main` 交易所拒絕的異常結束 `trade=True`;conftest 清空;sat_strategy / Fa 同一份、sat `monitor._run_bot`、crypto `update.notify` | 改 §6.24 | 已完成 |
+| Telegram 設定簡化 + 實際驗證 | 兩個新 bot 的 chat id 預設共用 `TELEGRAM_CHAT_ID`(`.env` 只要加兩行 token);`scripts/telegram_route_check.py` 實際發 4 則測試訊息驗證分流;sat_strategy 測試的 log 導到臨時資料夾(之前會寫進真的 `logs/sat_strategy.log`) | 改 §6.24 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1473,6 +1475,35 @@ WARNING(模式橫幅、正常收尾)不發。strategy_lab 的事件:啟動(模�
 - 不會自己觸發自己:發送失敗只用 `telegram=False` 記本地 log。
 - atexit 最多等 10 秒把 queue 送完,崩潰訊息不會遺失。
 
+**兩個有聲音的 bot(2026-10-11)**:使用者要把例行訊息靜音、重要的才有聲音和彈窗,所以多兩個
+**四個專案共用的 bot**(`.env` 的 `TELEGRAM_TRADE_BOT_TOKEN`、`TELEGRAM_SYSTEM_BOT_TOKEN`,都是選填;chat id 預設共用
+`TELEGRAM_CHAT_ID`——三個 bot 都私訊給使用者自己,要送到別處(例如群組)才另外寫 `TELEGRAM_TRADE_CHAT_ID` /
+`TELEGRAM_SYSTEM_CHAT_ID`):
+
+| 送到 | 訊息 |
+|---|---|
+| **交易快報** `@Fa_trade_notice_bot`(開聲音) | 🟢 #成交(`category="fill"`)、🟣 #權益 資產大變動(`category="equity"`)、確定的成交失敗(`logger.bind(trade=True)` 的 WARNING 以上:交易所拒絕下單 / 平倉、收尾平倉失敗) |
+| **系統警報** `@Fa_sys_alert_bot`(開聲音) | 其他所有 🟡 #警告 / 🔴 #錯誤 / 🆘 #嚴重:網路重試中、資料庫寫不進去、程式當掉、每週更新失敗… |
+| 原本的專案 bot(靜音) | ⚪ #系統、🔵 #損益、🟠 #持倉、⚫ #狀態 |
+
+顏色同一天改(使用者指定):⚪ 系統、🟢 成交、🔵 損益、🟠 持倉、🟣 權益、⚫ 狀態;等級 🟡 警告、🔴 錯誤、🆘 嚴重。
+網路錯誤(重試中)算系統問題;**確定**沒成交(重試用完後交易所拒絕、餘額不足…)才算成交失敗——strategy_lab 在
+`live/main.main()` 的異常結束判斷 `InvalidRequestError` / `BybitAPIError` → `trade=True`;sat_strategy 在
+`app/monitor._run_bot` 判斷 `ccxt.ExchangeError`。只送一邊、不重複;標題照樣有專案名稱;沒設定的 bot 改送原本的 bot。
+實作:`TelegramNotifier.route(record)` → "trade" / "system" / "normal" → queue 帶著 route → `_send` 選 token / chat。
+三個專案的 `telegram_notifier.py` 一起改(仍然一模一樣);crypto_database 的 `update.notify()` 讓 🔴 錯誤 走系統警報、
+⚪ 狀態改 ⚫。conftest 清空 `TELEGRAM_TRADE_*` / `TELEGRAM_SYSTEM_*`(`test_tests_never_use_the_real_trade_or_system_bot`
+守住;用環境變數模擬「.env 已有 token」先看到失敗)。
+
+**實際驗證(2026-10-11)**:`scripts/telegram_route_check.py` 從 4 個模擬的故障位置各發一則【測試,請忽略】
+訊息到真的 bot(不下單、不碰交易所,不印 token):交易所拒絕平倉 → 交易快報、🟢 成交 → 交易快報、資料庫寫入失敗 →
+系統警報、⚫ 狀態 → 原本的 bot;4 則全部送達。設定過程踩過的坑:token 只貼到冒號前面那段(Telegram 回 404)、
+chat id 填成別的數字(回 400 chat not found)、`.env` 改了沒存檔——檢查時只看長度 / 格式 / `getMe` 回的 bot 名稱,不顯示值。
+
+```
+cd /Users/mac/strategy_lab && .venv/bin/python scripts/telegram_route_check.py
+```
+
 **測試不會發真訊息**:`tests/conftest.py` 在模組層級把 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
 設成空字串(`load_dotenv()` 不會覆蓋已存在的變數),每個測試再把共用發送器重設。這是踩過的雷:
 sat_strategy 的 `bot.py` 一 import 就 `load_dotenv()` + 建發送器,加 conftest 之前跑測試會真的
@@ -1798,3 +1829,55 @@ origin 100、buy/sell 0.1%、數量 1:
 `mean_reversion_breakout_guard.yaml` 裡完全一樣(多一個 kill_switch),原本拿它當範例的 14 個測試改用 guard;
 `ExecutionConfig.strategy_path` 預設改成 `scale_in_ladder`;`tests/unit/test_demo_run_from_yaml.py` 防止 demo 寫死不存在的策略名。
 
+
+### 6.31 多帳戶(`live/accounts.py`,2026-10-12)
+
+使用者有不只一個 Bybit 帳戶,要事後查得到「哪個帳戶、用哪個策略」交易的。
+
+- **test1** = 原本那組 `BYBIT_API_KEY`(子帳戶,測試用但是真錢);**MAIN** = 主帳戶。
+- 帳戶名稱寫進 DB:`sl_run.account` / `sl_run.bybit_uid`、`sl_event.account` / `sl_event.strategy_name`
+  (event 也放一份,Superset 不用 join 就能依帳戶 / 策略分組)。
+
+**.env 寫法**(照使用者的格式;`ACCOUNT = 名稱` 是標題):
+```
+# sub
+ACCOUNT = test1
+BYBIT_API_KEY=...            ← 原本那組(sat_strategy / Fa / 舊程式還在用)
+BYBIT_API_SECRET=...
+BYBIT_test1_API_KEY=         ← 留空 = 用上面原本那組
+BYBIT_test1_API_SECRET=
+BYBIT_test1_UID=...          ← 選填:啟動前向 Bybit 核對
+# main
+ACCOUNT = MAIN
+BYBIT_MAIN_API_KEY=...
+BYBIT_MAIN_API_SECRET=...
+BYBIT_MAIN_UID=...
+```
+
+**規則**:
+- 名稱不分大小寫;顯示照標題的寫法。設定檔 / 指令沒指定帳戶 = test1。
+- test1 自己的 key 是空的 → 用 `BYBIT_API_KEY`;**其他帳戶找不到 key 就報錯,絕不改用別的帳戶**。
+- key / secret 不會出現在 repr、str、錯誤訊息。`check_layout` 提醒寫在別的標題底下、名稱對不上的變數(可能貼錯位置)。
+- **UID 核對**(`BybitClient.api_key_info()` = `/v5/user/query-api`,`accounts.verify`):
+  - 擋下:UID 對不上(貼錯帳戶的 key)、唯讀 key、已過期
+  - 警告:有提幣權限、7 天內到期、沒設 UID(無法核對)
+
+**接線**:
+| 檔 | 內容 |
+|---|---|
+| `live/config.py` | `ExecutionConfig.account`(設定檔 `account: MAIN`;沒寫 = test1) |
+| `live/main.py` | `build_runner_and_symbol` 用 `accounts.resolve` 的 key 建 client;實盤啟動前 `verify_account`(有 error 就不開始);Telegram 標題 `Strategy Lab|帳戶名稱`;`RunInfo.account` / `bybit_uid` |
+| `live/preflight.py` | 印「帳戶 X(Bybit UID …,已核對)」;找不到帳戶或核對失敗印 ✗ 並結束 |
+| `live/free_style.py` | `start` / `stop` 帶 `account`;同一個幣可以在兩個帳戶各記一段;CLI `--account`;結束總結寫帳戶 |
+| `storage/models.py` / `recorder.py` | 新欄位(中文 comment);`_event_row` 從 run 抄 account / strategy_name |
+| `storage/setup_db.py` | `_backfill_account`:舊紀錄的 NULL 補成 test1;sl_event 從對應的 sl_run 抄(只補 NULL,重跑無害) |
+| `ui/data.py` | `list_accounts()`(test1 排第一)、`make_client(account)`、`DaemonRow.account`、`unfinished_runs` 以(帳戶, 幣)為 key(取代 `unfinished_by_symbol`)、`active_runs` 每列帶帳戶 |
+| `ui/actions.py` | `config_for(…, account)`:策略 + 幣種 + 帳戶 → 一份設定檔;test1 沿用 `live_<策略>_<幣>.yaml`,其他帳戶 `live_<策略>_<幣>_<帳戶>.yaml`;`prepare_config(account=)` 寫 `account:` |
+| `ui/app.py` | 總覽 daemon 表加「帳戶」欄;Bybit 帳戶區塊可選帳戶;「開始新的」先選帳戶;進行中清單標題顯示帳戶,free style 用自己的帳戶結束 |
+
+2026-10-12 已在真的 trading DB 跑過 `setup_db`(3 筆 run、1 筆 event 補成 test1),Superset 的 sl_run / sl_event dataset
+已抓到新欄位與中文描述。**只改了 strategy_lab**;sat_strategy / Fa 仍只用 `BYBIT_API_KEY`。
+
+**測試**:`test_live_accounts.py`(20 個;conftest 換成假的 .env,測試絕不讀真的)、`test_live_bybit_client.py`(TestApiKeyInfo)、
+`test_live_config.py`、`test_storage.py`(欄位 / recorder / 補值)、`test_live_main.py`(TestAccountWiring / TestMainVerifiesTheAccount)、
+`test_live_preflight.py`、`test_free_style.py`(TestAccounts、CLI `--account`、總結)、`test_ui_data.py` / `test_ui_actions.py` / `test_ui_app.py` 的多帳戶部分。

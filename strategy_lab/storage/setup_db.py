@@ -24,10 +24,31 @@ def setup(db_url: str) -> List[str]:
     engine = create_engine(db_url, future=True)
     Base.metadata.create_all(engine)
     _add_missing_columns(engine)
+    _backfill_account(engine)
     _apply_comments(engine)
     tables = sorted(t for t in inspect(engine).get_table_names() if t.startswith("sl_"))
     engine.dispose()
     return tables
+
+
+def _backfill_account(engine, default: str = "test1") -> None:
+    """多帳戶(2026-10-12):之前的紀錄都是用 test1(原本那組 BYBIT_API_KEY)交易的,補上帳戶名稱;
+    sl_event 的 account / strategy_name 從對應的 sl_run 抄過來。只補 NULL,已經有的不動;重跑無害。"""
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    run_cols = {c["name"] for c in insp.get_columns("sl_run")} if "sl_run" in tables else set()
+    event_cols = {c["name"] for c in insp.get_columns("sl_event")} if "sl_event" in tables else set()
+    if "account" not in run_cols:
+        return  # 很舊或不完整的表(測試會建)→ 不補
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE sl_run SET account = :d WHERE account IS NULL"), {"d": default})
+        if not {"account", "strategy_name"} <= event_cols or "strategy_name" not in run_cols:
+            return
+        conn.execute(text(
+            "UPDATE sl_event SET "
+            "account = COALESCE(account, (SELECT r.account FROM sl_run r WHERE r.run_id = sl_event.run_id)), "
+            "strategy_name = COALESCE(strategy_name, (SELECT r.strategy_name FROM sl_run r WHERE r.run_id = sl_event.run_id)) "
+            "WHERE account IS NULL OR strategy_name IS NULL"))
 
 
 def _quote(text_: str) -> str:

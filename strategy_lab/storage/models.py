@@ -24,6 +24,8 @@ class SlRun(Base):
                                  "被啟動檢查擋下(refused_leftover)或當掉(crash)也有一列"}
 
     run_id = Column(String(36), primary_key=True, comment="這次啟動的 ID(uuid);sl_order / sl_fill / sl_event 用它對回來")
+    account = Column(String(40), comment="用哪個 Bybit 帳戶(.env 的 ACCOUNT = 名稱,例 test1 / MAIN;2026-10-12 前的紀錄補成 test1)。只存名稱,不存 key")
+    bybit_uid = Column(String(20), comment="這個帳戶的 Bybit UID(啟動時向 Bybit 查 key 屬於哪個 UID;舊紀錄為 NULL)")
     strategy_name = Column(String(100), nullable=False, comment="策略名稱,例 scale_in_ladder;free style = 使用者手動交易的紀錄(live/free_style.py)")
     strategy_path = Column(String(300), nullable=False, comment="策略 YAML 路徑,例 strategies/scale_in_ladder.yaml;free style 為 NA")
     strategy_yaml = Column(Text, nullable=False, comment="啟動當下策略 YAML 全文")
@@ -106,6 +108,8 @@ class SlEvent(Base):
 
     run_id = Column(String(36), primary_key=True, comment="屬於哪次啟動(對應 sl_run.run_id)")
     event_index = Column(Integer, primary_key=True, comment="第幾輪(1 起算)")
+    account = Column(String(40), comment="用哪個 Bybit 帳戶(同 sl_run.account;放這裡方便 Superset 直接篩)")
+    strategy_name = Column(String(100), comment="策略名稱(同 sl_run.strategy_name;放這裡方便 Superset 直接篩)")
     direction = Column(String(10), nullable=False, comment="long 做多 / short 做空")
     start_time = Column(TS, nullable=False, comment="這輪第一筆成交時間(開始有倉)")
     end_time = Column(TS, nullable=False, comment="這輪部位回到 0 的時間")
