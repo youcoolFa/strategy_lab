@@ -79,7 +79,7 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(data, "recent_events", lambda url, limit=20: [])
     monkeypatch.setattr(data, "active_runs", lambda url, root=None: list(state["active"]))
 
-    monkeypatch.setattr(fs, "start", lambda *a, **k: calls.append(("fs_start", a[2])) or
+    monkeypatch.setattr(fs, "start", lambda *a, **k: calls.append(("fs_start", a[2])) or state.__setitem__("fs_when", a[3]) or
                         calls.append(("fs_account", k.get("account"))) or "run-1")
     monkeypatch.setattr(fs, "stop", lambda *a, **k: calls.append(("fs_stop", a[2])) or
                         calls.append(("fs_account", k.get("account"))) or "RESULT")
@@ -154,6 +154,28 @@ def test_free_style_start_requires_confirmation(fake):
     at.checkbox(key="fs_start_confirm").check()
     at.button(key="fs_start").click().run()
     assert ("fs_start", "ETHUSDT") in calls and not at.exception
+
+
+
+def test_free_style_since_is_picked_and_defaults_to_now(fake):
+    """補記開始時間用日期 + 時間選擇器,不用打字;預設 = 現在(日曆停在當年當月),可以往前選。"""
+    calls, state = fake
+    at = run()
+    at.radio(key="new_strategy").set_value("free style").run()
+    assert "fs_since" not in [t.key for t in at.text_input]
+    now = datetime.now(timezone(timedelta(hours=8)))
+    assert at.date_input(key="fs_since_day").value == now.date()
+    picked = at.time_input(key="fs_since_time").value
+    assert abs((picked.hour * 60 + picked.minute) - (now.hour * 60 + now.minute)) <= 1
+
+    at.text_input(key="fs_symbol").input("ethusdt")
+    day = now.date() - timedelta(days=1)
+    at.date_input(key="fs_since_day").set_value(day)
+    at.time_input(key="fs_since_time").set_value(datetime(2000, 1, 1, 14, 0).time())
+    at.checkbox(key="fs_start_confirm").check()
+    at.button(key="fs_start").click().run()
+    assert state["fs_when"] == datetime(day.year, day.month, day.day, 6, 0, tzinfo=timezone.utc)  # 14:00 HKT
+    assert not at.exception
 
 
 def test_free_style_row_end_requires_confirmation_and_sends_summary(fake):
