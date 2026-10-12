@@ -530,6 +530,8 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 總覽啟動 / 預估結束 / 預估長度 | `ui/data.py` 的 `schedule`、`fmt_time`、`fmt_duration`(只到分鐘;UTC → HKT)| 改 §6.29 | 已完成 |
 | Telegram 交易快報 / 系統警報 + 新顏色 | `log/telegram_notifier.py`:`trade_*` / `system_*` bot(env `TELEGRAM_TRADE_*` / `TELEGRAM_SYSTEM_*`)、`route()`、`TRADE_CATEGORIES`、`notify(route=)`、`CATEGORY_STYLES` 新顏色;`live/main` 交易所拒絕的異常結束 `trade=True`;conftest 清空;sat_strategy / Fa 同一份、sat `monitor._run_bot`、crypto `update.notify` | 改 §6.24 | 已完成 |
 | Telegram 設定簡化 + 實際驗證 | 兩個新 bot 的 chat id 預設共用 `TELEGRAM_CHAT_ID`(`.env` 只要加兩行 token);`scripts/telegram_route_check.py` 實際發 4 則測試訊息驗證分流;sat_strategy 測試的 log 導到臨時資料夾(之前會寫進真的 `logs/sat_strategy.log`) | 改 §6.24 | 已完成 |
+| 多帳戶 | 新增 `live/accounts.py`(.env 的 `ACCOUNT = 名稱` + `BYBIT_<名稱>_API_KEY/SECRET/UID`,不分大小寫;test1 = 原本的 `BYBIT_API_KEY`;其他帳戶找不到 key 就報錯)、`BybitClient.api_key_info()`(啟動前核對 UID / 唯讀 / 到期);`ExecutionConfig.account`;`sl_run.account` / `bybit_uid`、`sl_event.account` / `strategy_name`,`setup_db` 舊紀錄補成 test1;free style `--account`;頁面可選帳戶、總覽分帳戶 | 新增 §6.31 | 已完成;真 DB 已補欄位、Superset 已同步,兩個帳戶的 UID 已核對 |
+| 一次多個帳戶跑同一個策略 | `ui/actions.py` 的 `prepare_many` / `start_many`(`AccountPlan`、`StartResult`);頁面帳戶改多選;多個帳戶時數量只能用權益百分比;預覽沒過的帳戶不開始、其他照樣開始 | §6.31 新增小節 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
