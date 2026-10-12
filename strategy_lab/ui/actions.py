@@ -120,6 +120,14 @@ def _account_key(account: Optional[str]) -> str:
     return str(account or DEFAULT_ACCOUNT).strip().upper()
 
 
+def perp_symbol(text: Optional[str]) -> str:
+    """介面上只填幣名(ETH / eth / ETH/USDT 都可以)→ Bybit USDT 永續的交易對 ETHUSDT;已經寫了 USDT 結尾就不重複加。"""
+    coin = (text or "").strip().upper().replace("/", "").replace(" ", "")
+    if not coin:
+        return ""
+    return coin if coin.endswith("USDT") else f"{coin}USDT"
+
+
 def config_for(project_root: Path, strategy_path: str, symbol: str, account: Optional[str] = None) -> Path:
     """選策略 + 幣種 + 帳戶 → 用哪一份 live_*.yaml:已經有同策略同幣種同帳戶的就沿用,沒有就自動命名
     live_<策略>_<幣種>.yaml(test1)/ live_<策略>_<幣種>_<帳戶>.yaml(其他帳戶),還不建立。

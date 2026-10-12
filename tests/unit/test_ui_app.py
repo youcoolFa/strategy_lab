@@ -157,6 +157,18 @@ def test_free_style_start_requires_confirmation(fake):
 
 
 
+
+def test_free_style_symbol_only_needs_the_coin(fake):
+    calls, _ = fake
+    at = run()
+    at.radio(key="new_strategy").set_value("free style").run()
+    at.text_input(key="fs_symbol").input("eth").run()
+    assert any("ETHUSDT" in c.value for c in at.caption)
+    at.checkbox(key="fs_start_confirm").check()
+    at.button(key="fs_start").click().run()
+    assert ("fs_start", "ETHUSDT") in calls and not at.exception
+
+
 def test_free_style_since_is_picked_and_defaults_to_now(fake):
     """補記開始時間用日期 + 時間選擇器,不用打字;預設 = 現在(日曆停在當年當月),可以往前選。"""
     calls, state = fake
