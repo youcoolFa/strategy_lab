@@ -308,7 +308,12 @@ def _free_style_row(row):
 def _start_free_style(accounts):
     st.caption("自己在 Bybit 手動交易,這裡只負責記帳:開始只記時間,結束時從 Bybit 拉回這段期間的單寫進資料庫。不會下單或取消。")
     symbol = st.text_input("幣種(Bybit 格式)", placeholder="ETHUSDT", key="fs_symbol").strip().upper()
-    since = st.text_input("補記開始時間(HKT,選填)", placeholder="2026-10-09 14:00", key="fs_since").strip()
+    # 補記開始時間用選的(不用打字):預設是打開這頁的這一刻,日曆停在當年當月;往前選 = 補記之前已經開始的手動交易
+    now = datetime.now(HKT).replace(second=0, microsecond=0)
+    day_col, time_col = st.columns(2)
+    since_day = day_col.date_input("補記開始日期(HKT)", value=now.date(), max_value=now.date(), format="YYYY-MM-DD",
+                                   key="fs_since_day")
+    since_time = time_col.time_input("補記開始時間(HKT)", value=now.time(), step=60, key="fs_since_time")
     ok = st.checkbox("我確認要開始記錄(會寫進 trading 資料庫)", key="fs_start_confirm")
     if st.button("▶️ 開始 free style", key="fs_start"):
         if not symbol:
@@ -316,10 +321,9 @@ def _start_free_style(accounts):
         elif not ok:
             st.warning("請先勾「我確認」")
         else:
-            try:
-                when = fs._parse_since(since) if since else datetime.now(timezone.utc)
-            except ValueError:
-                st.error("補記時間格式要像 2026-10-09 14:00")
+            when = datetime.combine(since_day, since_time, tzinfo=HKT).astimezone(timezone.utc)
+            if when > datetime.now(timezone.utc):
+                st.error("補記開始時間不能在未來")
                 return
             for account in accounts:  # 每個帳戶各記一段;某個失敗不影響其他
                 try:
