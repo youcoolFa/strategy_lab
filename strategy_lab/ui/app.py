@@ -305,9 +305,17 @@ def _free_style_row(row):
             st.error(f"❌ {e}")
 
 
+def _symbol_input(placeholder: str, key: str) -> str:
+    """只填幣名,USDT 自動補上(全部都是 USDT 永續);回傳 Bybit 交易對,例 ETH → ETHUSDT。"""
+    symbol = actions.perp_symbol(st.text_input("幣種(只填幣名,USDT 自動補上)", placeholder=placeholder, key=key))
+    if symbol:
+        st.caption(f"交易對:{symbol}")
+    return symbol
+
+
 def _start_free_style(accounts):
     st.caption("自己在 Bybit 手動交易,這裡只負責記帳:開始只記時間,結束時從 Bybit 拉回這段期間的單寫進資料庫。不會下單或取消。")
-    symbol = st.text_input("幣種(Bybit 格式)", placeholder="ETHUSDT", key="fs_symbol").strip().upper()
+    symbol = _symbol_input("ETH", key="fs_symbol")
     # 補記開始時間用選的(不用打字):預設是打開這頁的這一刻,日曆停在當年當月;往前選 = 補記之前已經開始的手動交易
     now = datetime.now(HKT).replace(second=0, microsecond=0)
     day_col, time_col = st.columns(2)
@@ -337,7 +345,7 @@ def _start_strategy(choice, root, accounts):
     strategy_path = f"strategies/{choice}.yaml"
     info = _strategy_info(root, strategy_path)
     st.caption(f"方向 {info.get('direction')}" + (f"|分注 {info['lots']} 注" if info.get("scale_in") else ""))
-    symbol = st.text_input("幣種(Bybit 格式)", placeholder="WLDUSDT", key="new_symbol").strip().upper()
+    symbol = _symbol_input("WLD", key="new_symbol")
     if not symbol:
         st.caption("填幣種後繼續")
         return

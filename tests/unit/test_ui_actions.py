@@ -400,3 +400,11 @@ class TestManyAccounts:
     def test_nothing_ready_means_nothing_to_start(self, root, previews):
         with pytest.raises(ValueError, match="沒有"):
             actions.start_many(self.prepare(root, ["MAIN"]), "yes")
+
+
+@pytest.mark.parametrize("typed, symbol", [
+    ("eth", "ETHUSDT"), (" ETH ", "ETHUSDT"), ("ethusdt", "ETHUSDT"), ("ETH/USDT", "ETHUSDT"), ("1000pepe", "1000PEPEUSDT"), ("", ""),
+])
+def test_perp_symbol_only_needs_the_coin(typed, symbol):
+    """介面只填幣名,USDT 自動補上(全部是 USDT 永續,2026-10-12)。"""
+    assert actions.perp_symbol(typed) == symbol
