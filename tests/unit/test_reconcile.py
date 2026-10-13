@@ -254,3 +254,17 @@ class TestRounds:
         client = FakeClient([ex("r1", "ETHUSDT", t(5)), ex("r2", "ETHUSDT", t(10), side="Sell")])
         fs.backfill(db, client, "ETHUSDT", T0, t(20), NOW, account="MAIN", pending_dir=tmp_path)
         assert rc.reconcile_account(db, client, "MAIN", T0, NOW).unrecorded == []
+
+
+def test_round_counts_orders_and_fills_separately(db):
+    """一張訂單可以拆成好幾筆成交:9 張訂單 / 24 筆成交要分開算(2026-10-13 使用者:兩個都列)"""
+    client = FakeClient([ex("a1", "ETHUSDT", t(0), qty=2, oid="buy"), ex("a2", "ETHUSDT", t(0), qty=1, oid="buy"),
+                         ex("b1", "ETHUSDT", t(10), side="Sell", qty=3, oid="sell")])
+    [u] = rc.reconcile_account(db, client, "MAIN", T0, NOW).unrecorded
+    assert (u.orders, u.count) == (2, 3)
+
+
+def test_old_state_without_order_count_still_loads():
+    old = {"account": "MAIN", "symbol": "ETHUSDT", "first": T0.isoformat(), "last": T0.isoformat(), "count": 3,
+           "exec_ids": ["x"]}
+    assert rc.Unrecorded.from_json(old).orders is None

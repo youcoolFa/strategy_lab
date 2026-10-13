@@ -500,7 +500,8 @@ def backfill_calls(fake, monkeypatch):
     monkeypatch.setattr(fs, "existing_segments", lambda db, symbol, account, now: list(SEGMENTS))
     monkeypatch.setattr(fs, "backfill", lambda db, client, symbol, start, end, now, **k: calls.append(
         ("bf_write", symbol, k.get("account"), k.get("strategy_name"))) or calls.append(
-        ("bf_write_user", {x: k.get(x) for x in ("expected_hold", "direction", "note")})) or "RESULT")
+        ("bf_write_user", {x: k.get(x) for x in ("expected_hold", "direction", "note", "target_price", "stop_price")}))
+        or "RESULT")
     return calls
 
 
@@ -576,7 +577,8 @@ def test_backfill_optional_fields_default_to_empty(backfill_calls):
     at = fill_backfill(run())
     at.button(key="bf_preview").click().run()
     [user] = [c[1] for c in calls if c[0] == "bf_user"]
-    assert user == {"expected_hold": None, "direction": None, "note": None}
+    assert user == {"expected_hold": None, "direction": None, "note": None, "target_price": None, "stop_price": None}
+    assert at.selectbox(key="bf_direction").value == "自動(從成交判斷)"
 
 
 def test_backfill_passes_hold_direction_and_note(backfill_calls):
@@ -585,11 +587,14 @@ def test_backfill_passes_hold_direction_and_note(backfill_calls):
     at.number_input(key="bf_hold_value").set_value(4.0)
     at.selectbox(key="bf_hold_unit").set_value("小時")
     at.selectbox(key="bf_direction").set_value("short")
-    at.text_area(key="bf_note").input("週末試手感").run()
+    at.text_area(key="bf_note").input("週末試手感")
+    at.number_input(key="bf_target").set_value(2400.0)
+    at.number_input(key="bf_stop").set_value(2600.0).run()
     at.button(key="bf_preview").click().run()
     at.checkbox(key="bf_confirm").check()
     at.button(key="bf_write").click().run()
-    expected = {"expected_hold": timedelta(hours=4), "direction": "short", "note": "週末試手感"}
+    expected = {"expected_hold": timedelta(hours=4), "direction": "short", "note": "週末試手感",
+                "target_price": 2400.0, "stop_price": 2600.0}
     assert [c[1] for c in calls if c[0] == "bf_user"] == [expected]
     assert [c[1] for c in calls if c[0] == "bf_write_user"] == [expected] and not at.exception
 
@@ -639,7 +644,7 @@ def unrecorded(fake):
     from strategy_lab.live import reconcile as rc
 
     UNRECORDED[:] = [rc.Unrecorded("MAIN", "ETHUSDT", datetime(2026, 10, 9, 11, 10, 30, tzinfo=timezone.utc),
-                                   datetime(2026, 10, 9, 13, 51, 5, tzinfo=timezone.utc), 9, ["x"] * 9)]
+                                   datetime(2026, 10, 9, 13, 51, 5, tzinfo=timezone.utc), 9, ["x"] * 9, 4)]
     yield fake
     UNRECORDED.clear()
 
@@ -667,3 +672,37 @@ def test_reconcile_now_button(fake):
     at = run()
     at.button(key="reconcile_now").click().run()
     assert ("reconcile",) in calls and not at.exception
+
+
+def test_unrecorded_table_lists_orders_and_fills(unrecorded):
+    df = run().dataframe[-1].value
+    assert list(df.columns)[-2:] == ["訂單數", "成交筆數"]
+    assert (df.iloc[0]["訂單數"], df.iloc[0]["成交筆數"]) == (4, 9)
+
+
+def test_unrecorded_newest_first(fake):
+    """2026-10-13 使用者:補記從最近的日期排到最舊的(表格和補記按鈕都是)"""
+    from strategy_lab.live import reconcile as rc
+
+    old = rc.Unrecorded("MAIN", "ETHUSDT", datetime(2026, 9, 14, 20, 35, tzinfo=timezone.utc),
+                        datetime(2026, 10, 7, 10, 7, tzinfo=timezone.utc), 24, ["a"], 9)
+    new = rc.Unrecorded("MAIN", "ETHUSDT", datetime(2026, 10, 12, 14, 38, tzinfo=timezone.utc),
+                        datetime(2026, 10, 13, 5, 23, tzinfo=timezone.utc), 17, ["b"], 6)
+    UNRECORDED[:] = [old, new]
+    try:
+        at = run()
+        assert list(at.dataframe[-1].value["第一筆(HKT)"]) == ["10-12 22:38", "09-15 04:35"]
+        labels = [b.label for b in at.button if b.key.startswith("unrec_fill_")]
+        assert "10-12 22:38" in labels[0] and "09-15 04:35" in labels[1]
+    finally:
+        UNRECORDED.clear()
+
+
+def test_unrecorded_list_shows_last_update_on_top(unrecorded, monkeypatch):
+    """2026-10-13 使用者:清單最頂加最新更新日期(= 上次對帳時間)"""
+    from strategy_lab.live import reconcile as rc
+
+    monkeypatch.setattr(rc, "last_run", lambda *a: datetime(2026, 10, 13, 10, 22, tzinfo=timezone.utc))
+    at = run()
+    texts = [str(m.value) for m in at.markdown]
+    assert any("最新更新" in t and "10-13 18:22" in t for t in texts)

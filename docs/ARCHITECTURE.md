@@ -536,6 +536,8 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 補記的重疊紅字 + 補記獨立分頁 | `free_style.existing_segments` / `overlap_marks`(`Segment`);頁面「補記」分頁列出同帳戶同幣種已有時段,開始 / 結束落在某段就在欄位下標紅字、不能預覽;CLI 幣種只填幣名 | §6.27 | 已完成 |
 | 每日對帳 | 新增 `live/reconcile.py`、`scripts/com.strategylab.reconcile.plist`(每天 08:00 HKT);`BybitClient.get_executions(None, …)` 不分幣種;總覽「未記錄的交易」+ 立即對帳 + 一鍵帶入補記 | 新增 §6.33 | 已完成 |
 | 對帳分組改成一對交易(0 → 0) | `reconcile._rounds_of` / `_look_back`、`OpenRound`:持倉 0 → 0 算一對(使用者的定義),起點持倉 = 現在持倉 − 期間成交,不是 0 就往前查(最多 2 年);穿過 0 的成交屬於兩對;進行中不列。取代 6 小時分組 | 改 §6.33 | 已完成;MAIN ETH 重新分組為 9 對,第一對 09-15 開倉 |
+| 補記:目標價、停損價、方向自動 | `sl_run.target_price` / `stop_price`(新欄位,真 DB 已加、Superset 已同步);`_direction_of` 從成交判斷方向;頁面兩個價格欄位、方向預設「自動」;CLI `--target` / `--stop` | 改 §6.27 | 已完成 |
+| 未記錄的交易:訂單數、由新到舊、最新更新 | `Unrecorded.orders`(訂單數,跟成交筆數分開列;Telegram 也寫「X 張訂單 / Y 筆成交」);總覽清單最近的排最前面;最頂顯示「最新更新:上次對帳時間」 | 改 §6.33 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1713,10 +1715,17 @@ Superset 的 dataset 欄位描述另外從資料庫同步過一次(不會自動�
 (`strategy_path`、`strategy_yaml` = NA、`strategy_params` = {}、數量 / 建倉價 / loop / preflight / 預估結束都是空的),
 因為程式不知道當時實際用了什麼,帶入現在的版本可能是錯的。使用者可以自己填:
 - **預計持倉時間** → `sl_run.expected_hold_seconds`,每一輪 `sl_event.expected_hold_seconds` 也有(跟實際 `hold_seconds` 比)
-- **方向**(long / short / both)→ `sl_run.direction`(不填 = NA;每輪 sl_event 的方向照實際成交)
+- **方向**(long / short / both)→ `sl_run.direction`;**不填 = 從成交判斷**(`_direction_of`:每一對交易的第一筆,
+  買 = long、賣 = short,兩種都有 = both;同一天改,交易所查得到的不用手填),頁面預設「自動(從成交判斷)」
 - **備註** → `sl_run.note`(新欄位,最多 500 字)
-填了哪些記在 `sl_run.config.user_filled`(例 `["expected_hold", "direction", "note"]`),表示是事後補填、不是程式當時記的。
-CLI:`--hold 90m|4h|1.5d`、`--direction long|short|both`、`--note "..."`。
+- **目標價**(沒掛單的止盈)→ `sl_run.target_price`、**停損價**(心理停損)→ `sl_run.stop_price`(同一天加,新欄位):
+  交易所查不到的計劃,填了可以跟實際平倉價、最大回撤比。兩個都填時檢查方向:做多停損要低於目標、做空要高於目標
+填了哪些記在 `sl_run.config.user_filled`(例 `["expected_hold", "direction", "note", "target_price", "stop_price"]`;
+自動判斷的方向不算),表示是事後補填、不是程式當時記的。
+CLI:`--hold 90m|4h|1.5d`、`--direction long|short|both`、`--note "..."`、`--target 2600`、`--stop 2450`。
+
+交易所查得到、**不用填**的:開倉 / 平倉時間、方向、每筆價格數量、最大持倉、手續費、資金費、損益、最大回撤、實際持倉時間、
+掛過的單(含沒成交的止盈止損單)。只有使用者知道的:預計持倉時間、目標價、停損價、備註(進場理由等)。
 
 **重疊紅字(同一天,使用者的方案)**:不用等預覽,選時間的當下就知道。`existing_segments(db, symbol, account, now)`
 只查 DB,列出**同帳戶、同幣種**已有的紀錄時段(不分策略:成交是靠帳戶 + 幣種歸到紀錄的;還沒結束的算到現在);
@@ -1999,7 +2008,8 @@ upsert 不重複),檔案改名 `.jsonl.done`;再跑 `setup_db` 確認 account = 
 手動:`.venv/bin/python -m strategy_lab.live.reconcile [--days 3]`、`launchctl kickstart gui/$(id -u)/com.strategylab.reconcile`、
 頁面總覽「🔄 立即對帳」。
 
-**頁面**(總覽):「未記錄的交易」表(帳戶、幣種、第一筆 / 最後一筆 HKT、筆數);每組一個「📝 補記 …」按鈕 → 把帳戶、
+**頁面**(總覽):「未記錄的交易」表(帳戶、幣種、第一筆 / 最後一筆 HKT、**訂單數、成交筆數**——一張訂單可以拆成好幾筆成交,
+例 09-15 那一對是 9 張訂單 / 24 筆成交;`Unrecorded.orders`,同一天加);**最近的排最前面**(使用者要求;每一對 0 → 0 各自獨立,補記先後不影響結果);表格最頂一行粗體「**最新更新:<上次對帳時間> HKT**」(`reconcile.last_run()`;每天 08:00 或按立即對帳後更新);每組一個「📝 補記 …」按鈕 → 把帳戶、
 幣種、時間(第一筆的那一分鐘 → 最後一筆的下一分鐘)帶入「補記」分頁,再由使用者看紅字、預覽、寫入。
 
 **第一次對帳(10-13)**:test1 7 天 18 筆成交,2 筆 SUI 資金費不在 DB(情況 1,已自動補回);MAIN 102 筆 ETH 手動交易沒有紀錄

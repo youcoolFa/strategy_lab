@@ -70,12 +70,14 @@ def _unrecorded_section():
         with st.spinner("對帳中(只讀 Bybit)…"):
             rc.run_daily(DB_URL, datetime.now(timezone.utc))
         st.success("對帳完成,有問題會發 Telegram 系統警報")
-    items = rc.load_unrecorded()
+    items = sorted(rc.load_unrecorded(), key=lambda u: u.first, reverse=True)  # 最近的排最前面(使用者要求)
     if not items:
         st.caption("沒有未記錄的交易")
         return
+    st.markdown(f"**最新更新:{hkt(last) if last else '還沒對帳'} HKT**(由新到舊)")
+    st.caption("訂單 = 你在 Bybit 送出的買 / 賣;一張訂單可以拆成好幾筆成交(跟幾個對手撮合就幾筆)。")
     st.dataframe(pd.DataFrame([{"帳戶": u.account, "幣種": u.symbol, "第一筆(HKT)": hkt(u.first),
-                                "最後一筆(HKT)": hkt(u.last), "成交筆數": u.count} for u in items]),
+                                "最後一筆(HKT)": hkt(u.last), "訂單數": u.orders, "成交筆數": u.count} for u in items]),
                  hide_index=True, width="stretch")
     for i, u in enumerate(items):
         if st.button(f"📝 補記 {u.account} {u.symbol} {hkt(u.first)} → {hkt(u.last)}", key=f"unrec_fill_{i}"):
@@ -496,6 +498,7 @@ def _start_strategy(choice, root, accounts):
 
 
 _HOLD_UNITS = {"分鐘": "minutes", "小時": "hours", "天": "days"}
+_AUTO_DIRECTION = "自動(從成交判斷)"
 
 
 def _backfill_overlap(account, symbol, start, end, start_cols, end_cols) -> bool:
@@ -549,12 +552,17 @@ def _backfill_section():
     h1, h2, h3 = st.columns(3)
     hold_value = h1.number_input("預計持倉時間(0 = 不填)", min_value=0.0, value=0.0, format="%g", key="bf_hold_value")
     hold_unit = h2.selectbox("單位", list(_HOLD_UNITS), index=1, key="bf_hold_unit")
-    direction = h3.selectbox("方向", ["不填", *fs.BACKFILL_DIRECTIONS], key="bf_direction")
+    direction = h3.selectbox("方向", [_AUTO_DIRECTION, *fs.BACKFILL_DIRECTIONS], key="bf_direction")
+    p1, p2 = st.columns(2)
+    target = p1.number_input("目標價(沒掛單的止盈;0 = 不填)", min_value=0.0, value=0.0, format="%g", key="bf_target")
+    stop = p2.number_input("停損價(心理停損;0 = 不填)", min_value=0.0, value=0.0, format="%g", key="bf_stop")
     note = st.text_area("備註", max_chars=fs.MAX_NOTE_CHARS, key="bf_note").strip()
     user = {
         "expected_hold": timedelta(**{_HOLD_UNITS[hold_unit]: hold_value}) if hold_value else None,
-        "direction": None if direction == "不填" else direction,
+        "direction": None if direction == _AUTO_DIRECTION else direction,
         "note": note or None,
+        "target_price": float(target) if target else None,
+        "stop_price": float(stop) if stop else None,
     }
     signature = (account, symbol, name, start, end, tuple(user.items()))
 
@@ -583,7 +591,9 @@ def _backfill_section():
         "期間(HKT)": f"{hkt(p.start)} → {hkt(p.end)}", "訂單": p.orders, "完成幾輪": p.events,
         "毛利": round(p.gross_pnl, 4), "成交手續費": round(p.trade_fees, 4), "結束時持倉": p.open_position,
         "預計持倉時間": f"{hold_value:g} {hold_unit}" if user["expected_hold"] else "—",
-        "方向": user["direction"] or "—", "備註": user["note"] or "—",
+        "方向": p.direction + ("" if user["direction"] else "(自動)"),
+        "目標價": f"{user['target_price']:g}" if user["target_price"] else "—",
+        "停損價": f"{user['stop_price']:g}" if user["stop_price"] else "—", "備註": user["note"] or "—",
     }]), hide_index=True, width="stretch")
     st.caption("淨利(含資金費)寫入後計算。")
     for w in p.warnings:

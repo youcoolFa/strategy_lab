@@ -469,3 +469,22 @@ class TestRunNote:
         with Session(engine) as s:
             assert s.scalars(select(SlRun)).one().note == "手動搶反彈"
         engine.dispose()
+
+
+class TestRunTargetAndStop:
+    """補記時使用者事後填的目標價、停損價(2026-10-13):交易所上沒有(沒掛單的止盈 / 心理停損),
+    填了可以跟實際平倉價、最大回撤比。"""
+
+    def test_columns(self):
+        for name, word in (("target_price", "目標價"), ("stop_price", "停損價")):
+            col = SlRun.__table__.columns[name]
+            assert col.nullable is True and word in col.comment
+
+    def test_recorder_writes_them(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path, FakeExecutions([]))
+        rec.start_run(run_info(target_price=2600.0, stop_price=2450.5))
+        engine = create_engine(db)
+        with Session(engine) as s:
+            run = s.scalars(select(SlRun)).one()
+            assert (float(run.target_price), float(run.stop_price)) == (2600.0, 2450.5)
+        engine.dispose()

@@ -60,8 +60,9 @@ class Unrecorded:
     symbol: str
     first: datetime
     last: datetime
-    count: int
+    count: int  # 成交筆數(一張訂單可以拆成好幾筆成交)
     exec_ids: List[str] = field(default_factory=list)
+    orders: Optional[int] = None  # 訂單數;2026-10-13 之前的狀態檔沒有
 
     def to_json(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -127,7 +128,7 @@ def reconcile_account(db_url: str, client: Any, account: str, start: datetime, e
         for r in rounds:
             if any(e["execId"] in loose_ids for e in r):
                 unrecorded.append(Unrecorded(account, sym, _ms(r[0]["execTime"]), _ms(r[-1]["execTime"]), len(r),
-                                             [e["execId"] for e in r]))
+                                             [e["execId"] for e in r], len({e.get("orderId") for e in r})))
         if open_part:
             open_rounds.append(OpenRound(account, sym, position, _ms(open_part[0]["execTime"])))
     return Report(account, start, end, len(executions), list(repaired.values()), unrecorded, open_rounds)
@@ -257,7 +258,8 @@ def run_daily(db_url: str, now: datetime, state_path: Path = STATE_PATH, pending
     alerted = {k: v for k, v in state["alerted"].items() if now - datetime.fromisoformat(v) < ALERTED_KEEP}
     new = [u for u in pending if not set(u.exec_ids) <= set(alerted)]
     if new:
-        lines = [f"• 帳戶 {u.account} {u.symbol}:{_hkt(u.first)} → {_hkt(u.last)} HKT,{u.count} 筆成交" for u in new]
+        lines = [f"• 帳戶 {u.account} {u.symbol}:{_hkt(u.first)} → {_hkt(u.last)} HKT,"
+                 + (f"{u.orders} 張訂單 / " if u.orders is not None else "") + f"{u.count} 筆成交" for u in new]
         messages.append("⚠️ 對帳:有成交沒有任何紀錄(全手動交易沒記?)\n" + "\n".join(lines)
                         + "\n→ 到 strategy_lab 頁面「補記」分頁補(總覽的「未記錄的交易」可一鍵帶入)")
         for u in new:

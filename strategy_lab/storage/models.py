@@ -61,6 +61,8 @@ class SlRun(Base):
     expected_hold_seconds = Column(Integer, comment="策略 YAML 的 expected_hold(預估每注持倉時間)換算成秒;沒設定為 NULL(2026-10-11 起才有);"
                                                     "補記(end_reason = backfill)時是使用者事後填的")
     note = Column(Text, comment="備註:補記(end_reason = backfill)時使用者填的說明;一般執行為 NULL(2026-10-13 起才有)")
+    target_price = Column(MONEY, comment="目標價:補記時使用者事後填的預定止盈價(沒掛單、交易所查不到);可跟實際平倉價比(2026-10-13 起才有)")
+    stop_price = Column(MONEY, comment="停損價:補記時使用者事後填的心理停損(沒掛單、交易所查不到);可跟最大回撤比(2026-10-13 起才有)")
 
 
 class SlOrder(Base):

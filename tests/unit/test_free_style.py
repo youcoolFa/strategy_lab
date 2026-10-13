@@ -405,16 +405,33 @@ class TestBackfillUserFields:
         assert run.config["user_filled"] == ["expected_hold", "direction", "note"]
         assert {e.expected_hold_seconds for e in rows(db, SlEvent)} == {4 * 3600}
 
-    def test_nothing_filled_stays_empty(self, db, tmp_path):
+    def test_nothing_filled_stays_empty_and_direction_comes_from_the_fills(self, db, tmp_path):
+        """方向不用填:每一對交易的第一筆是買 = long、賣 = short;兩種都有 = both(這裡第 1 輪多、第 2 輪空)"""
         self.write(db, tmp_path)
         [run] = rows(db, SlRun)
-        assert (run.expected_hold_seconds, run.direction, run.note) == (None, "NA", None)
+        assert (run.expected_hold_seconds, run.direction, run.note, run.target_price, run.stop_price) == (
+            None, "both", None, None, None)
         assert run.config["user_filled"] == []
+
+    def test_direction_of_a_single_long_round(self, db):
+        orders, executions = two_round_trips()
+        p = fs.preview_backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", T0, t(35), self.NOW)
+        assert p.direction == "long"
+
+    def test_target_and_stop_are_written_and_marked(self, db, tmp_path):
+        self.write(db, tmp_path, target_price=2600.0, stop_price=2450.0, direction="long")
+        [run] = rows(db, SlRun)
+        assert (float(run.target_price), float(run.stop_price), run.direction) == (2600.0, 2450.0, "long")
+        assert run.config["user_filled"] == ["direction", "target_price", "stop_price"]
 
     @pytest.mark.parametrize("k,match", [
         ({"direction": "up"}, "方向"),
         ({"expected_hold": timedelta(0)}, "預計持倉時間"),
         ({"note": "x" * 501}, "備註"),
+        ({"target_price": 0}, "目標價"),
+        ({"stop_price": -1}, "停損價"),
+        ({"direction": "long", "target_price": 2400, "stop_price": 2500}, "停損價要低於目標價"),
+        ({"direction": "short", "target_price": 2500, "stop_price": 2400}, "停損價要高於目標價"),
     ])
     def test_bad_values_are_refused_at_preview(self, db, k, match):
         orders, executions = two_round_trips()
@@ -443,8 +460,9 @@ class TestBackfillUserFields:
         monkeypatch.setattr(fs, "summary_message", lambda r: "總結")
         monkeypatch.setattr(fs, "send_telegram", lambda text: None)
         assert fs.main(["backfill", "--symbol", "eth", "--start", "2026-10-09 10:00", "--end", "2026-10-09 11:30",
-                        "--hold", "4h", "--direction", "long", "--note", "測試"]) == 0
+                        "--hold", "4h", "--direction", "long", "--note", "測試", "--target", "2600", "--stop", "2450"]) == 0
         assert (seen["expected_hold"], seen["direction"], seen["note"]) == (timedelta(hours=4), "long", "測試")
+        assert (seen["target_price"], seen["stop_price"]) == (2600.0, 2450.0)
 
 
 class TestSegments:

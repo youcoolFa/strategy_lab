@@ -61,6 +61,8 @@ class RunInfo:
     account: Optional[str] = None  # 用哪個 Bybit 帳戶(名稱,不是 key;2026-10-12)
     bybit_uid: Optional[str] = None  # 這個帳戶的 Bybit UID(啟動時向 Bybit 查到的)
     note: Optional[str] = None  # 備註(補記時使用者填的;2026-10-13)
+    target_price: Optional[float] = None  # 目標價(補記時使用者填的)
+    stop_price: Optional[float] = None  # 停損價(補記時使用者填的)
 
 
 def _strip_secrets(value: Any) -> Any:

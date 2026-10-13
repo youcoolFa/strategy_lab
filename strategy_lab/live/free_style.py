@@ -186,22 +186,29 @@ class BackfillPreview:
     trade_fees: float  # 成交手續費(資金費寫入時才算)
     open_position: float  # 結束時的持倉(帶正負;0 = 已平)
     warnings: List[str]
+    direction: str = NA  # 從成交判斷(每一對的第一筆:買 = long、賣 = short;兩種都有 = both);使用者填了就用使用者的
 
 
 def preview_backfill(db_url: Optional[str], client: Any, symbol: str, start: datetime, end: datetime, now: datetime,
                      account: Optional[str] = None, strategy_name: str = FREE_STYLE,
                      expected_hold: Optional[timedelta] = None, direction: Optional[str] = None,
-                     note: Optional[str] = None) -> BackfillPreview:
+                     note: Optional[str] = None, target_price: Optional[float] = None,
+                     stop_price: Optional[float] = None) -> BackfillPreview:
     """只讀:檢查時間、重疊、事後補填的值,從 Bybit 拉回那段期間的單與成交並算出每一輪。不寫 DB。"""
-    _user_fields(expected_hold, direction, note)
+    user = _user_fields(expected_hold, direction, note, target_price, stop_price)
     _, _, preview = _prepare_backfill(db_url, client, symbol, start, end, now, account, strategy_name)
+    preview.direction = user["direction"] or preview.direction
+    _check_target_stop(preview.direction, user["target_price"], user["stop_price"])
     return preview
 
 
-def _user_fields(expected_hold: Optional[timedelta], direction: Optional[str], note: Optional[str]) -> Dict[str, Any]:
-    """補記時使用者事後填的值(都選填):預計持倉時間、方向、備註。回傳要寫進 sl_run 的欄位。"""
+def _user_fields(expected_hold: Optional[timedelta], direction: Optional[str], note: Optional[str],
+                 target_price: Optional[float] = None, stop_price: Optional[float] = None) -> Dict[str, Any]:
+    """補記時使用者事後填的值(都選填):預計持倉時間、方向(不填 = 從成交判斷)、備註、目標價、停損價。
+    回傳要寫進 sl_run 的欄位;user_filled 只列使用者自己填的。"""
     filled: List[str] = []
-    out: Dict[str, Any] = {"expected_hold_seconds": None, "direction": NA, "note": None}
+    out: Dict[str, Any] = {"expected_hold_seconds": None, "direction": None, "note": None,
+                           "target_price": None, "stop_price": None}
     if expected_hold is not None:
         if expected_hold.total_seconds() <= 0:
             raise FreeStyleError("預計持倉時間要大於 0")
@@ -218,8 +225,37 @@ def _user_fields(expected_hold: Optional[timedelta], direction: Optional[str], n
             raise FreeStyleError(f"備註最多 {MAX_NOTE_CHARS} 字")
         out["note"] = note
         filled.append("note")
+    for key, label, value in (("target_price", "目標價", target_price), ("stop_price", "停損價", stop_price)):
+        if value is not None:
+            if value <= 0:
+                raise FreeStyleError(f"{label}要大於 0")
+            out[key] = float(value)
+            filled.append(key)
+    _check_target_stop(out["direction"], out["target_price"], out["stop_price"])
     out["user_filled"] = filled
     return out
+
+
+def _check_target_stop(direction: Optional[str], target: Optional[float], stop: Optional[float]) -> None:
+    if target is None or stop is None:
+        return
+    if direction == "long" and stop >= target:
+        raise FreeStyleError(f"做多時停損價要低於目標價(停損 {stop:g}、目標 {target:g})")
+    if direction == "short" and stop <= target:
+        raise FreeStyleError(f"做空時停損價要高於目標價(停損 {stop:g}、目標 {target:g})")
+
+
+def _direction_of(executions: List[dict]) -> str:
+    """每一對交易(持倉 0 → 0)的第一筆:買 = long、賣 = short;兩種都有 = both;沒有成交 = NA。"""
+    sides, pos = set(), 0.0
+    for e in sorted(executions, key=lambda e: (int(e["execTime"]), e["execId"])):
+        qty = float(e["execQty"]) * (1 if e.get("side") == "Buy" else -1)
+        if abs(pos) < 1e-9:
+            sides.add("long" if qty > 0 else "short")
+        elif pos * (pos + qty) < 0:  # 穿過 0 = 反向開倉
+            sides.add("long" if qty > 0 else "short")
+        pos += qty
+    return sides.pop() if len(sides) == 1 else "both" if sides else NA
 
 
 def parse_hold(text: Optional[str]) -> Optional[timedelta]:
@@ -238,11 +274,14 @@ def parse_hold(text: Optional[str]) -> Optional[timedelta]:
 def backfill(db_url: Optional[str], client: Any, symbol: str, start: datetime, end: datetime, now: datetime,
              account: Optional[str] = None, strategy_name: str = FREE_STYLE,
              pending_dir: Path = PENDING_DIR, expected_hold: Optional[timedelta] = None,
-             direction: Optional[str] = None, note: Optional[str] = None) -> StopResult:
+             direction: Optional[str] = None, note: Optional[str] = None, target_price: Optional[float] = None,
+             stop_price: Optional[float] = None) -> StopResult:
     """重新檢查、重新拉資料後一次寫進 DB:sl_run(started/ended = 選的時間,end_reason = backfill)、
     sl_order / sl_fill / sl_event。"""
-    user = _user_fields(expected_hold, direction, note)
+    user = _user_fields(expected_hold, direction, note, target_price, stop_price)
     orders, executions, p = _prepare_backfill(db_url, client, symbol, start, end, now, account, strategy_name)
+    direction = user["direction"] or p.direction
+    _check_target_stop(direction, user["target_price"], user["stop_price"])
     recorder = TradeRecorder(db_url=db_url, pending_dir=pending_dir, fetch_executions=_chunked(client.get_executions))
     if not recorder.db_available:
         raise FreeStyleError("交易資料庫連不上;請先確認 trading-postgres 有在跑")
@@ -250,9 +289,10 @@ def backfill(db_url: Optional[str], client: Any, symbol: str, start: datetime, e
         strategy_name=p.strategy_name, strategy_path=NA, strategy_yaml=NA, strategy_params={},
         config={"mode": "backfill", "symbol": symbol, "backfilled_at": now.isoformat(),
                 "user_filled": user["user_filled"]},  # 這些欄位是補記時使用者事後填的
-        symbol=symbol, category="linear", direction=user["direction"], origin_price=None, origin_source=None,
+        symbol=symbol, category="linear", direction=direction, origin_price=None, origin_source=None,
         qty=None, order_type=NA, loop=None, testnet=False, preflight=None, log_path=None, started_at=start,
         account=p.account, expected_hold_seconds=user["expected_hold_seconds"], note=user["note"],
+        target_price=user["target_price"], stop_price=user["stop_price"],
     ))
     return _write_window(recorder, symbol, orders, executions, start, end, BACKFILL_END_REASON,
                          open_position=p.open_position, account=p.account, strategy_name=p.strategy_name)
@@ -287,7 +327,8 @@ def _prepare_backfill(db_url, client, symbol, start, end, now, account, strategy
     preview = BackfillPreview(
         symbol=symbol, account=account, strategy_name=name, start=start, end=end, orders=len(orders),
         events=len(events), gross_pnl=sum(e.realized_pnl for e in events),
-        trade_fees=sum(float(e.get("execFee") or 0) for e in executions), open_position=position, warnings=warnings)
+        trade_fees=sum(float(e.get("execFee") or 0) for e in executions), open_position=position, warnings=warnings,
+        direction=_direction_of(executions))
     return orders, executions, preview
 
 
@@ -499,8 +540,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_back.add_argument("--name", default=FREE_STYLE, help="策略名稱(預設 free style)")
     p_back.add_argument("--account", help="Bybit 帳戶名稱;不填 = test1")
     p_back.add_argument("--hold", help="選填:預計持倉時間,例 90m / 4h / 1.5d")
-    p_back.add_argument("--direction", choices=BACKFILL_DIRECTIONS, help="選填:方向")
+    p_back.add_argument("--direction", choices=BACKFILL_DIRECTIONS, help="選填:方向(不填 = 從成交判斷)")
     p_back.add_argument("--note", help="選填:備註")
+    p_back.add_argument("--target", type=float, help="選填:目標價(沒掛單的止盈)")
+    p_back.add_argument("--stop", type=float, help="選填:停損價(心理停損)")
     sub.add_parser("status", help="列出進行中的 free style")
     args = parser.parse_args(argv)
 
@@ -523,7 +566,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "backfill":
             result = backfill(db_url, client, symbol, _parse_since(args.start), _parse_since(args.end), now,
                               account=args.account, strategy_name=args.name, expected_hold=parse_hold(args.hold),
-                              direction=args.direction, note=args.note)
+                              direction=args.direction, note=args.note, target_price=args.target,
+                              stop_price=args.stop)
             text = summary_message(result)
             print(text)
             send_telegram(text)
