@@ -3,7 +3,7 @@
 從 Streamlit 頁面(AppTest)走完整流程:選策略 scale_in_ladder → 填幣種與建倉價 →「寫入參數並預覽」
 (真的 actions.prepare_config:從範本建立 live_scale_in_ladder_xrpusdt.yaml 並寫入參數,一律真錢)→ 打 yes →
 開始(真的 daemon.start:開背景程式、寫 pid 檔)→ 進行中清單出現這一列 → 打 STOP(真的 daemon.stop:
-送 SIGTERM、等它收尾結束、清掉 pid 檔)。脫離(DETACH)送 SIGUSR1。
+送 SIGTERM、等它收尾結束、清掉 pid 檔)。交接(HANDOVER)送 SIGUSR1。
 
 換掉的只有:背景跑的程式(tests/integration/_fake_live_program.py,收到訊號就結束,不連交易所、
 不下單)、preflight(不查市場)。設定檔 / pid 檔 / log 都在臨時資料夾,不碰真的 live_*.yaml、run/、logs/。
@@ -53,7 +53,7 @@ def project(tmp_path, monkeypatch):
     (root / "logs").mkdir()
     run_dir, log_dir = root / "run", root / "logs"
 
-    real_start, real_stop, real_detach = daemon.start, daemon.stop, daemon.detach
+    real_start, real_stop, real_detach = daemon.start, daemon.stop, daemon.handover
 
     def start(config):
         config = Path(config).resolve()  # daemon.stop 會檢查指令裡有設定檔路徑
@@ -62,7 +62,7 @@ def project(tmp_path, monkeypatch):
 
     monkeypatch.setattr(daemon, "start", start)
     monkeypatch.setattr(daemon, "stop", functools.partial(real_stop, run_dir=run_dir, timeout=15))
-    monkeypatch.setattr(daemon, "detach", functools.partial(real_detach, run_dir=run_dir, timeout=15))
+    monkeypatch.setattr(daemon, "handover", functools.partial(real_detach, run_dir=run_dir, timeout=15))
     monkeypatch.setattr(actions, "daemon_running", lambda path: control.is_running(Path(path), run_dir))
 
     monkeypatch.setattr(data, "load_env", lambda: None)
@@ -146,15 +146,15 @@ def test_choose_fill_preview_start_then_stop_runs_a_real_background_process(proj
     assert not any("XRPUSDT" in e.label for e in at.expander)
 
 
-def test_detach_from_the_page_ends_without_cleanup(project):
+def test_handover_from_the_page_ends_without_cleanup(project):
     p = project
     at, pid = start_from_the_page(p)
-    at.text_input(key=f"detach_typed_{CONFIG_NAME}").input("DETACH")
-    at.button(key=f"detach_btn_{CONFIG_NAME}").click().run()
-    assert any("已脫離" in s.value for s in at.success)
+    at.text_input(key=f"handover_typed_{CONFIG_NAME}").input("HANDOVER")
+    at.button(key=f"handover_btn_{CONFIG_NAME}").click().run()
+    assert any("已交接" in s.value for s in at.success)
     assert wait_until(lambda: not daemon.is_alive(pid))
     log = p["console"].read_text(encoding="utf-8")
-    assert "脫離:不收尾" in log and "收尾完成" not in log
+    assert "交接:不收尾" in log and "收尾完成" not in log
 
 
 def test_wrong_confirmation_starts_nothing(project):

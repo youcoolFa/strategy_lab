@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from strategy_lab.interfaces import StrategyContext
 from strategy_lab.registry import register
 from strategy_lab.rules.base import Condition
+from strategy_lab.rules.composite import ByDirection
 from strategy_lab.rules.conditions import MovingAverageCross
 
 
@@ -20,7 +21,9 @@ class MACrossoverEntry:
     rule: Condition = field(init=False)
 
     def __post_init__(self) -> None:
-        self.rule = MovingAverageCross(self.fast_window, self.slow_window)
+        # 做多 = 快線上穿慢線;做空 = 快線下穿慢線(2026-10-12)
+        self.rule = ByDirection(MovingAverageCross(self.fast_window, self.slow_window),
+                                MovingAverageCross(self.fast_window, self.slow_window, downward=True))
 
     def entry_price(self, ctx: StrategyContext) -> float:
         return ctx.price

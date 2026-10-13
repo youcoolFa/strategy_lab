@@ -95,11 +95,11 @@ def install_stop_signal_handlers(runner: StrategyRunner) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, handle_stop_signal)
 
-    def handle_detach_signal(signum, frame):
-        logger.warning("收到脫離訊號(SIGUSR1):這個 tick 結束後直接結束,不收尾,掛單與持倉留在交易所")
-        runner.request_detach()
+    def handle_handover_signal(signum, frame):
+        logger.warning("收到交接訊號(SIGUSR1):這個 tick 結束後直接結束,不收尾,掛單與持倉留在交易所")
+        runner.request_handover()
 
-    signal.signal(signal.SIGUSR1, handle_detach_signal)
+    signal.signal(signal.SIGUSR1, handle_handover_signal)
 
 
 def to_bybit_symbol(yaml_symbol: str) -> str:
@@ -152,9 +152,16 @@ def apply_strategy_overrides(strategy: Any, config: ExecutionConfig) -> Any:
     """套用 live_execution_config.yaml 的 strategy_overrides(運作中用 live/control.py 改過、寫回的參數),
     讓重新啟動和 preflight 都用改過的值。只有 loop 與分注策略的平倉距離可以覆蓋。"""
     overrides = config.strategy_overrides or {}
-    unknown = sorted(set(overrides) - {"loop", "exit_distance", "band"})
+    unknown = sorted(set(overrides) - {"loop", "exit_distance", "band", "direction"})
     if unknown:
-        raise ValueError(f"strategy_overrides 不認得 {unknown};只能有 loop、exit_distance、band")
+        raise ValueError(f"strategy_overrides 不認得 {unknown};只能有 loop、exit_distance、band、direction")
+    if "direction" in overrides:  # 做多 / 做空(2026-10-12,頁面寫的;每個策略的進出場規則都依方向判斷)
+        direction = overrides["direction"]
+        if getattr(strategy, "band", False):
+            raise ValueError("區間策略固定 direction both(上下同時掛單),不能用 strategy_overrides.direction 改")
+        if direction not in ("long", "short"):
+            raise ValueError(f"strategy_overrides.direction 只能是 long 或 short,收到 {direction!r}")
+        strategy.direction = direction
     if "band" in overrides:  # 區間策略的買賣 %(2026-10-10,頁面寫的)
         from strategy_lab.plugins.entry.band import BandEntry
 
@@ -497,7 +504,7 @@ def run_forever(
                 + "\n注意:loop 從這次啟動重新算;舊程式的建倉手續費不在這次的淨利裡")
         _tick_tolerating_network_errors(runner, now, price, config)
 
-        while runner.state != RunState.STOPPED and not runner.detach_requested:
+        while runner.state != RunState.STOPPED and not runner.handover_requested:
             time.sleep(config.poll_interval_seconds)
             now = now_fn()
             try:
@@ -517,12 +524,12 @@ def run_forever(
 
     if config.use_live_ticker_feed:
         ticker_feed.stop()
-    if runner.detach_requested:
+    if runner.handover_requested:
         logger.bind(telegram=True).warning(
-            "🔌 已脫離:程式結束但沒有收尾,掛單與持倉保留在交易所上。下次在設定檔打開 adopt_existing_position "
+            "🔌 已交接:程式結束但沒有收尾,掛單與持倉保留在交易所上。下次在設定檔打開 adopt_existing_position "
             "再啟動就會接手;不接手的話請到 Bybit 自行處理。")
         if recorder is not None:
-            recorder.end_run(now_fn(), "detached", summarize(runner.events))
+            recorder.end_run(now_fn(), "handover", summarize(runner.events))
         return
     summary = summarize(runner.events)
     logger.info(

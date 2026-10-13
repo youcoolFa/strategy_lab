@@ -1,5 +1,5 @@
 """Streamlit 第二階段(實盤啟動 / 改參數 / 停止)背後的動作層 strategy_lab/ui/actions.py(2026-10-09)。
-頁面只是外殼:預覽與啟動走 preflight.main、運作中改參數走 control.main、停止 / 脫離走 daemon,
+頁面只是外殼:預覽與啟動走 preflight.main、運作中改參數走 control.main、停止 / 交接走 daemon,
 跟終端機版同一套檢查。這裡全部用假的 client / start_fn,不碰網路、不啟動任何程式。"""
 
 import time
@@ -156,18 +156,18 @@ class TestControl:
             actions.control_preview(config, {})
 
 
-class TestStopAndDetach:
+class TestStopAndHandover:
     def test_stop_requires_typing_STOP(self, config, monkeypatch):
         monkeypatch.setattr(actions.daemon, "stop", lambda path: "已停止")
         with pytest.raises(ValueError, match="STOP"):
             actions.stop(config, typed="stop please")
         assert actions.stop(config, typed="STOP") == "已停止"
 
-    def test_detach_requires_typing_DETACH(self, config, monkeypatch):
-        monkeypatch.setattr(actions.daemon, "detach", lambda path: "已脫離")
-        with pytest.raises(ValueError, match="DETACH"):
-            actions.detach(config, typed="")
-        assert actions.detach(config, typed="DETACH") == "已脫離"
+    def test_handover_requires_typing_HANDOVER(self, config, monkeypatch):
+        monkeypatch.setattr(actions.daemon, "handover", lambda path: "已交接")
+        with pytest.raises(ValueError, match="HANDOVER"):
+            actions.handover(config, typed="")
+        assert actions.handover(config, typed="HANDOVER") == "已交接"
 
 
 class TestStrategyInfo:
@@ -307,6 +307,14 @@ class TestBandStrategyFromThePage:
         assert path.name == "live_weekend_band_reversion_xrpusdt.yaml"
         assert data["strategy_overrides"] == {"band": {"buy_pct": 0.3, "sell_pct": 0.5}}
         assert data["dry_run"] is False and data["testnet"] is False
+
+    def test_prepare_config_writes_direction(self, root):
+        path = actions.prepare_config(root, "strategies/weekend_short_breakout.yaml", "eth", TestPrepareConfig.SETTINGS,
+                                      {"direction": "long", "loop": 0}, example=root / "live_execution_config.example.yaml")
+        assert yaml.safe_load(path.read_text(encoding="utf-8"))["strategy_overrides"] == {"direction": "long", "loop": 0}
+        with pytest.raises(ValueError, match="long 或 short"):
+            actions.prepare_config(root, "strategies/scale_in_ladder.yaml", "ETH", TestPrepareConfig.SETTINGS,
+                                   {"direction": "both"}, example=root / "live_execution_config.example.yaml")
 
     def test_bad_band_pct_rejected_before_writing(self, root):
         with pytest.raises(ValueError, match="buy_pct"):

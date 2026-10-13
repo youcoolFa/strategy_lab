@@ -264,7 +264,15 @@ class TestMultiAccount:
         env = tmp_path / ".env"
         env.write_text("ACCOUNT = MAIN\nBYBIT_MAIN_API_KEY=k\nBYBIT_MAIN_API_SECRET=s\n")
         monkeypatch.setattr(accounts, "ENV_PATH", env)
-        assert data.list_accounts() == ["test1", "MAIN"]
+        assert data.list_accounts() == ["MAIN", "test1"]  # main 排第一 = 頁面預設選它(2026-10-12)
+
+    def test_list_accounts_without_main_puts_test1_first(self, tmp_path, monkeypatch):
+        from strategy_lab.live import accounts
+
+        env = tmp_path / ".env"
+        env.write_text("ACCOUNT = sub2\nBYBIT_sub2_API_KEY=k\nBYBIT_sub2_API_SECRET=s\n")
+        monkeypatch.setattr(accounts, "ENV_PATH", env)
+        assert data.list_accounts() == ["test1", "sub2"]
 
     def test_make_client_uses_that_accounts_keys(self, tmp_path, monkeypatch):
         from strategy_lab.live import accounts

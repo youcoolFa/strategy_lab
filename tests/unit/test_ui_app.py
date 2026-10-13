@@ -2,7 +2,7 @@
 資料層 / 動作層換成假的(不碰網路、資料庫、daemon)。
 
 分頁:總覽 / 交易紀錄 / Log / 策略。「策略」分頁(2026-10-09 改版)= 選策略(free style 是其中一個)→
-填參數 → 開始;上面是進行中清單(在跑的策略 + 進行中的 free style),每一列有自己的改參數 / 停止 / 脫離 / 結束。
+填參數 → 開始;上面是進行中清單(在跑的策略 + 進行中的 free style),每一列有自己的改參數 / 停止 / 交接 / 結束。
 """
 
 import time
@@ -66,7 +66,7 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(data, "load_env", lambda: None)
     monkeypatch.setattr(data, "db_url", lambda: "sqlite://")
     monkeypatch.setattr(data, "make_client", lambda account=None: calls.append(("client", account)) or FakeClient())
-    monkeypatch.setattr(data, "list_accounts", lambda: ["test1", "MAIN"])
+    monkeypatch.setattr(data, "list_accounts", lambda: ["MAIN", "test1"])  # data.list_accounts 把 main 排第一
     monkeypatch.setattr(data, "git_head", lambda *a: "9cf3920")
     monkeypatch.setattr(data, "project_root", lambda: root)
     monkeypatch.setattr(data, "list_daemons", lambda *a: [data.DaemonRow(
@@ -97,7 +97,7 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(actions, "control_apply", lambda path, changes, typed: calls.append(
         ("ctl_apply", changes, typed)) or (True, "✓ 已套用"))
     monkeypatch.setattr(actions.daemon, "stop", lambda path: calls.append(("stop", Path(path).name)) or "已停止")
-    monkeypatch.setattr(actions.daemon, "detach", lambda path: calls.append(("detach", Path(path).name)) or "已脫離")
+    monkeypatch.setattr(actions.daemon, "handover", lambda path: calls.append(("detach", Path(path).name)) or "已交接")
     return calls, state
 
 
@@ -144,14 +144,15 @@ def test_strategy_choices_are_every_strategy_yaml_plus_free_style(fake):
 
 # ---------------------------------------------------------------- 策略:free style
 
-def test_free_style_start_requires_confirmation(fake):
+def test_free_style_start_needs_no_confirmation(fake):
+    """free style 只記帳,開始不用勾確認,按下去就寫進 trading 資料庫(2026-10-12)。"""
     calls, _ = fake
     at = run()
     at.radio(key="new_strategy").set_value("free style").run()
-    at.text_input(key="fs_symbol").input("ethusdt")
+    assert "fs_start_confirm" not in [c.key for c in at.checkbox]
     at.button(key="fs_start").click().run()
-    assert ("fs_start", "ETHUSDT") not in calls  # 沒勾確認
-    at.checkbox(key="fs_start_confirm").check()
+    assert not any(c[0] == "fs_start" for c in calls)  # 沒填幣種
+    at.text_input(key="fs_symbol").input("ethusdt")
     at.button(key="fs_start").click().run()
     assert ("fs_start", "ETHUSDT") in calls and not at.exception
 
@@ -164,7 +165,6 @@ def test_free_style_symbol_only_needs_the_coin(fake):
     at.radio(key="new_strategy").set_value("free style").run()
     at.text_input(key="fs_symbol").input("eth").run()
     assert any("ETHUSDT" in c.value for c in at.caption)
-    at.checkbox(key="fs_start_confirm").check()
     at.button(key="fs_start").click().run()
     assert ("fs_start", "ETHUSDT") in calls and not at.exception
 
@@ -184,7 +184,6 @@ def test_free_style_since_is_picked_and_defaults_to_now(fake):
     day = now.date() - timedelta(days=1)
     at.date_input(key="fs_since_day").set_value(day)
     at.time_input(key="fs_since_time").set_value(datetime(2000, 1, 1, 14, 0).time())
-    at.checkbox(key="fs_start_confirm").check()
     at.button(key="fs_start").click().run()
     assert state["fs_when"] == datetime(day.year, day.month, day.day, 6, 0, tzinfo=timezone.utc)  # 14:00 HKT
     assert not at.exception
@@ -251,13 +250,15 @@ def test_changing_params_after_preview_requires_a_new_preview(fake):
 
 def test_strategy_and_symbol_already_running_cannot_be_started_again(fake):
     calls, _ = fake
-    at = fill_scale_in(run(), symbol="suiusdt")  # SUI 的 scale_in_ladder 已經在跑
+    at = run()
+    at.multiselect(key="new_accounts").set_value(["test1"]).run()  # 在跑的那支設定檔沒寫 account = test1
+    at = fill_scale_in(at, symbol="suiusdt")  # SUI 的 scale_in_ladder 已經在跑
     assert "new_prepare" not in buttons(at)
     assert any("已經在跑" in i.value for i in at.info)
     assert not [c for c in calls if c[0] == "prepare"]
 
 
-# ---------------------------------------------------------------- 策略:進行中的列 → 改參數 / 停止 / 脫離
+# ---------------------------------------------------------------- 策略:進行中的列 → 改參數 / 停止 / 交接
 
 def test_running_row_param_change_needs_preview_then_typed_confirmation(fake):
     calls, _ = fake
@@ -298,15 +299,15 @@ def test_running_row_stop_only_with_STOP_typed(fake):
     assert ("stop", "live_execution_config.yaml") in calls and not at.exception
 
 
-def test_running_row_detach_only_with_DETACH_typed(fake):
+def test_running_row_handover_only_with_HANDOVER_typed(fake):
     calls, _ = fake
     at = run()
     c = "live_execution_config"
-    at.text_input(key=f"detach_typed_{c}").input("detach")
-    at.button(key=f"detach_btn_{c}").click().run()
+    at.text_input(key=f"handover_typed_{c}").input("detach")
+    at.button(key=f"handover_btn_{c}").click().run()
     assert ("detach", "live_execution_config.yaml") not in calls
-    at.text_input(key=f"detach_typed_{c}").input("DETACH")
-    at.button(key=f"detach_btn_{c}").click().run()
+    at.text_input(key=f"handover_typed_{c}").input("HANDOVER")
+    at.button(key=f"handover_btn_{c}").click().run()
     assert ("detach", "live_execution_config.yaml") in calls and not at.exception
 
 
@@ -344,6 +345,27 @@ def test_band_form_asks_buy_and_sell_pct_only(fake):
     assert not at.exception
 
 
+
+def test_every_non_band_strategy_offers_long_and_short(fake):
+    """每個策略都能做多做空(2026-10-12):預設 = 策略 YAML 的方向,選的值寫進設定檔。"""
+    calls, _ = fake
+    at = run()
+    at.radio(key="new_strategy").set_value("weekend_short_breakout").run()
+    at.text_input(key="new_symbol").input("eth").run()
+    radio = at.radio(key="new_direction")
+    assert list(radio.options) == ["long 做多", "short 做空"] and radio.value == "short"
+    radio.set_value("long").run()
+    at.button(key="new_prepare").click().run()
+    [(_, _, _, _, params)] = [c for c in calls if c[0] == "prepare"]
+    assert params["direction"] == "long" and not at.exception
+
+
+def test_band_strategy_has_no_direction_choice(fake):
+    at = run()
+    at.radio(key="new_strategy").set_value("weekend_band_reversion").run()
+    at.text_input(key="new_symbol").input("xrp").run()
+    assert "new_direction" not in [r.key for r in at.radio]
+
 def test_running_band_row_offers_stop_only(fake):
     _, state = fake
     root = actions_root(fake)
@@ -353,7 +375,7 @@ def test_running_band_row_offers_stop_only(fake):
     c = BAND_ROW["config"]
     keys = set(buttons(at))
     assert f"stop_btn_{c}" in keys
-    assert f"ctl_preview_{c}" not in keys and f"detach_btn_{c}" not in keys
+    assert f"ctl_preview_{c}" not in keys and f"handover_btn_{c}" not in keys
     assert not at.exception
 
 
@@ -391,9 +413,9 @@ def test_overview_daemon_table_shows_the_account(fake):
 def test_bybit_snapshot_follows_the_selected_account(fake):
     calls, _ = fake
     at = run()
-    assert list(at.selectbox(key="snap_account").options) == ["test1", "MAIN"]
-    at.selectbox(key="snap_account").set_value("MAIN").run()
-    assert ("client", "MAIN") in calls and not at.exception
+    assert list(at.selectbox(key="snap_account").options) == ["MAIN", "test1"]
+    at.selectbox(key="snap_account").set_value("test1").run()
+    assert ("client", "test1") in calls and not at.exception
 
 
 def test_free_style_start_uses_the_selected_account(fake):
@@ -402,7 +424,6 @@ def test_free_style_start_uses_the_selected_account(fake):
     at.multiselect(key="new_accounts").set_value(["MAIN"]).run()
     at.radio(key="new_strategy").set_value("free style").run()
     at.text_input(key="fs_symbol").input("ethusdt")
-    at.checkbox(key="fs_start_confirm").check()
     at.button(key="fs_start").click().run()
     assert ("fs_start", "ETHUSDT") in calls and ("fs_account", "MAIN") in calls
     assert ("client", "MAIN") in calls and not at.exception
@@ -429,10 +450,12 @@ def test_new_strategy_is_prepared_for_the_selected_account(fake):
 
 # ---------------------------------------------------------------- 一次多個帳戶(2026-10-12)
 
-def test_accounts_default_to_test1_only(fake):
+def test_accounts_default_to_main_only(fake):
+    """頁面上預設選 main(2026-10-12);總覽的帳戶也預設 main。"""
     at = run()
     ms = at.multiselect(key="new_accounts")
-    assert list(ms.options) == ["test1", "MAIN"] and list(ms.value) == ["test1"]
+    assert list(ms.options) == ["MAIN", "test1"] and list(ms.value) == ["MAIN"]
+    assert at.selectbox(key="snap_account").value == "MAIN"
 
 
 def test_many_accounts_use_account_percentage_and_prepare_each(fake):
@@ -472,6 +495,5 @@ def test_free_style_on_many_accounts_starts_each(fake):
     at.multiselect(key="new_accounts").set_value(["test1", "MAIN"]).run()
     at.radio(key="new_strategy").set_value("free style").run()
     at.text_input(key="fs_symbol").input("ethusdt")
-    at.checkbox(key="fs_start_confirm").check()
     at.button(key="fs_start").click().run()
     assert [c[1] for c in calls if c[0] == "fs_account"] == ["test1", "MAIN"] and not at.exception
