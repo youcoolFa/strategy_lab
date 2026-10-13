@@ -535,6 +535,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 補記過去一段(通用) | `live/free_style.py` 的 `preview_backfill` / `backfill`(`BackfillPreview`)、CLI `backfill --symbol --start --end [--name] [--account] [--hold] [--direction] [--note]`;頁面「補記」分頁;選填事後補填預計持倉時間 / 方向 / 備註(新欄位 `sl_run.note`,真 DB 已加、Superset 已同步) | §6.27 新增小節 | 已完成 |
 | 補記的重疊紅字 + 補記獨立分頁 | `free_style.existing_segments` / `overlap_marks`(`Segment`);頁面「補記」分頁列出同帳戶同幣種已有時段,開始 / 結束落在某段就在欄位下標紅字、不能預覽;CLI 幣種只填幣名 | §6.27 | 已完成 |
 | 每日對帳 | 新增 `live/reconcile.py`、`scripts/com.strategylab.reconcile.plist`(每天 08:00 HKT);`BybitClient.get_executions(None, …)` 不分幣種;總覽「未記錄的交易」+ 立即對帳 + 一鍵帶入補記 | 新增 §6.33 | 已完成 |
+| 對帳分組改成一對交易(0 → 0) | `reconcile._rounds_of` / `_look_back`、`OpenRound`:持倉 0 → 0 算一對(使用者的定義),起點持倉 = 現在持倉 − 期間成交,不是 0 就往前查(最多 2 年);穿過 0 的成交屬於兩對;進行中不列。取代 6 小時分組 | 改 §6.33 | 已完成;MAIN ETH 重新分組為 9 對,第一對 09-15 開倉 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
