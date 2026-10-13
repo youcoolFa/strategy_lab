@@ -163,29 +163,51 @@ class TestDailyRun:
     def daily(self, env, now=NOW):
         return rc.run_daily(env["db"], now, state_path=env["state"], pending_dir=env["pending"])
 
-    def test_first_run_looks_back_7_days_and_warns_once(self, env):
+    def runs(self, db):
+        engine = create_engine(db)
+        with Session(engine) as s:
+            out = [(r.strategy_name, r.account, r.symbol, r.end_reason) for r in s.scalars(select(SlRun))]
+        engine.dispose()
+        return out
+
+    def test_found_rounds_are_recorded_as_free_style_automatically(self, env):
+        """2026-10-14 使用者:對帳找到的(全手動交易)一律自動記成 free style,自己只到損益表補填"""
         self.daily(env)
-        assert env["clients"]["test1"].queries[0][1] == NOW - timedelta(days=7)
+        assert env["clients"]["test1"].queries[0][1] == NOW - timedelta(days=7)  # 第一次往回 7 天
+        assert self.runs(env["db"]) == [("free style", "test1", "ETHUSDT", "backfill")]
         [msg] = env["sent"]
-        assert "⚠️" in msg and "test1" in msg and "ETHUSDT" in msg and "2 筆" in msg and "補記" in msg
+        assert "📝" in msg and "free style" in msg and "test1" in msg and "ETHUSDT" in msg and "損益表" in msg
         state = json.loads(env["state"].read_text())
-        assert state["accounts"]["test1"]["last_end"] == NOW.isoformat()
-        assert [u["exec_ids"] for u in state["unrecorded"]] == [["m1", "m2"]]
+        assert state["unrecorded"] == [] and state["accounts"]["test1"]["last_end"] == NOW.isoformat()
 
         env["sent"].clear()
-        later = NOW + timedelta(days=1)
         env["clients"]["test1"].queries.clear()
-        self.daily(env, later)
-        assert env["clients"]["test1"].queries[0][1] == NOW  # 從上次對帳接著查
-        assert env["sent"] == []  # 同一批不重發(這次也查不到 m1)
-        assert [u["exec_ids"] for u in json.loads(env["state"].read_text())["unrecorded"]] == [["m1", "m2"]]  # 還沒補,繼續列著
-
-    def test_unrecorded_list_drops_what_has_been_backfilled(self, env, tmp_path):
-        self.daily(env)
-        fs.backfill(env["db"], env["clients"]["test1"], "ETHUSDT", NOW - timedelta(hours=3), NOW - timedelta(hours=1),
-                    NOW, pending_dir=tmp_path)
         self.daily(env, NOW + timedelta(days=1))
-        assert json.loads(env["state"].read_text())["unrecorded"] == []
+        assert env["clients"]["test1"].queries[0][1] == NOW  # 從上次對帳接著查
+        assert env["sent"] == [] and len(self.runs(env["db"])) == 1  # 不重複記
+
+    def test_round_that_cannot_be_recorded_stays_listed_and_warns_once(self, env, monkeypatch):
+        real, broken = rc.fs.backfill, {"on": True}
+
+        def refuse(*a, **k):
+            if broken["on"]:
+                raise fs.FreeStyleError("跟已有的紀錄重疊")
+            return real(*a, **k)
+
+        monkeypatch.setattr(rc.fs, "backfill", refuse)
+        self.daily(env)
+        [msg] = env["sent"]
+        assert "⚠️" in msg and "重疊" in msg and "補記" in msg
+        assert [u["exec_ids"] for u in json.loads(env["state"].read_text())["unrecorded"]] == [["m1", "m2"]]
+
+        env["sent"].clear()
+        self.daily(env, NOW + timedelta(days=1))
+        assert env["sent"] == []  # 同一批不重發
+        assert len(json.loads(env["state"].read_text())["unrecorded"]) == 1  # 還沒補,繼續列著
+
+        broken["on"] = False
+        self.daily(env, NOW + timedelta(days=2))
+        assert json.loads(env["state"].read_text())["unrecorded"] == []  # 下次成功記好就移除
 
     def test_pending_files_are_replayed_and_reported(self, env, monkeypatch):
         monkeypatch.setattr(rc, "replay_pending", lambda db, pending_dir: 24)

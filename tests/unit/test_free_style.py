@@ -506,3 +506,23 @@ class TestSegments:
         monkeypatch.setattr(fs, "start", lambda db_, client, symbol, when, **k: seen.update(symbol=symbol) or "run-1")
         assert fs.main(["start", "--symbol", "eth"]) == 0
         assert seen["symbol"] == "ETHUSDT"
+
+
+def test_backfill_keeps_limit_orders_placed_before_the_window(db, tmp_path):
+    """限價單常常先掛好、過一陣子才成交:訂單建立時間早於補記開始,它的成交和手續費也要記(2026-10-14)"""
+    orders = [order("early", "Buy", "Limit", 0.1, 2500, "Filled", t(-120), t(10), avg=2500, filled=0.1),
+              order("o2", "Sell", "Limit", 0.1, 2510, "Filled", t(11), t(30), avg=2510, filled=0.1)]
+    executions = [execution("e1", "early", "Buy", 0.1, 2500, 0.05, t(10)), execution("e2", "o2", "Sell", 0.1, 2510, 0.05, t(30))]
+    result = fs.backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", t(10), t(30), t(24 * 60),
+                         pending_dir=tmp_path)
+    assert {o.order_id for o in rows(db, SlOrder)} == {"early", "o2"}
+    assert {f.exec_id for f in rows(db, SlFill)} == {"e1", "e2"}
+    assert result.fees == pytest.approx(0.1)
+
+
+def test_direction_ignores_float_residue_at_zero():
+    """0.1 + 0.2 − 0.3 這種小數誤差(真實資料:最後持倉 −4e-16)不能被當成穿過 0、反手開倉(2026-10-14 實際遇到)"""
+    rows = [execution("a", "o", "Buy", 0.3, 1, 0, t(0)), execution("b", "o", "Sell", 0.1, 1, 0, t(1)),
+            execution("c", "o", "Sell", 0.2, 1, 0, t(2))]  # 0.3 − 0.1 − 0.2 = −2.8e-17
+    assert 0.3 - 0.1 - 0.2 < 0
+    assert fs._direction_of(rows) == "long"

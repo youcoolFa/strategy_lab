@@ -488,3 +488,20 @@ class TestRunTargetAndStop:
             run = s.scalars(select(SlRun)).one()
             assert (float(run.target_price), float(run.stop_price)) == (2600.0, 2450.5)
         engine.dispose()
+
+
+class TestEventUserFields:
+    """損益表(2026-10-14):每一對交易一列,目標價 / 停損價 / 備註要能一列一列後補 → sl_event 也有這三欄;
+    寫入時先抄 sl_run 的值(補記時填的)。"""
+
+    def test_columns(self):
+        for name, word in (("target_price", "目標價"), ("stop_price", "停損價"), ("note", "備註")):
+            col = SlEvent.__table__.columns[name]
+            assert col.nullable is True and word in col.comment
+
+    def test_event_copies_run_values(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path, FakeExecutions([]))
+        rec.start_run(run_info(target_price=2600.0, stop_price=2450.0, note="試單"))
+        rec.record_event(event())
+        [e] = rows(db, SlEvent)
+        assert (float(e.target_price), float(e.stop_price), e.note) == (2600.0, 2450.0, "試單")

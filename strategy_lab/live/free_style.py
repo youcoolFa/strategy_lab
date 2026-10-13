@@ -43,6 +43,7 @@ FREE_STYLE = "free style"
 NA = "NA"
 END_REASON = "free_style_stop"
 BACKFILL_END_REASON = "backfill"
+EARLY_ORDER_LOOKBACK = timedelta(days=30)  # 補記時往前找「先掛好、期間內才成交」的訂單
 MAX_BACKFILL_AGE = timedelta(days=730)  # Bybit 的訂單歷史 / 成交明細最多查 2 年
 BACKFILL_DIRECTIONS = ("long", "short", "both")
 MAX_NOTE_CHARS = 500
@@ -142,9 +143,14 @@ def stop(db_url: Optional[str], client: Any, symbol: str, now: datetime, pending
 
 def _fetch_window(client: Any, symbol: str, start: datetime, end: datetime) -> Tuple[List[dict], List[dict]]:
     """這段期間的訂單與成交(不含資金費;資金費由 recorder.event_costs 另外算)。"""
-    orders = _orders_in(client, symbol, start, end)
     executions = [e for e in _chunked(client.get_executions)(symbol, start, end)
                   if (e.get("execType") or "Trade") != "Funding"]
+    orders = _orders_in(client, symbol, start, end)
+    # 限價單常常先掛好、過一陣子才成交:建立時間早於開始、但在這段期間成交的訂單也要記(2026-10-14)
+    missing = {e.get("orderId") for e in executions} - {o["orderId"] for o in orders} - {None, ""}
+    if missing:
+        earlier = _chunked(client.list_order_history)(symbol, start - EARLY_ORDER_LOOKBACK, start)
+        orders += [o for o in earlier if o["orderId"] in missing]
     return orders, executions
 
 
@@ -250,11 +256,12 @@ def _direction_of(executions: List[dict]) -> str:
     sides, pos = set(), 0.0
     for e in sorted(executions, key=lambda e: (int(e["execTime"]), e["execId"])):
         qty = float(e["execQty"]) * (1 if e.get("side") == "Buy" else -1)
+        after = pos + qty
         if abs(pos) < 1e-9:
             sides.add("long" if qty > 0 else "short")
-        elif pos * (pos + qty) < 0:  # 穿過 0 = 反向開倉
+        elif pos * after < 0 and abs(after) > 1e-9:  # 穿過 0 = 反向開倉(小數誤差的 −4e-16 不算)
             sides.add("long" if qty > 0 else "short")
-        pos += qty
+        pos = 0.0 if abs(after) < 1e-9 else after
     return sides.pop() if len(sides) == 1 else "both" if sides else NA
 
 

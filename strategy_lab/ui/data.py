@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import yaml
 from sqlalchemy import create_engine, select
@@ -231,6 +232,99 @@ def active_runs(db_url: Optional[str], project_root: Path = PROJECT_ROOT) -> Lis
             rows.append({"kind": "free style", "config": None, "account": r["account"], "symbol": r["symbol"], "strategy": FREE_STYLE,
                          "mode": "⏺ 記錄中", "started_at": r["started_at"]})
     return rows
+
+
+# ---------------------------------------------------------------------------
+# 損益表(2026-10-14):每一對交易(sl_event,持倉 0 → 0)一列
+# ---------------------------------------------------------------------------
+
+def pnl_strategies(db_url: str, account: str) -> List[str]:
+    """這個帳戶有紀錄的策略;free style 永遠排第一(預設)。"""
+    engine = create_engine(db_url, future=True)
+    try:
+        with Session(engine) as s:
+            pairs = s.execute(select(SlEvent.account, SlEvent.strategy_name).distinct()).all()
+    finally:
+        engine.dispose()
+    names = sorted({name for acc, name in pairs if name and account_key(acc) == account_key(account)} - {FREE_STYLE})
+    return [FREE_STYLE, *names]
+
+
+def pnl_rows(db_url: str, account: str, strategy: str) -> List[Dict[str, Any]]:
+    """選帳戶 + 策略的每一對交易,最近的在前。run_id / event_index 給存檔用,畫面不顯示。
+    真實損益 = 淨利(扣手續費、資金費);手續費佔比 = 手續費 ÷ 價差毛利(%);日期 = 平倉日(HKT)。"""
+    engine = create_engine(db_url, future=True)
+    try:
+        with Session(engine) as s:
+            events = list(s.scalars(select(SlEvent).where(SlEvent.strategy_name == strategy)))
+            symbols = {r.run_id: r.symbol for r in s.scalars(select(SlRun).where(
+                SlRun.run_id.in_({e.run_id for e in events})))} if events else {}
+    finally:
+        engine.dispose()
+    events = [e for e in events if account_key(e.account) == account_key(account)]
+    events.sort(key=lambda e: _utc(e.end_time), reverse=True)
+    num = lambda v: float(v) if v is not None else None  # noqa: E731
+    rows = []
+    for e in events:
+        gross, fees = num(e.realized_pnl), num(e.fees)
+        rows.append({
+            "run_id": e.run_id, "event_index": e.event_index,
+            "日期": _hkt(e.end_time).strftime("%Y/%m/%d"), "幣種": symbols.get(e.run_id, ""), "方向": e.direction,
+            "數量": num(e.max_position), "建倉價格": num(e.avg_entry), "建倉時間": _hkt(e.start_time).strftime("%m-%d %H:%M"),
+            "平倉價格": num(e.avg_exit), "真實損益": num(e.net_pnl), "手續費": fees,
+            "手續費佔比": round(fees / abs(gross) * 100, 2) if gross and fees is not None else None,
+            "預估時長": fmt_hold(e.expected_hold_seconds),
+            "實際時長": fmt_duration(timedelta(seconds=e.hold_seconds)) if e.hold_seconds is not None else
+            fmt_duration(_utc(e.end_time) - _utc(e.start_time)),
+            "目標價": num(e.target_price), "停損價": num(e.stop_price), "備註": e.note or "",
+            "實際秒數": e.hold_seconds if e.hold_seconds is not None else
+            int((_utc(e.end_time) - _utc(e.start_time)).total_seconds()),
+            "預估秒數": e.expected_hold_seconds,
+        })
+    return rows
+
+
+def fee_points(client: Any, symbol: str = "ETHUSDT") -> Dict[str, Any]:
+    """手續費換成點數(使用者指定):現價 × maker 費率 × 2(買 + 賣)= 用 maker 開倉、maker 平倉,
+    價格要往有利方向走幾點才賺回手續費。費率是這個帳戶在這個交易對的真實費率(只讀)。"""
+    price = client.get_last_price(symbol)
+    maker, _taker = client.get_fee_rates(symbol)
+    return {"symbol": symbol, "price": price, "maker_rate": maker, "points": price * maker * 2}
+
+
+def pnl_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """損益表最底的總結列(使用者指定):數量平均、真實損益總和、手續費總和、手續費佔比平均、
+    實際時長平均、預估時長平均(只平均有值的);其他欄位空白。沒有資料 → {}。"""
+    if not rows:
+        return {}
+
+    def avg(key):
+        values = [r[key] for r in rows if r.get(key) is not None]
+        return sum(values) / len(values) if values else None
+
+    actual, expected = avg("實際秒數"), avg("預估秒數")
+    return {
+        "日期": f"總結({len(rows)} 對)", "數量": avg("數量"),
+        "真實損益": sum(r["真實損益"] or 0 for r in rows), "手續費": sum(r["手續費"] or 0 for r in rows),
+        "手續費佔比": avg("手續費佔比"),
+        "實際時長": fmt_duration(timedelta(seconds=actual)) if actual is not None else "",
+        "預估時長": fmt_duration(timedelta(seconds=expected)) if expected is not None else "",
+    }
+
+
+def fmt_hold(seconds: Optional[int]) -> str:
+    """預估時長 → 跟補記一樣的簡寫(90m / 4h / 1.5d),表格裡直接改也用這個格式。"""
+    if not seconds:
+        return ""
+    if seconds >= 86400 and seconds % 43200 == 0:  # 整天或半天:1d / 1.5d
+        return f"{seconds / 86400:g}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    return f"{seconds / 60:g}m"
+
+
+def _hkt(dt: datetime) -> datetime:
+    return _utc(dt).astimezone(ZoneInfo(HKT_ZONE))
 
 
 # ---------------------------------------------------------------------------

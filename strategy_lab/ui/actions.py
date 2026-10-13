@@ -384,3 +384,78 @@ def detach(config_path: Path, typed: str) -> str:
     if typed.strip() != "DETACH":
         raise ValueError("要在框裡打 DETACH(大寫)才會脫離")
     return daemon.detach(Path(config_path))
+
+
+# ---------------------------------------------------------------------------
+# 損益表:可後補欄位存回 sl_event(2026-10-14)
+# ---------------------------------------------------------------------------
+
+def _blank(value: Any) -> bool:
+    return value is None or (isinstance(value, float) and value != value) or (isinstance(value, str) and not value.strip())
+
+
+def save_pnl_edits(db_url: str, edits: List[Dict[str, Any]]) -> int:
+    """損益表裡改的「預估時長 / 目標價 / 停損價 / 備註」寫回 sl_event。每一列要有 run_id、event_index。
+    全部驗證過才寫(一列不對就一列都不寫);空白 / NaN = 清空(NULL)。回傳寫了幾列。"""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    from strategy_lab.live import free_style as fs
+    from strategy_lab.storage.models import SlEvent
+
+    engine = create_engine(db_url, future=True)
+    try:
+        with Session(engine) as s:
+            planned = []
+            for n, row in enumerate(edits, 1):
+                event = s.get(SlEvent, (row["run_id"], int(row["event_index"])))
+                if event is None:
+                    raise ValueError(f"第 {n} 列找不到這一對交易(可能已被刪除),請重新整理")
+                try:
+                    hold = None if _blank(row.get("預估時長")) else fs.parse_hold(str(row["預估時長"]))
+                except fs.FreeStyleError as e:
+                    raise ValueError(f"第 {n} 列預估時長:{e}") from None
+                prices = {}
+                for key, label in (("目標價", "target_price"), ("停損價", "stop_price")):
+                    value = None if _blank(row.get(key)) else float(row[key])
+                    if value is not None and value <= 0:
+                        raise ValueError(f"第 {n} 列{key}要大於 0")
+                    prices[label] = value
+                try:
+                    fs._check_target_stop(event.direction, prices["target_price"], prices["stop_price"])
+                except fs.FreeStyleError as e:
+                    raise ValueError(f"第 {n} 列:{e}") from None
+                note = None if _blank(row.get("備註")) else str(row["備註"]).strip()
+                if note and len(note) > fs.MAX_NOTE_CHARS:
+                    raise ValueError(f"第 {n} 列備註最多 {fs.MAX_NOTE_CHARS} 字")
+                planned.append((event, round(hold.total_seconds()) if hold else None, prices, note))
+            for event, hold_s, prices, note in planned:
+                event.expected_hold_seconds = hold_s
+                event.target_price, event.stop_price = prices["target_price"], prices["stop_price"]
+                event.note = note
+            s.commit()
+    finally:
+        engine.dispose()
+    return len(planned)
+
+
+PNL_EDITABLE = ("預估時長", "目標價", "停損價", "備註")
+
+
+def pnl_changes(original: List[Dict[str, Any]], edited: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """損益表:跟原本比,只回傳可後補欄位有改的列(帶 run_id / event_index,給 save_pnl_edits)。
+    表格裡的空白數字是 NaN,當成空白比。改後的列有 run_id 就用 run_id + event_index 對(AG Grid 篩選 / 排序後順序不同)。"""
+    def norm(v: Any) -> Any:
+        return None if _blank(v) else v
+
+    by_key = {(r["run_id"], int(r["event_index"])): r for r in original}
+    pairs = ([(by_key.get((a["run_id"], int(a["event_index"]))), a) for a in edited] if edited and "run_id" in edited[0]
+             else list(zip(original, edited)))  # AG Grid 帶 run_id(篩選 / 排序後順序不同);舊表格照位置
+    out = []
+    for before, after in pairs:
+        if before is None:
+            continue
+        if any(norm(before.get(k)) != norm(after.get(k)) for k in PNL_EDITABLE):
+            out.append({"run_id": before["run_id"], "event_index": before["event_index"],
+                        **{k: norm(after.get(k)) for k in PNL_EDITABLE}})
+    return out

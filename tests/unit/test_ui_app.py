@@ -6,9 +6,11 @@
 """
 
 import time
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 pytest.importorskip("streamlit")
@@ -44,8 +46,15 @@ class FakeClient:
     def list_open_orders(self):
         return []
 
+    def get_last_price(self, symbol):
+        return 2516.0
+
+    def get_fee_rates(self, symbol):
+        return 0.0002, 0.00055
+
 
 UNRECORDED = []
+GRID_RETURN = {}  # 假 AG Grid 回傳的資料(模擬使用者在表格裡篩選 / 編輯之後)
 
 SUI_ROW = {"kind": "strategy", "config": "live_execution_config", "account": "test1", "symbol": "SUIUSDT", "strategy": "scale_in_ladder",
            "mode": "🔴 實盤", "started_at": NOW}
@@ -78,6 +87,12 @@ def fake(monkeypatch, tmp_path):
         "symbol": "SUIUSDT", "account": "test1", "strategy_name": "scale_in_ladder", "git_commit": "f251f84399",
         "started_at": NOW}})
     monkeypatch.setattr(data, "recent_runs", lambda url, limit=20: [])
+    monkeypatch.setattr(data, "pnl_strategies", lambda db, account: ["free style"])
+    monkeypatch.setattr(data, "pnl_rows", lambda db, account, strategy: [])
+    import st_aggrid
+
+    monkeypatch.setattr(st_aggrid, "AgGrid", lambda df, **k: calls.append(("aggrid", df, k)) or
+                        types.SimpleNamespace(data=GRID_RETURN.get("data", df)))
     monkeypatch.setattr(data, "recent_events", lambda url, limit=20: [])
     monkeypatch.setattr(data, "active_runs", lambda url, root=None: list(state["active"]))
 
@@ -137,7 +152,8 @@ def test_refresh_queries_bybit_again(fake, monkeypatch):
 
 def test_tabs(fake):
     at = run()
-    assert [t.label for t in at.tabs] == ["總覽", "交易紀錄", "Log", "策略", "補記"]
+    # 2026-10-14 使用者:損益表第一、策略第二、交易紀錄第三、Log 第四(總覽放最後);補記分頁拿掉
+    assert [t.label for t in at.tabs] == ["損益表", "策略", "交易紀錄", "Log", "總覽"]
 
 
 # ---------------------------------------------------------------- 策略:選策略
@@ -484,159 +500,6 @@ def test_free_style_on_many_accounts_starts_each(fake):
     assert [c[1] for c in calls if c[0] == "fs_account"] == ["test1", "MAIN"] and not at.exception
 
 
-# ---------------------------------------------------------------- 補記過去一段(2026-10-13)
-
-@pytest.fixture
-def backfill_calls(fake, monkeypatch):
-    calls, _ = fake
-
-    def preview(db, client, symbol, start, end, now, account=None, strategy_name="free style", **user):
-        calls.append(("bf_preview", symbol, account, strategy_name, start, end))
-        calls.append(("bf_user", user))
-        return fs.BackfillPreview(symbol=symbol, account=account, strategy_name=strategy_name, start=start, end=end,
-                                  orders=5, events=2, gross_pnl=3.0, trade_fees=0.64, open_position=0, warnings=[])
-
-    monkeypatch.setattr(fs, "preview_backfill", preview)
-    monkeypatch.setattr(fs, "existing_segments", lambda db, symbol, account, now: list(SEGMENTS))
-    monkeypatch.setattr(fs, "backfill", lambda db, client, symbol, start, end, now, **k: calls.append(
-        ("bf_write", symbol, k.get("account"), k.get("strategy_name"))) or calls.append(
-        ("bf_write_user", {x: k.get(x) for x in ("expected_hold", "direction", "note", "target_price", "stop_price")}))
-        or "RESULT")
-    return calls
-
-
-SEGMENTS = []
-
-
-def fill_backfill(at, name="sat_weekend"):
-    from datetime import date, time as dtime
-
-    at.selectbox(key="bf_account").set_value("MAIN")
-    at.text_input(key="bf_symbol").input("eth")
-    at.text_input(key="bf_name").input(name)
-    at.date_input(key="bf_start_date").set_value(date(2026, 10, 9))
-    at.time_input(key="bf_start_time").set_value(dtime(10, 0))
-    at.date_input(key="bf_end_date").set_value(date(2026, 10, 9))
-    at.time_input(key="bf_end_time").set_value(dtime(11, 30))
-    return at.run()
-
-
-def test_backfill_defaults_to_free_style(backfill_calls):
-    at = run()
-    assert at.text_input(key="bf_name").value == "free style"
-
-
-def test_backfill_preview_then_confirm_writes(backfill_calls):
-    calls = backfill_calls
-    at = fill_backfill(run())
-    assert "bf_write" not in buttons(at)  # 沒預覽 → 沒有寫入按鈕
-    at.button(key="bf_preview").click().run()
-    [(_, symbol, account, name, start, end)] = [c for c in calls if c[0] == "bf_preview"]
-    assert (symbol, account, name) == ("ETHUSDT", "MAIN", "sat_weekend")
-    assert (start, end) == (datetime(2026, 10, 9, 2, 0, tzinfo=timezone.utc), datetime(2026, 10, 9, 3, 30, tzinfo=timezone.utc))
-    at.button(key="bf_write").click().run()
-    assert not [c for c in calls if c[0] == "bf_write"]  # 沒勾確認
-    at.checkbox(key="bf_confirm").check()
-    at.button(key="bf_write").click().run()
-    assert ("bf_write", "ETHUSDT", "MAIN", "sat_weekend") in calls
-    assert any(c[0] == "telegram" for c in calls) and not at.exception
-
-
-def test_backfill_changed_after_preview_needs_a_new_preview(backfill_calls):
-    calls = backfill_calls
-    at = fill_backfill(run())
-    at.button(key="bf_preview").click().run()
-    at.text_input(key="bf_symbol").input("btc").run()
-    assert "bf_write" not in buttons(at)
-
-
-def test_backfill_error_is_shown(backfill_calls, monkeypatch):
-    def refuse(*a, **k):
-        raise fs.FreeStyleError("跟已有的紀錄重疊")
-
-    monkeypatch.setattr(fs, "preview_backfill", refuse)
-    at = fill_backfill(run())
-    at.button(key="bf_preview").click().run()
-    assert any("重疊" in str(e.value) for e in at.error) and "bf_write" not in buttons(at)
-
-
-def test_backfill_lives_in_its_own_tab_and_free_style_start_does_not_say_backfill(fake):
-    """2026-10-13 使用者分不清「現在開始記錄」和「補回過去」:補記放獨立分頁,free style 開始時間不叫「補記」"""
-    at = run()
-    backfill_tab, strategy_tab = at.tabs[4], at.tabs[3]
-    assert "bf_preview" in [b.key for b in backfill_tab.button]
-    assert "bf_preview" not in [b.key for b in strategy_tab.button]
-    at.radio(key="new_strategy").set_value("free style").run()
-    labels = [d.label for d in at.date_input if d.key.startswith("fs_")] + \
-             [t.label for t in at.time_input if t.key.startswith("fs_")]
-    assert labels and not any("補記" in label for label in labels)
-
-
-def test_backfill_optional_fields_default_to_empty(backfill_calls):
-    calls = backfill_calls
-    at = fill_backfill(run())
-    at.button(key="bf_preview").click().run()
-    [user] = [c[1] for c in calls if c[0] == "bf_user"]
-    assert user == {"expected_hold": None, "direction": None, "note": None, "target_price": None, "stop_price": None}
-    assert at.selectbox(key="bf_direction").value == "自動(從成交判斷)"
-
-
-def test_backfill_passes_hold_direction_and_note(backfill_calls):
-    calls = backfill_calls
-    at = fill_backfill(run())
-    at.number_input(key="bf_hold_value").set_value(4.0)
-    at.selectbox(key="bf_hold_unit").set_value("小時")
-    at.selectbox(key="bf_direction").set_value("short")
-    at.text_area(key="bf_note").input("週末試手感")
-    at.number_input(key="bf_target").set_value(2400.0)
-    at.number_input(key="bf_stop").set_value(2600.0).run()
-    at.button(key="bf_preview").click().run()
-    at.checkbox(key="bf_confirm").check()
-    at.button(key="bf_write").click().run()
-    expected = {"expected_hold": timedelta(hours=4), "direction": "short", "note": "週末試手感",
-                "target_price": 2400.0, "stop_price": 2600.0}
-    assert [c[1] for c in calls if c[0] == "bf_user"] == [expected]
-    assert [c[1] for c in calls if c[0] == "bf_write_user"] == [expected] and not at.exception
-
-
-@pytest.fixture
-def busy(backfill_calls):
-    """MAIN 的 ETHUSDT 在 10-09 10:30 → 11:00(HKT)已經有一段 scale_in_ladder。"""
-    seg = fs.Segment("r1", "scale_in_ladder", datetime(2026, 10, 9, 2, 30, tzinfo=timezone.utc),
-                     datetime(2026, 10, 9, 3, 0, tzinfo=timezone.utc), False)
-    SEGMENTS[:] = [seg]
-    yield backfill_calls
-    SEGMENTS.clear()
-
-
-def test_backfill_lists_existing_segments_and_marks_overlap_in_red(busy):
-    at = fill_backfill(run())  # 10:00 → 11:30,把 10:30 → 11:00 整段包住
-    page = " ".join(str(c.value) for c in at.caption) + " ".join(str(m.value) for m in at.markdown)
-    assert "scale_in_ladder 10-09 10:30 → 10-09 11:00" in page
-    assert any("重疊" in str(e.value) for e in at.error)
-    assert at.button(key="bf_preview").disabled
-
-
-def test_backfill_start_inside_a_segment_is_marked_on_the_start_field(busy):
-    from datetime import time as dtime
-
-    at = fill_backfill(run())
-    at.time_input(key="bf_start_time").set_value(dtime(10, 45))
-    at.time_input(key="bf_end_time").set_value(dtime(12, 0)).run()
-    errors = [str(e.value) for e in at.error]
-    assert any("開始重疊" in e for e in errors) and not any("結束重疊" in e for e in errors)
-
-
-def test_backfill_free_window_can_be_previewed(busy):
-    from datetime import time as dtime
-
-    at = fill_backfill(run())
-    at.time_input(key="bf_start_time").set_value(dtime(11, 0))
-    at.time_input(key="bf_end_time").set_value(dtime(12, 0)).run()  # 剛好接在後面
-    assert not any("重疊" in str(e.value) for e in at.error)
-    assert not at.button(key="bf_preview").disabled
-
-
 # ---------------------------------------------------------------- 每日對帳(2026-10-13)
 
 @pytest.fixture
@@ -653,18 +516,6 @@ def test_overview_lists_unrecorded_trades(unrecorded):
     at = run()
     tables = " ".join(df.value.to_csv() for df in at.dataframe)
     assert "MAIN" in tables and "10-09 19:10" in tables and "10-09 21:51" in tables
-
-
-def test_prefill_fills_the_backfill_form_around_the_trades(unrecorded):
-    from datetime import date, time as dtime
-
-    at = run()
-    at.button(key="unrec_fill_0").click().run()
-    assert at.selectbox(key="bf_account").value == "MAIN"
-    assert at.text_input(key="bf_symbol").value == "ETH"
-    assert (at.date_input(key="bf_start_date").value, at.time_input(key="bf_start_time").value) == (date(2026, 10, 9), dtime(19, 10))
-    assert (at.date_input(key="bf_end_date").value, at.time_input(key="bf_end_time").value) == (date(2026, 10, 9), dtime(21, 52))
-    assert not at.exception
 
 
 def test_reconcile_now_button(fake):
@@ -692,8 +543,6 @@ def test_unrecorded_newest_first(fake):
     try:
         at = run()
         assert list(at.dataframe[-1].value["第一筆(HKT)"]) == ["10-12 22:38", "09-15 04:35"]
-        labels = [b.label for b in at.button if b.key.startswith("unrec_fill_")]
-        assert "10-12 22:38" in labels[0] and "09-15 04:35" in labels[1]
     finally:
         UNRECORDED.clear()
 
@@ -706,3 +555,135 @@ def test_unrecorded_list_shows_last_update_on_top(unrecorded, monkeypatch):
     at = run()
     texts = [str(m.value) for m in at.markdown]
     assert any("最新更新" in t and "10-13 18:22" in t for t in texts)
+
+
+# ---------------------------------------------------------------- 損益表(2026-10-14)
+
+PNL_ROW = {"run_id": "r1", "event_index": 1, "日期": "2026/10/09", "幣種": "ETHUSDT", "方向": "short", "數量": 13.0,
+           "建倉價格": 2513.0, "建倉時間": "10-08 21:36", "平倉價格": 2470.0, "真實損益": 450.0, "手續費": 30.0,
+           "手續費佔比": 6.25, "預估時長": "", "實際時長": "8 小時 3 分", "目標價": None, "停損價": None, "備註": "",
+           "實際秒數": 29000, "預估秒數": None}
+PNL_COLUMNS = ["日期", "幣種", "方向", "數量", "建倉價格", "建倉時間", "平倉價格", "真實損益", "手續費", "手續費佔比(%)",
+               "預估時長", "實際時長", "目標價", "停損價", "備註"]
+
+
+@pytest.fixture
+def test_backfill_tab_is_gone_and_failures_point_to_the_command(unrecorded):
+    """2026-10-14 使用者:補記分頁拿掉(對帳會自動記成 free style);記不了的列在總覽,附終端機補記指令"""
+    at = run()
+    assert "補記" not in [t.label for t in at.tabs]
+    assert not [b for b in at.button if b.key.startswith(("unrec_fill_", "bf_"))]
+    text = " ".join(str(c.value) for c in at.caption) + " ".join(str(c.value) for c in at.code)
+    assert "free_style backfill" in text
+    at.radio(key="new_strategy").set_value("free style").run()
+    assert not any("「補記」分頁" in str(c.value) for c in at.caption)
+
+
+# ---------------------------------------------------------------- 損益表(2026-10-14,AG Grid 免費版)
+
+PNL_ROW = {"run_id": "r1", "event_index": 1, "日期": "2026/10/09", "幣種": "ETHUSDT", "方向": "short", "數量": 13.0,
+           "建倉價格": 2513.0, "建倉時間": "10-08 21:36", "平倉價格": 2470.0, "真實損益": 450.0, "手續費": 30.0,
+           "手續費佔比": 6.25, "預估時長": "", "實際時長": "8 小時 3 分", "目標價": None, "停損價": None, "備註": "",
+           "實際秒數": 29000, "預估秒數": None}
+LONG_ROW = {**PNL_ROW, "run_id": "r2", "方向": "long", "日期": "2026/10/07", "真實損益": -6.0, "手續費": 2.0}
+PNL_COLUMNS = ["日期", "幣種", "方向", "數量", "建倉價格", "建倉時間", "平倉價格", "真實損益", "手續費", "手續費佔比(%)",
+               "預估時長", "實際時長", "目標價", "停損價", "備註"]
+
+
+@pytest.fixture
+def pnl(fake, monkeypatch):
+    calls, _ = fake
+    monkeypatch.setattr(data, "pnl_strategies", lambda db, account: ["free style", "scale_in_ladder"])
+    monkeypatch.setattr(data, "pnl_rows", lambda db, account, strategy: calls.append(("pnl_rows", account, strategy))
+                        or [dict(PNL_ROW), dict(LONG_ROW)])
+    monkeypatch.setattr(actions, "save_pnl_edits", lambda db, edits: calls.append(("pnl_save", edits)) or len(edits))
+    GRID_RETURN.clear()
+    yield calls
+    GRID_RETURN.clear()
+
+
+def grid_call(calls):
+    return [c for c in calls if c[0] == "aggrid"][-1]
+
+
+def test_pnl_defaults_and_the_grid_gets_every_column(pnl):
+    at = run()
+    assert (at.selectbox(key="pnl_account").value, at.selectbox(key="pnl_strategy").value) == ("MAIN", "free style")
+    _, df, kwargs = grid_call(pnl)
+    assert list(df.columns)[:len(PNL_COLUMNS)] == PNL_COLUMNS
+    assert {"run_id", "event_index", "實際秒數", "預估秒數"} <= set(df.columns)  # 隱藏,存檔 / 總結用
+    assert kwargs["data_return_mode"] == "FILTERED_AND_SORTED" and kwargs["allow_unsafe_jscode"] is True
+    assert "pnl_f_dirs" not in [m.key for m in at.multiselect]  # 上方那排篩選拿掉,改在欄位標題
+    assert not at.exception
+
+
+def test_totals_and_summary_follow_what_the_grid_shows(pnl):
+    """在表格裡篩選後(假 AG Grid 只回傳 long 那一列),合計和總結列跟著變"""
+    GRID_RETURN["data"] = pd.DataFrame([{**LONG_ROW, "手續費佔比(%)": LONG_ROW["手續費佔比"]}])
+    at = run()
+    metrics = {m.label: m.value for m in at.tabs[0].metric}
+    assert (metrics["交易對數"], metrics["真實損益合計(USDT)"], metrics["手續費合計(USDT)"]) == ("1", "-6", "2")
+    summary = at.tabs[0].dataframe[0].value.iloc[0]
+    assert (summary["日期"], summary["真實損益"], summary["手續費"]) == ("總結(1 對)", "-6", "2")
+    assert list(at.tabs[0].dataframe[0].value.columns) == PNL_COLUMNS
+
+
+def test_save_sends_only_edited_rows(pnl):
+    edited = {**LONG_ROW, "手續費佔比(%)": 6.25, "目標價": 2600.0, "備註": "照計劃"}
+    GRID_RETURN["data"] = pd.DataFrame([{**PNL_ROW, "手續費佔比(%)": 6.25}, edited])
+    at = run()
+    at.button(key="pnl_save").click().run()
+    [(_, edits)] = [c for c in pnl if c[0] == "pnl_save"]
+    assert edits == [{"run_id": "r2", "event_index": 1, "預估時長": None, "目標價": 2600.0, "停損價": None, "備註": "照計劃"}]
+    assert any("1 列" in str(x.value) for x in at.success)
+
+
+def test_save_without_changes_says_so(pnl):
+    at = run()
+    at.button(key="pnl_save").click().run()
+    assert not [c for c in pnl if c[0] == "pnl_save"] and any("沒有修改" in str(x.value) for x in at.info)
+
+
+def test_save_error_is_shown(pnl, monkeypatch):
+    GRID_RETURN["data"] = pd.DataFrame([{**PNL_ROW, "手續費佔比(%)": 6.25, "目標價": 2400.0, "停損價": 2600.0}])
+
+    def refuse(db, edits):
+        raise ValueError("第 1 列:做空時停損價要高於目標價")
+
+    monkeypatch.setattr(actions, "save_pnl_edits", refuse)
+    at = run()
+    at.button(key="pnl_save").click().run()
+    assert any("停損價要高於目標價" in str(e.value) for e in at.error)
+
+
+def test_grid_filtered_to_nothing_says_so(pnl):
+    GRID_RETURN["data"] = pd.DataFrame(columns=PNL_COLUMNS)
+    at = run()
+    assert any("篩選後沒有交易" in str(c.value) for c in at.tabs[0].caption) and not at.exception
+
+
+def test_pnl_db_error_is_shown_not_crashing(fake, monkeypatch):
+    def broken(db, account):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(data, "pnl_strategies", broken)
+    at = run()
+    assert not at.exception and any("connection refused" in str(e.value) for e in at.tabs[0].error)
+
+
+def test_pnl_shows_round_trip_fee_in_points_for_the_selected_account(pnl):
+    """ETHUSDT 現價 × maker 費率 × 2(買 + 賣)= 1.01 點;費率用上面選的帳戶"""
+    at = run()
+    metrics = {m.label: m.value for m in at.tabs[0].metric}
+    assert metrics["手續費點數(ETHUSDT,maker 買+賣)"] == "1.01 點"
+    assert ("client", "MAIN") in pnl
+
+
+def test_pnl_fee_points_error_does_not_break_the_page(pnl, monkeypatch):
+    def broken(client, symbol="ETHUSDT"):
+        raise RuntimeError("timeout")
+
+    monkeypatch.setattr(data, "fee_points", broken)
+    at = run()
+    metrics = {m.label: m.value for m in at.tabs[0].metric}
+    assert metrics["手續費點數(ETHUSDT,maker 買+賣)"] == "—" and not at.exception

@@ -408,3 +408,94 @@ class TestManyAccounts:
 def test_perp_symbol_only_needs_the_coin(typed, symbol):
     """介面只填幣名,USDT 自動補上(全部是 USDT 永續,2026-10-12)。"""
     assert actions.perp_symbol(typed) == symbol
+
+
+class TestSavePnlEdits:
+    """損益表裡直接改的可後補欄位(預估時長 / 目標價 / 停損價 / 備註)存回 sl_event(2026-10-14)。
+    全部驗證過才寫;有一列不對就一列都不寫。清空 = 寫 NULL。"""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        from datetime import datetime, timedelta, timezone
+
+        from strategy_lab.engine.events import Event
+        from strategy_lab.storage.recorder import RunInfo, TradeRecorder
+        from strategy_lab.storage.setup_db import setup
+
+        url = f"sqlite:///{tmp_path / 'trading.db'}"
+        setup(url)
+        t0 = datetime(2026, 10, 9, tzinfo=timezone.utc)
+        rec = TradeRecorder(db_url=url, pending_dir=tmp_path / "p", fetch_executions=lambda *a: [])
+        self.run_id = rec.start_run(RunInfo(
+            strategy_name="free style", strategy_path="NA", strategy_yaml="NA", strategy_params={}, config={},
+            symbol="ETHUSDT", category="linear", direction="NA", origin_price=None, origin_source=None, qty=None,
+            order_type="NA", loop=None, testnet=False, preflight=None, log_path=None, started_at=t0, account="MAIN",
+            note="原本的"))
+        for i, d in ((1, "long"), (2, "short")):
+            rec.record_event(Event(index=i, direction=d, start_time=t0 + timedelta(hours=i), end_time=t0 + timedelta(hours=i, minutes=30),
+                                   fills=2, max_position=1.0, avg_entry=100.0, avg_exit=101.0, realized_pnl=1.0,
+                                   max_drawdown=0.0, forced=False))
+        return url
+
+    def events(self, db):
+        from sqlalchemy import create_engine, select
+        from sqlalchemy.orm import Session
+
+        from strategy_lab.storage.models import SlEvent
+
+        engine = create_engine(db)
+        with Session(engine) as s:
+            out = {e.event_index: e for e in s.scalars(select(SlEvent))}
+        engine.dispose()
+        return out
+
+    def edit(self, index, **k):
+        return {"run_id": self.run_id, "event_index": index, "預估時長": "", "目標價": None, "停損價": None, "備註": "", **k}
+
+    def test_saves_and_clears(self, db):
+        n = actions.save_pnl_edits(db, [self.edit(1, 預估時長="4h", 目標價=110.0, 停損價=95.0, 備註="照計劃"),
+                                        self.edit(2)])
+        e = self.events(db)
+        assert n == 2
+        assert (e[1].expected_hold_seconds, float(e[1].target_price), float(e[1].stop_price), e[1].note) == (
+            14400, 110.0, 95.0, "照計劃")
+        assert e[2].note is None  # 清空原本的「原本的」
+
+    def test_nan_from_the_table_means_empty(self, db):
+        actions.save_pnl_edits(db, [self.edit(1, 目標價=float("nan"))])
+        assert self.events(db)[1].target_price is None
+
+    @pytest.mark.parametrize("bad,match", [
+        ({"預估時長": "4 hours"}, "預估時長"),
+        ({"目標價": -1.0}, "目標價"),
+        ({"目標價": 90.0, "停損價": 95.0}, "停損價要低於目標價"),  # 第 1 列做多
+        ({"備註": "x" * 501}, "備註"),
+    ])
+    def test_any_bad_row_writes_nothing(self, db, bad, match):
+        with pytest.raises(ValueError, match=match):
+            actions.save_pnl_edits(db, [self.edit(2, 備註="先改這列"), self.edit(1, **bad)])
+        assert self.events(db)[2].note == "原本的"
+
+    def test_short_rows_need_stop_above_target(self, db):
+        with pytest.raises(ValueError, match="停損價要高於目標價"):
+            actions.save_pnl_edits(db, [self.edit(2, 目標價=110.0, 停損價=95.0)])
+
+
+def test_pnl_changes_only_returns_rows_whose_editable_cells_changed():
+    original = [{"run_id": "r", "event_index": 1, "真實損益": 5.0, "預估時長": "", "目標價": None, "停損價": None, "備註": ""},
+                {"run_id": "r", "event_index": 2, "真實損益": 6.0, "預估時長": "4h", "目標價": 2600.0, "停損價": None, "備註": "a"}]
+    edited = [{"預估時長": "", "目標價": float("nan"), "停損價": float("nan"), "備註": "", "真實損益": 5.0},  # NaN = 空白,沒改
+              {"預估時長": "6h", "目標價": 2600.0, "停損價": float("nan"), "備註": "a", "真實損益": 6.0}]
+    assert actions.pnl_changes(original, edited) == [
+        {"run_id": "r", "event_index": 2, "預估時長": "6h", "目標價": 2600.0, "停損價": None, "備註": "a"}]
+
+
+def test_pnl_changes_match_rows_by_key_not_position():
+    """AG Grid 回傳的是篩選 / 排序後的列(2026-10-14):要用 run_id + event_index 對回原本那一列"""
+    original = [{"run_id": "r", "event_index": 1, "預估時長": "", "目標價": None, "停損價": None, "備註": ""},
+                {"run_id": "r", "event_index": 2, "預估時長": "", "目標價": None, "停損價": None, "備註": ""},
+                {"run_id": "s", "event_index": 1, "預估時長": "", "目標價": None, "停損價": None, "備註": ""}]
+    edited = [{"run_id": "s", "event_index": 1, "預估時長": "", "目標價": 10.0, "停損價": None, "備註": ""},  # 排序後在前
+              {"run_id": "r", "event_index": 1, "預估時長": "", "目標價": None, "停損價": None, "備註": ""}]  # r/2 被篩掉
+    assert actions.pnl_changes(original, edited) == [
+        {"run_id": "s", "event_index": 1, "預估時長": None, "目標價": 10.0, "停損價": None, "備註": None}]

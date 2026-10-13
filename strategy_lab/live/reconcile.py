@@ -9,8 +9,9 @@
 3. 每筆成交用 execId 去 sl_fill 查:
    - 有 → 正常
    - 沒有,但落在同帳戶、同幣種某筆紀錄的時間裡 → 情況 1:自動補進那筆紀錄(sl_fill)
-   - 沒有,也不在任何紀錄裡(資金費不算)→ 情況 2:全手動交易沒記,不自動補(不知道策略與參數),
-     列進「未記錄的交易」,發系統警報請使用者到頁面「補記」分頁補。
+   - 沒有,也不在任何紀錄裡(資金費不算)→ 情況 2:全手動交易沒記 → **自動記成 free style**(2026-10-14
+     使用者決定;使用者只到「損益表」補填預估時長 / 目標價 / 停損價 / 備註);記不了的(例:時間重疊)才留在
+     「未記錄的交易」,發系統警報,請使用者處理後用終端機 free_style backfill 補(補記分頁 10-14 拿掉)。
      分組照使用者的定義:持倉 0 → 0 算一對交易(中間加倉幾次、隔多久都不切);查詢起點的持倉 =
      現在的持倉 − 期間的成交,不是 0 就往前查到持倉為 0 的那一刻;還沒平倉的(進行中)先不列
 4. 情況 1 / 2、帳戶查詢失敗 → Telegram 系統警報(有聲音);警告過的成交記在狀態檔,不重發
@@ -33,6 +34,7 @@ from loguru import logger
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from strategy_lab.live import free_style as fs
 from strategy_lab.live.free_style import PENDING_DIR, PROJECT_ROOT, _account_name, _chunked, _hkt, _ms, _utc
 from strategy_lab.storage.models import SlEvent, SlFill, SlRun
 
@@ -225,6 +227,7 @@ def run_daily(db_url: str, now: datetime, state_path: Path = STATE_PATH, pending
         messages.append(f"🔧 對帳:已把本機暫存(DB 斷線時)的 {replayed} 筆紀錄補進資料庫")
 
     reports: List[Report] = []
+    clients: Dict[str, Any] = {}
     names = accounts.list_accounts()
     if accounts.DEFAULT_ACCOUNT.upper() not in [n.upper() for n in names]:
         names.insert(0, accounts.DEFAULT_ACCOUNT)  # test1 只要有原本的 BYBIT_API_KEY 就對帳(.env 沒寫標題也一樣)
@@ -245,6 +248,7 @@ def run_daily(db_url: str, now: datetime, state_path: Path = STATE_PATH, pending
             messages.append(f"❌ 對帳:帳戶 {name} 查詢失敗:{e}")
             continue
         reports.append(report)
+        clients[account.name.upper()] = client
         state["accounts"][account.name] = {"last_end": now.isoformat()}
         for rep in report.repaired:
             messages.append(f"🔧 對帳:帳戶 {rep.account} {rep.symbol} 已自動補回 {rep.fills} 筆成交到 {rep.strategy_name}"
@@ -255,14 +259,31 @@ def run_daily(db_url: str, now: datetime, state_path: Path = STATE_PATH, pending
     seen_ids = {i for u in pending for i in u.exec_ids}
     pending += [u for r in reports for u in r.unrecorded if not set(u.exec_ids) <= seen_ids]
     pending = [u for u in pending if not _covered(db_url, u, now)]
+
+    # 2026-10-14 使用者:找到的(全手動交易)一律自動記成 free style,自己只到損益表補填;記不了的才留在清單
+    recorded, failed = [], []
+    for u in sorted(pending, key=lambda u: u.first):
+        client = clients.get(u.account.upper())
+        if client is None:
+            failed.append((u, "這次沒有查到這個帳戶"))
+            continue
+        try:
+            fs.backfill(db_url, client, u.symbol, u.first, u.last, now, account=u.account,
+                        strategy_name=fs.FREE_STYLE, pending_dir=pending_dir)
+            recorded.append(u)
+        except Exception as e:  # noqa: BLE001  一對記不了不影響其他
+            failed.append((u, str(e)))
+    if recorded:
+        messages.append("📝 對帳:已自動記成 free style\n" + "\n".join(_line(u) for u in recorded)
+                        + "\n→ 到 strategy_lab 頁面「損益表」補填預估時長 / 目標價 / 停損價 / 備註")
+    pending = [u for u, _ in failed]
     alerted = {k: v for k, v in state["alerted"].items() if now - datetime.fromisoformat(v) < ALERTED_KEEP}
-    new = [u for u in pending if not set(u.exec_ids) <= set(alerted)]
+    new = [(u, why) for u, why in failed if not set(u.exec_ids) <= set(alerted)]
     if new:
-        lines = [f"• 帳戶 {u.account} {u.symbol}:{_hkt(u.first)} → {_hkt(u.last)} HKT,"
-                 + (f"{u.orders} 張訂單 / " if u.orders is not None else "") + f"{u.count} 筆成交" for u in new]
-        messages.append("⚠️ 對帳:有成交沒有任何紀錄(全手動交易沒記?)\n" + "\n".join(lines)
-                        + "\n→ 到 strategy_lab 頁面「補記」分頁補(總覽的「未記錄的交易」可一鍵帶入)")
-        for u in new:
+        messages.append("⚠️ 對帳:有交易沒有紀錄,自動記成 free style 失敗\n"
+                        + "\n".join(f"{_line(u)}\n  原因:{why}" for u, why in new)
+                        + "\n→ 處理好之後用終端機補記(strategy_lab 頁面總覽「未記錄的交易」有現成指令),或等下次對帳再試")
+        for u, _ in new:
             for i in u.exec_ids:
                 alerted[i] = now.isoformat()
     state["unrecorded"] = [u.to_json() for u in pending]
@@ -274,6 +295,11 @@ def run_daily(db_url: str, now: datetime, state_path: Path = STATE_PATH, pending
         send_alert(m)
     logger.info("對帳完成:{} 個帳戶,未記錄的交易 {} 組,通知 {} 則", len(reports), len(pending), len(messages))
     return reports
+
+
+def _line(u: Unrecorded) -> str:
+    return (f"• 帳戶 {u.account} {u.symbol}:{_hkt(u.first)} → {_hkt(u.last)} HKT,"
+            + (f"{u.orders} 張訂單 / " if u.orders is not None else "") + f"{u.count} 筆成交")
 
 
 def _covered(db_url: str, u: Unrecorded, now: datetime) -> bool:

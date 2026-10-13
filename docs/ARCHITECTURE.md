@@ -15,6 +15,9 @@ mainnet 小額帳戶實盤(分注策略 `scale_in_ladder`,preflight → 背景 d
 另有不用策略 YAML、只記帳的 free style(§6.27)、每注持倉計時(§6.28),
 以及 Streamlit 介面(§6.29:狀態頁 + 策略分頁:選策略 → 填參數 → 開始 / 改參數 / 停止,只做真正的交易環境)、
 上下同時掛單的區間策略 `weekend_band_reversion`(§6.30)。`weekend_mean_reversion` 已刪除(§6.30)。
+**2026-10-12 ~ 14**:多帳戶(§6.31,test1 / MAIN,帳戶名寫進 DB)、SUI 收尾事故(§6.32)、補記過去一段(§6.27)、
+每日 08:00 對帳(§6.33:策略漏記自動補回,全手動交易沒記的自動記成 free style)、
+損益表分頁(§6.34:AG Grid,像 Excel 點欄位標題排序 / 篩選,後補欄位直接在格子裡改;頁面第一個分頁)。
 Live 層的元件關係見 §1.1。
 
 本文件涵蓋元件關係、核心狀態機、單次執行流程、目前已知的設計限制,
@@ -538,6 +541,9 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 對帳分組改成一對交易(0 → 0) | `reconcile._rounds_of` / `_look_back`、`OpenRound`:持倉 0 → 0 算一對(使用者的定義),起點持倉 = 現在持倉 − 期間成交,不是 0 就往前查(最多 2 年);穿過 0 的成交屬於兩對;進行中不列。取代 6 小時分組 | 改 §6.33 | 已完成;MAIN ETH 重新分組為 9 對,第一對 09-15 開倉 |
 | 補記:目標價、停損價、方向自動 | `sl_run.target_price` / `stop_price`(新欄位,真 DB 已加、Superset 已同步);`_direction_of` 從成交判斷方向;頁面兩個價格欄位、方向預設「自動」;CLI `--target` / `--stop` | 改 §6.27 | 已完成 |
 | 未記錄的交易:訂單數、由新到舊、最新更新 | `Unrecorded.orders`(訂單數,跟成交筆數分開列;Telegram 也寫「X 張訂單 / Y 筆成交」);總覽清單最近的排最前面;最頂顯示「最新更新:上次對帳時間」 | 改 §6.33 | 已完成 |
+| 損益表分頁 | `ui/data.pnl_strategies` / `pnl_rows` / `fmt_hold`;`ui/actions.pnl_changes` / `save_pnl_edits`;sl_event 新增 `target_price` / `stop_price` / `note`(真 DB 已加、Superset 已同步) | 新增 §6.34 | 已完成 |
+| 損益表篩選 / 排序 / 總結列;拿掉補記分頁;對帳自動記成 free style | `data.filter_pnl` / `sort_pnl` / `pnl_summary`;app 拿掉補記分頁與一鍵帶入,總覽改列終端機指令;`reconcile.run_daily` 把找到的每一對自動 `backfill` 成 free style;補記收「先掛好、期間內成交」的訂單;方向判斷忽略小數誤差 | 改 §6.29 / §6.33 / §6.34 | 已完成 |
+| 損益表改用 AG Grid 免費版 + 分頁重排 | 新增 `ui/grid.py`(`pnl_grid_options`:欄位標題排序 / 篩選、可編輯欄、數字格式、固定欄寬);依賴 `streamlit-aggrid==1.2.1.post2`;`actions.pnl_changes` 用 run_id + event_index 對列;拿掉上方篩選列與 `data.filter_pnl` / `sort_pnl`;分頁順序改成 損益表 / 策略 / 交易紀錄 / Log / 總覽 | 改 §6.29 / §6.34 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1767,6 +1773,12 @@ cd /Users/mac/strategy_lab && .venv/bin/streamlit run strategy_lab/ui/app.py --s
 載不到會印出 `_arrow_right` 之類的文字,重跑上面的指令即可)。只綁本機 127.0.0.1(頁面上有會動到實盤的按鈕,
 不能開到區域網路)。頁面啟動時 `os.chdir` 到專案根目錄(設定檔裡的 `strategies/*.yaml` 是相對路徑)。
 背景程式(daemon)跟頁面完全無關:關掉頁面不影響交易。程式改了要**重開伺服器**(背後的模組不會自動重新載入)。
+只按瀏覽器重新整理會「半新半舊」:`app.py` 是新的,`live/`、`storage/` 等已載入的模組還是舊的,會出現
+`AttributeError: module ... has no attribute ...`(10-12、10-13 各遇過一次);開新的瀏覽器分頁也一樣,要重開的是伺服器。
+
+**分頁**(2026-10-14,順序照使用者指定):損益表(§6.34)/ 策略(選帳戶 → 選策略 → 開始;進行中清單)/ 交易紀錄 / Log /
+總覽(daemon、Bybit 帳戶、未記錄的交易 §6.33,放最後)。「補記」分頁同一天拿掉(使用者要求):每日對帳會把找到的交易自動記成 free style,
+不需要手動補記的頁面;補記的程式(`free_style.preview_backfill` / `backfill`)與終端機指令保留,自動記錄就是用它。
 
 **三層**:`app.py` 只負責畫面;`data.py`(唯讀)與 `actions.py`(動作)不 import streamlit,可以單獨測試;
 動作全部走跟終端機同一套程式——**頁面只是外殼,不另外寫交易邏輯**。
@@ -1986,7 +1998,7 @@ upsert 不重複),檔案改名 `.jsonl.done`;再跑 `setup_db` 確認 account = 
 |---|---|---|
 | 判斷 | Bybit 的成交落在**同帳戶、同幣種某筆紀錄的時間裡**,sl_fill 卻沒有這個 execId | 成交**不在任何紀錄的時間裡**(資金費不算) |
 | 原因 | DB 斷線(`logs/db_pending/`)、同步失敗 | 沒按 free style 開始,也沒有策略參數 |
-| 處理 | **自動補回**:先 replay `db_pending`;還缺的成交寫進那筆紀錄的 sl_fill(對得上 sl_event 時段就填 event_index) | **不自動補**(不知道策略與參數):列進「未記錄的交易」,發 Telegram **系統警報**(有聲音),請使用者到「補記」分頁補 |
+| 處理 | **自動補回**:先 replay `db_pending`;還缺的成交寫進那筆紀錄的 sl_fill(對得上 sl_event 時段就填 event_index) | **自動記成 free style**(2026-10-14 使用者決定,原本是只警告):每一對完整交易(0 → 0)呼叫 `free_style.backfill`(開倉 → 平倉),發「📝 已自動記成 free style」,使用者到「損益表」補填預估時長 / 目標價 / 停損價 / 備註。**記不了的**(例:時間跟已有紀錄重疊)才留在「未記錄的交易」,發 ⚠️ 系統警報(附原因),請使用者到「補記」分頁手動補 |
 
 **流程**(`run_daily`,每天 08:00 HKT,launchd `scripts/com.strategylab.reconcile.plist`;Mac 睡著醒來補跑):
 1. `replay_pending`:`storage/backfill.py` 把 `logs/db_pending/*.jsonl` 補進 DB → 「🔧 已把本機暫存的 N 筆紀錄補進資料庫」
@@ -2001,14 +2013,17 @@ upsert 不重複),檔案改名 `.jsonl.done`;再跑 `setup_db` 確認 account = 
    - 現在還沒平倉的(進行中,`OpenRound`)先不列,平倉後才列
    - 一對裡只要有一筆是未記錄的就整對列出,帶入補記的時間 = 開倉 → 平倉
    (第一版用「兩筆間隔超過 6 小時就分組」,同一天改掉:會把一對交易從中間切開,補記兩邊都會被擋)
-4. 「未記錄的交易」= 之前的 + 這次的,去掉已經被紀錄涵蓋的(使用者補記了);**新的**才發警告(警告過的 execId 記 30 天,不重發)
+4. 「未記錄的交易」= 之前的 + 這次的,去掉已經被紀錄涵蓋的 → 每一對自動記成 free style(舊的先記);
+   記不了的留著,**新的**才發警告(警告過的 execId 記 30 天,不重發);下次記成功就從清單移除
 5. 帳戶查詢失敗(key 失效等)→ 「❌ 對帳:帳戶 X 查詢失敗」,其他帳戶照常
 
 狀態檔 `logs/reconcile_state.json`:每個帳戶 `last_end`、`unrecorded`(給頁面)、`alerted`、`last_run`。
 手動:`.venv/bin/python -m strategy_lab.live.reconcile [--days 3]`、`launchctl kickstart gui/$(id -u)/com.strategylab.reconcile`、
 頁面總覽「🔄 立即對帳」。
 
-**頁面**(總覽):「未記錄的交易」表(帳戶、幣種、第一筆 / 最後一筆 HKT、**訂單數、成交筆數**——一張訂單可以拆成好幾筆成交,
+**頁面**(總覽,10-14 補記分頁拿掉後):「未記錄的交易」只剩**自動記不了**的,表格下面附現成的終端機補記指令
+(`_backfill_command`:第一筆那一分鐘 → 最後一筆的下一分鐘);原本的「📝 補記」一鍵帶入按鈕跟著拿掉。以下是拿掉前的設計:
+「未記錄的交易」表(帳戶、幣種、第一筆 / 最後一筆 HKT、**訂單數、成交筆數**——一張訂單可以拆成好幾筆成交,
 例 09-15 那一對是 9 張訂單 / 24 筆成交;`Unrecorded.orders`,同一天加);**最近的排最前面**(使用者要求;每一對 0 → 0 各自獨立,補記先後不影響結果);表格最頂一行粗體「**最新更新:<上次對帳時間> HKT**」(`reconcile.last_run()`;每天 08:00 或按立即對帳後更新);每組一個「📝 補記 …」按鈕 → 把帳戶、
 幣種、時間(第一筆的那一分鐘 → 最後一筆的下一分鐘)帶入「補記」分頁,再由使用者看紅字、預覽、寫入。
 
@@ -2020,4 +2035,61 @@ upsert 不重複),檔案改名 `.jsonl.done`;再跑 `setup_db` 確認 account = 
 回到 0 開新的一對、穿過 0、進行中不列、往前查起點、已記錄不列)、每日執行從上次接著查、
 不重發、補記後從清單移除、db_pending、帳戶失敗)、`test_reconcile_schedule.py`(plist)、`test_live_bybit_client.py`
 (不分幣種)、`test_ui_app.py`(未記錄清單、一鍵帶入、立即對帳)。
+
+### 6.34 損益表分頁(2026-10-14)
+
+頁面「損益表」分頁:選**帳戶**(預設 MAIN)+ **策略**(預設 free style;下拉選單 = 這個帳戶有紀錄的策略),
+**每一對交易(sl_event,持倉 0 → 0)一列,最近的在前**。上方合計:交易對數、真實損益合計、手續費合計。
+
+| 欄位 | 來源 |
+|---|---|
+| 日期(年/月/日) | 平倉日(`end_time`,HKT) |
+| 幣種 | sl_run.symbol |
+| 方向 / 數量 | `direction` / `max_position`(這一對的最大持倉) |
+| 建倉價格 / 建倉時間 / 平倉價格 | `avg_entry` / `start_time` / `avg_exit` |
+| 真實損益 | `net_pnl` = 價差毛利 − 手續費 − 資金費 |
+| 手續費 / 手續費佔比(%) | `fees` / 手續費 ÷ \|價差毛利\| |
+| 預估時長(可後補) | `expected_hold_seconds`,顯示成 90m / 4h / 1.5d(`fmt_hold`,跟補記同格式) |
+| 實際時長 | `hold_seconds`(自動) |
+| 目標價 / 停損價 / 備註(可後補) | sl_event 新欄位 `target_price` / `stop_price` / `note` |
+
+**手續費點數**(同一天,使用者要求):上方第 4 個數字「手續費點數(ETHUSDT,maker 買+賣)」= ETHUSDT 現價 × 所選帳戶的
+maker 費率 × 2(買一次 + 賣一次),例 2500 × 0.02% × 2 = 1.00 點 → 用 maker 開倉、maker 平倉,價格要往有利方向走這麼多點
+才賺回手續費。`data.fee_points`(只讀:`get_last_price` + `get_fee_rates`),頁面 30 秒快取,查不到顯示「—」。
+
+**表格改用 AG Grid 免費版(Community)**(同一天,使用者要「像 Excel 一樣點欄位名稱再選功能」;`streamlit-aggrid==1.2.1.post2`,
+裝在 strategy_lab 的 `.venv`、寫進 requirements.txt):點欄位標題旁的圖示 → 排序 / 篩選(文字「包含 / 等於」、
+數字「大於 / 小於 / 介於」、日期區間)。Excel 那種勾選清單式篩選是付費版(Enterprise,約 US$999 / 開發者)才有,沒用。
+- 設定在 `ui/grid.py` 的 `pnl_grid_options`(不 import streamlit,單獨測):可編輯欄(淡黃底)、篩選種類、數字格式
+  (價格兩位、損益 / 手續費整數)、時長照秒數排、日期預設新到舊、每欄固定寬度(自動欄寬量不準中文,會把日期縮成一個字)、
+  run_id / event_index / 秒數欄隱藏。
+- 表格回傳「篩選 + 排序後」的列(`FILTERED_AND_SORTED`):上方合計、總結列都跟著表格目前的篩選;
+  `actions.pnl_changes` 改用 run_id + event_index 對回原本那一列(順序不同、有些被篩掉)。儲存只存目前看得到的列。
+- 原本表格上方的那排篩選 / 排序(`data.filter_pnl` / `sort_pnl`)拿掉。
+- 測試:`test_ui_grid.py`(設定);頁面測試把 `st_aggrid.AgGrid` 換成假的(AppTest 跑不了自訂元件)。
+
+**(AG Grid 之前的版本)篩選 / 排序**(同一天,使用者要「像 Excel 一樣」):Streamlit 表格沒有欄位標題上的下拉篩選,改在表格上方放一排:
+日期區間(平倉日)、幣種、方向(多選)、損益(全部 / 賺 / 虧)——`data.filter_pnl`;排序 = 選欄位 + 順序 / 逆序
+(預設日期逆序;時長照秒數排、空的排最後)——`data.sort_pnl`。表格、上方合計、總結列、儲存都只看篩選後的列;
+換篩選 / 排序會換一張表(`data_editor` 的 key 帶條件代號),沒存的修改不會套到別列。
+
+**總結列**(表格正下方,同欄位對齊,`data.pnl_summary`):數量(平均)、真實損益(總和)、手續費(總和)、
+手續費佔比(平均,只平均算得出的)、實際時長(平均)、預估時長(平均,只平均有填的),其他留白。
+價格顯示兩位小數、損益與手續費不顯示小數(只改畫面,DB 不變)。
+
+**可後補欄位直接在表格裡填、改、清空**(`st.data_editor`,其他欄位鎖住),按「💾 儲存後補欄位」:
+`pnl_changes(原本, 改後)` 只挑有改的列(表格空白數字是 NaN,當空白比)→ `save_pnl_edits` 寫回 sl_event。
+全部驗證過才寫(預估時長格式、價格 > 0、做多停損 < 目標 / 做空停損 > 目標、備註 ≤ 500 字),**一列不對就一列都不寫**;清空 = NULL。
+
+為什麼放 sl_event 而不是 sl_run:一筆紀錄(例如一次補記)可以有好幾對交易,目標價 / 停損價是一對一對的。
+補記時填的值寫進 sl_run,也抄到該紀錄的每一列 sl_event(`recorder._event_row`),之後在損益表一列一列改。
+
+**測試**:`test_storage.py::TestEventUserFields`、`test_ui_data.py::TestPnlTable`、`test_ui_actions.py::TestSavePnlEdits` /
+`test_pnl_changes_*`、`test_ui_app.py` 的損益表(預設 MAIN + free style、欄位順序、只存有改的列、沒改、錯誤、DB 連不上不掛)。
+
+**10-14 第一次自動記成 free style**:MAIN ETH 10 對(原本 9 對 + 10-13 新的一對),全部成功,清單清空。
+真實損益合計 −141.87 USDT、手續費合計 158.74 USDT。執行前先唯讀預覽每一對,發現兩個問題並修正:
+- 限價單先掛好、期間內才成交 → 訂單建立時間早於這一對的開始,原本會被漏掉(連帶它的成交、手續費)。
+  `free_style._fetch_window` 改成:期間內有成交、但訂單不在期間內建立的,往前 30 天(`EARLY_ORDER_LOOKBACK`)找回來。
+- 小數誤差:持倉最後是 −4e-16 被當成「穿過 0 反手開空」,方向判成 both。`_direction_of` 改成誤差範圍內算 0。
 

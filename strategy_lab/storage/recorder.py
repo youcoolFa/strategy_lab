@@ -234,6 +234,8 @@ class TradeRecorder:
             "hold_seconds": _seconds(event.end_time - event.start_time),
             "expected_hold_seconds": self._run.get("expected_hold_seconds"),
             "account": self._run.get("account"), "strategy_name": self._run.get("strategy_name"),
+            "target_price": self._run.get("target_price"), "stop_price": self._run.get("stop_price"),
+            "note": self._run.get("note"),
         }
 
     def _write(self, table: str, row: Dict[str, Any]) -> None:

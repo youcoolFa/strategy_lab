@@ -130,6 +130,9 @@ class SlEvent(Base):
     hold_seconds = Column(Integer, comment="實際持倉秒數 = end_time − start_time(2026-10-11 起才有)")
     expected_hold_seconds = Column(Integer, comment="預估持倉秒數:策略 YAML 的 expected_hold(同 sl_run.expected_hold_seconds);"
                                                     "沒設定為 NULL(2026-10-11 起才有)")
+    target_price = Column(MONEY, comment="目標價:使用者事後填的預定止盈價(補記時抄 sl_run,損益表可一列一列改;2026-10-14 起才有)")
+    stop_price = Column(MONEY, comment="停損價:使用者事後填的心理停損(補記時抄 sl_run,損益表可一列一列改;2026-10-14 起才有)")
+    note = Column(Text, comment="備註:使用者事後填的說明(補記時抄 sl_run,損益表可一列一列改;2026-10-14 起才有)")
 
 
 MODELS = {m.__tablename__: m for m in (SlRun, SlOrder, SlFill, SlEvent)}
