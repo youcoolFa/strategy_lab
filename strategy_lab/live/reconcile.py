@@ -10,7 +10,9 @@
    - 有 → 正常
    - 沒有,但落在同帳戶、同幣種某筆紀錄的時間裡 → 情況 1:自動補進那筆紀錄(sl_fill)
    - 沒有,也不在任何紀錄裡(資金費不算)→ 情況 2:全手動交易沒記,不自動補(不知道策略與參數),
-     列進「未記錄的交易」,發系統警報請使用者到頁面「補記」分頁補
+     列進「未記錄的交易」,發系統警報請使用者到頁面「補記」分頁補。
+     分組照使用者的定義:持倉 0 → 0 算一對交易(中間加倉幾次、隔多久都不切);查詢起點的持倉 =
+     現在的持倉 − 期間的成交,不是 0 就往前查到持倉為 0 的那一刻;還沒平倉的(進行中)先不列
 4. 情況 1 / 2、帳戶查詢失敗 → Telegram 系統警報(有聲音);警告過的成交記在狀態檔,不重發
 
 限制:情況 1 只補成交明細,每一輪的損益(sl_event)不重算;通知會註明。
@@ -37,7 +39,8 @@ from strategy_lab.storage.models import SlEvent, SlFill, SlRun
 STATE_PATH = PROJECT_ROOT / "logs" / "reconcile_state.json"
 FIRST_LOOKBACK = timedelta(days=7)
 ALERTED_KEEP = timedelta(days=30)
-SESSION_GAP = timedelta(hours=6)  # 未記錄的成交:同一個幣兩筆間隔超過這麼久就分成新的一組(各自補記)
+MAX_LOOKBACK = timedelta(days=730)  # 找一對交易的起點最多往前查多久(Bybit 歷史上限 2 年)
+_EPS = 1e-9
 
 
 @dataclass
@@ -71,6 +74,15 @@ class Unrecorded:
 
 
 @dataclass
+class OpenRound:
+    """還沒平倉的一對交易(進行中):平倉後才會列進「未記錄的交易」。"""
+    account: str
+    symbol: str
+    position: float
+    first: Optional[datetime]
+
+
+@dataclass
 class Report:
     account: str
     start: datetime
@@ -78,6 +90,7 @@ class Report:
     checked: int
     repaired: List[Repaired]
     unrecorded: List[Unrecorded]
+    open_rounds: List[OpenRound] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -106,19 +119,70 @@ def reconcile_account(db_url: str, client: Any, account: str, start: datetime, e
             s.commit()
     finally:
         engine.dispose()
-    unrecorded = [Unrecorded(account, sym, _ms(g[0]["execTime"]), _ms(g[-1]["execTime"]), len(g),
-                             [r["execId"] for r in g]) for sym, rows in sorted(loose.items()) for g in _sessions(rows)]
-    return Report(account, start, end, len(executions), list(repaired.values()), unrecorded)
+    unrecorded: List[Unrecorded] = []
+    open_rounds: List[OpenRound] = []
+    for sym in sorted(loose):
+        loose_ids = {e["execId"] for e in loose[sym]}
+        rounds, open_part, position = _rounds_of(client, sym, executions, start)
+        for r in rounds:
+            if any(e["execId"] in loose_ids for e in r):
+                unrecorded.append(Unrecorded(account, sym, _ms(r[0]["execTime"]), _ms(r[-1]["execTime"]), len(r),
+                                             [e["execId"] for e in r]))
+        if open_part:
+            open_rounds.append(OpenRound(account, sym, position, _ms(open_part[0]["execTime"])))
+    return Report(account, start, end, len(executions), list(repaired.values()), unrecorded, open_rounds)
 
 
-def _sessions(rows: List[dict]) -> List[List[dict]]:
-    groups: List[List[dict]] = []
-    for r in rows:  # 已照時間排好
-        if groups and _ms(r["execTime"]) - _ms(groups[-1][-1]["execTime"]) <= SESSION_GAP:
-            groups[-1].append(r)
-        else:
-            groups.append([r])
-    return groups
+def _signed(e: dict) -> float:
+    return float(e["execQty"]) * (1 if e.get("side") == "Buy" else -1)
+
+
+def _is_trade(e: dict) -> bool:
+    return (e.get("execType") or "Trade") == "Trade"
+
+
+def _rounds_of(client: Any, symbol: str, executions: List[dict], start: datetime):
+    """一對交易 = 持倉 0 → 0(使用者的定義:中間加倉幾次、隔多久都不切)。
+    查詢起點的持倉 = 現在的持倉 − 這段期間的成交;不是 0 就往前查到持倉為 0 的那一刻。
+    回傳(完整的每一對, 還沒平倉的那段, 現在的持倉)。"""
+    key = lambda e: (int(e["execTime"]), e["execId"])  # noqa: E731
+    rows = sorted((e for e in executions if e["symbol"] == symbol and _is_trade(e)), key=key)
+    position = client.get_position_qty(symbol)
+    at_start = position - sum(_signed(e) for e in rows)
+    earlier = _look_back(client, symbol, start, at_start, {e["execId"] for e in rows})
+    rounds: List[List[dict]] = []
+    current: List[dict] = []
+    pos = 0.0
+    for e in earlier + rows:
+        before, pos = pos, pos + _signed(e)
+        current.append(e)
+        if abs(pos) < _EPS:
+            rounds.append(current)
+            current, pos = [], 0.0
+        elif before * pos < 0:  # 一筆成交穿過 0(平多 + 開空):這筆屬於兩對
+            rounds.append(current)
+            current = [e]
+    return rounds, current, position
+
+
+def _look_back(client: Any, symbol: str, start: datetime, at_start: float, seen: set) -> List[dict]:
+    """起點有持倉 → 一週一週往前查,直到持倉回到 0(= 那一對交易的開頭)。找不到(超過 2 年)就回傳空的。"""
+    if abs(at_start) < _EPS:
+        return []
+    collected: List[dict] = []
+    pos, cursor = at_start, start
+    while start - cursor < MAX_LOOKBACK:
+        begin = cursor - timedelta(days=7)
+        rows = [e for e in client.get_executions(symbol, begin, cursor) if _is_trade(e) and e["execId"] not in seen]
+        for e in sorted(rows, key=lambda e: (int(e["execTime"]), e["execId"]), reverse=True):
+            seen.add(e["execId"])
+            collected.insert(0, e)
+            pos -= _signed(e)
+            if abs(pos) < _EPS:
+                return collected
+        cursor = begin
+    logger.warning("{} 往前查了 2 年還找不到持倉為 0 的起點,這一對交易從查詢起點算", symbol)
+    return []
 
 
 def _known_exec_ids(session: Session, ids: List[str]) -> set:

@@ -36,8 +36,9 @@ def ex(eid, symbol, when, side="Buy", qty=1, price=100, fee=0.01, exec_type="Tra
 
 
 class FakeClient:
-    def __init__(self, executions):
+    def __init__(self, executions, positions=None):
         self.executions = executions
+        self.positions = positions or {}  # 現在的持倉(多正空負)
         self.queries = []
 
     def get_executions(self, symbol, start, end):
@@ -45,9 +46,8 @@ class FakeClient:
         return [e for e in self.executions if (symbol is None or e["symbol"] == symbol)
                 and start <= datetime.fromtimestamp(int(e["execTime"]) / 1000, tz=timezone.utc) <= end]
 
-    # free style start / backfill 用
     def get_position_qty(self, symbol):
-        return 0.0
+        return self.positions.get(symbol, 0.0)
 
     def get_open_orders(self, symbol):
         return []
@@ -116,17 +116,18 @@ class TestReconcileAccount:
         client = FakeClient([ex("e1", "ETHUSDT", t(5)), ex("e2", "ETHUSDT", t(10), side="Sell"),
                              ex("m1", "ETHUSDT", t(300)), ex("m2", "ETHUSDT", t(330), side="Sell"),
                              ex("m3", "XRPUSDT", t(400)),
-                             ex("fz", "XRPUSDT", t(480), exec_type="Funding")])  # 資金費不算交易
+                             ex("fz", "XRPUSDT", t(480), exec_type="Funding")],  # 資金費不算交易
+                            positions={"XRPUSDT": 1.0})  # XRP 還沒平倉 = 進行中,先不列
         report = rc.reconcile_account(db, client, "test1", T0, NOW)
         assert [(u.symbol, u.first, u.last, u.count, u.exec_ids) for u in report.unrecorded] == [
-            ("ETHUSDT", t(300), t(330), 2, ["m1", "m2"]), ("XRPUSDT", t(400), t(400), 1, ["m3"])]
+            ("ETHUSDT", t(300), t(330), 2, ["m1", "m2"])]
         assert not {"m1", "m2", "m3"} & set(fills(db))
 
     def test_runs_of_other_accounts_do_not_count(self, db, tmp_path):
         self.recorded_run(db, tmp_path, account="MAIN")
-        client = FakeClient([ex("x1", "ETHUSDT", t(30))])
+        client = FakeClient([ex("x1", "ETHUSDT", t(30)), ex("x2", "ETHUSDT", t(40), side="Sell")])
         report = rc.reconcile_account(db, client, "test1", T0, NOW)
-        assert [u.exec_ids for u in report.unrecorded] == [["x1"]] and report.repaired == []
+        assert [u.exec_ids for u in report.unrecorded] == [["x1", "x2"]] and report.repaired == []
 
     def test_running_run_covers_until_now(self, db, tmp_path):
         fs.start(db, FakeClient([]), "ETHUSDT", t(0), pending_dir=tmp_path)
@@ -150,7 +151,9 @@ class TestDailyRun:
         envf.write_text("BYBIT_API_KEY=k\nBYBIT_API_SECRET=s\nACCOUNT = MAIN\nBYBIT_MAIN_API_KEY=m\nBYBIT_MAIN_API_SECRET=n\n")
         monkeypatch.setattr(accounts, "ENV_PATH", envf)
         sent = []
-        clients = {"test1": FakeClient([ex("m1", "ETHUSDT", NOW - timedelta(hours=2))]), "MAIN": FakeClient([])}
+        clients = {"test1": FakeClient([ex("m1", "ETHUSDT", NOW - timedelta(hours=2)),
+                                        ex("m2", "ETHUSDT", NOW - timedelta(hours=1, minutes=30), side="Sell")]),
+                   "MAIN": FakeClient([])}
         monkeypatch.setattr(rc, "make_client", lambda account: clients[account.name])
         monkeypatch.setattr(rc, "send_alert", lambda text: sent.append(text))
         pending = tmp_path / "pending"
@@ -164,10 +167,10 @@ class TestDailyRun:
         self.daily(env)
         assert env["clients"]["test1"].queries[0][1] == NOW - timedelta(days=7)
         [msg] = env["sent"]
-        assert "⚠️" in msg and "test1" in msg and "ETHUSDT" in msg and "1 筆" in msg and "補記" in msg
+        assert "⚠️" in msg and "test1" in msg and "ETHUSDT" in msg and "2 筆" in msg and "補記" in msg
         state = json.loads(env["state"].read_text())
         assert state["accounts"]["test1"]["last_end"] == NOW.isoformat()
-        assert [u["exec_ids"] for u in state["unrecorded"]] == [["m1"]]
+        assert [u["exec_ids"] for u in state["unrecorded"]] == [["m1", "m2"]]
 
         env["sent"].clear()
         later = NOW + timedelta(days=1)
@@ -175,7 +178,7 @@ class TestDailyRun:
         self.daily(env, later)
         assert env["clients"]["test1"].queries[0][1] == NOW  # 從上次對帳接著查
         assert env["sent"] == []  # 同一批不重發(這次也查不到 m1)
-        assert [u["exec_ids"] for u in json.loads(env["state"].read_text())["unrecorded"]] == [["m1"]]  # 還沒補,繼續列著
+        assert [u["exec_ids"] for u in json.loads(env["state"].read_text())["unrecorded"]] == [["m1", "m2"]]  # 還沒補,繼續列著
 
     def test_unrecorded_list_drops_what_has_been_backfilled(self, env, tmp_path):
         self.daily(env)
@@ -206,9 +209,48 @@ class TestDailyRun:
         assert any("ETHUSDT" in m for m in env["sent"])
 
 
-def test_unrecorded_trades_are_split_into_sessions_by_6_hour_gaps(db):
-    """同一個幣一週的手動交易不該是一組:兩筆成交間隔超過 6 小時就分成新的一組,每組各自補記。"""
-    client = FakeClient([ex("a1", "ETHUSDT", t(0)), ex("a2", "ETHUSDT", t(60)), ex("a3", "ETHUSDT", t(60 + 360)),
-                         ex("b1", "ETHUSDT", t(60 + 361 + 360))])
-    report = rc.reconcile_account(db, client, "MAIN", T0, NOW)
-    assert [u.exec_ids for u in report.unrecorded] == [["a1", "a2", "a3"], ["b1"]]
+class TestRounds:
+    """未記錄的交易照使用者的定義分組(2026-10-13):持倉 0 → 0 算一對交易,中間加倉幾次、隔多久都不切。
+    查詢起點的持倉 = 現在的持倉 − 這段期間的成交;起點不是 0 就自動往前查到持倉為 0 的那一刻。
+    還沒平倉的(進行中)先不列。"""
+
+    def test_users_example_is_one_round_even_with_long_gaps(self, db):
+        client = FakeClient([ex("b1", "ETHUSDT", t(0), qty=5), ex("b2", "ETHUSDT", t(60), qty=5),
+                             ex("s1", "ETHUSDT", t(60 + 600), side="Sell", qty=5),       # 隔 10 小時
+                             ex("s2", "ETHUSDT", t(60 + 600 + 480), side="Sell", qty=5)])  # 再隔 8 小時
+        [u] = rc.reconcile_account(db, client, "MAIN", T0, NOW).unrecorded
+        assert (u.first, u.last, u.count, u.exec_ids) == (t(0), t(1140), 4, ["b1", "b2", "s1", "s2"])
+
+    def test_back_to_zero_starts_a_new_round(self, db):
+        client = FakeClient([ex("a1", "ETHUSDT", t(0)), ex("a2", "ETHUSDT", t(10), side="Sell"),
+                             ex("c1", "ETHUSDT", t(20), side="Sell", qty=2), ex("c2", "ETHUSDT", t(30), qty=2)])
+        assert [u.exec_ids for u in rc.reconcile_account(db, client, "MAIN", T0, NOW).unrecorded] == [
+            ["a1", "a2"], ["c1", "c2"]]
+
+    def test_flip_through_zero_splits_the_fill(self, db):
+        """多 1 → 一筆賣 2 = 平多 + 開空:同一筆成交屬於兩對,兩對都列(補記時間各自涵蓋它)"""
+        client = FakeClient([ex("f1", "ETHUSDT", t(0)), ex("f2", "ETHUSDT", t(10), side="Sell", qty=2),
+                             ex("f3", "ETHUSDT", t(20))])
+        assert [(u.first, u.last) for u in rc.reconcile_account(db, client, "MAIN", T0, NOW).unrecorded] == [
+            (t(0), t(10)), (t(10), t(20))]
+
+    def test_open_round_at_the_end_is_not_listed_yet(self, db):
+        client = FakeClient([ex("a1", "ETHUSDT", t(0)), ex("a2", "ETHUSDT", t(10), side="Sell"),
+                             ex("o1", "ETHUSDT", t(20))], positions={"ETHUSDT": 1.0})
+        report = rc.reconcile_account(db, client, "MAIN", T0, NOW)
+        assert [u.exec_ids for u in report.unrecorded] == [["a1", "a2"]]
+        assert [(o.symbol, o.position) for o in report.open_rounds] == [("ETHUSDT", 1.0)]
+
+    def test_round_that_started_before_the_window_is_found_by_looking_back(self, db):
+        """查 T0 之後:T0 時持倉已經是 +3(10 天前買的)→ 往前查到買的那一筆,這一對從那裡開始"""
+        early = T0 - timedelta(days=10)
+        client = FakeClient([ex("old", "ETHUSDT", early, qty=3), ex("s1", "ETHUSDT", t(30), side="Sell", qty=3),
+                             ex("n1", "ETHUSDT", t(60)), ex("n2", "ETHUSDT", t(70), side="Sell")])
+        report = rc.reconcile_account(db, client, "MAIN", T0, NOW)
+        assert [(u.first, u.exec_ids) for u in report.unrecorded] == [(early, ["old", "s1"]), (t(60), ["n1", "n2"])]
+
+    def test_round_partly_recorded_is_not_listed(self, db, tmp_path):
+        """一對交易裡全部成交都已有紀錄 → 不列"""
+        client = FakeClient([ex("r1", "ETHUSDT", t(5)), ex("r2", "ETHUSDT", t(10), side="Sell")])
+        fs.backfill(db, client, "ETHUSDT", T0, t(20), NOW, account="MAIN", pending_dir=tmp_path)
+        assert rc.reconcile_account(db, client, "MAIN", T0, NOW).unrecorded == []
