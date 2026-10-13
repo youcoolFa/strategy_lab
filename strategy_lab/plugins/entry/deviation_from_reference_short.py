@@ -6,28 +6,17 @@ docs/ARCHITECTURE.md §6.11。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from strategy_lab.interfaces import StrategyContext
+from strategy_lab.plugins.entry.deviation_from_reference import (  # noqa: F401  compute_short_entry_price 舊匯入路徑
+    DeviationFromReferenceEntry,
+    compute_short_entry_price,
+)
 from strategy_lab.registry import register
-from strategy_lab.rules.base import Condition
-from strategy_lab.rules.conditions import PriceAboveReference
-
-
-def compute_short_entry_price(reference_price: float, deviation_pct: float) -> float:
-    """compute_entry_price() 的鏡像版本:往上算,不是往下算。"""
-    return round(reference_price * (1 + deviation_pct / 100), 2)
 
 
 @register("entry", "deviation_from_reference_short")
 @dataclass
-class ShortDeviationFromReferenceEntry:
-    deviation_pct: float
-    rule: Condition = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.rule = PriceAboveReference(self.deviation_pct)
-
-    def entry_price(self, ctx: StrategyContext) -> float:
-        assert ctx.origin_price is not None, "進場前必須先設定 origin_price"
-        return compute_short_entry_price(ctx.origin_price, self.deviation_pct)
+class ShortDeviationFromReferenceEntry(DeviationFromReferenceEntry):
+    """舊名,行為跟 deviation_from_reference 完全一樣:方向看 ctx.direction(2026-10-12 起每個策略都能做多做空,
+    weekend_short_* 的 YAML 照舊能用;設定檔把方向改成 long 就變成跌破買進)。"""

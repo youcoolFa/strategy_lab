@@ -5,12 +5,14 @@ tests/unit/test_rules_composite.py。"""
 
 from datetime import datetime, timezone
 
+import pytest
+
 from strategy_lab.interfaces import StrategyContext
 from strategy_lab.plugins.exit.bracket_tp_sl import BracketTPSLExit
 from strategy_lab.plugins.exit.max_hold_duration import MaxHoldDurationExit
 from strategy_lab.plugins.exit.return_to_reference import ReturnToReferenceExit
 from strategy_lab.plugins.exit.return_to_reference_short import ShortReturnToReferenceExit
-from strategy_lab.rules.composite import Or
+from strategy_lab.rules.composite import ByDirection, Or
 from strategy_lab.rules.conditions import (
     MaxDurationElapsed,
     PriceAtOrAboveReference,
@@ -36,7 +38,7 @@ def make_ctx(**overrides):
 class TestReturnToReferenceExit:
     def test_rule_is_price_at_or_above_reference(self):
         plugin = ReturnToReferenceExit()
-        assert isinstance(plugin.rule, PriceAtOrAboveReference)
+        assert plugin.rule == ByDirection(PriceAtOrAboveReference(), PriceAtOrBelowReference())
 
     def test_exit_price_is_origin_price(self):
         plugin = ReturnToReferenceExit()
@@ -49,8 +51,11 @@ class TestShortReturnToReferenceExit:
     docs/ARCHITECTURE.md §6.11。"""
 
     def test_rule_is_price_at_or_below_reference(self):
+        """舊名,跟 return_to_reference 一樣,方向看 ctx.direction。"""
         plugin = ShortReturnToReferenceExit()
-        assert isinstance(plugin.rule, PriceAtOrBelowReference)
+        assert plugin.rule == ByDirection(PriceAtOrAboveReference(), PriceAtOrBelowReference())
+        assert plugin.rule.evaluate(make_ctx(price=990.0, origin_price=1000.0, direction="short"))
+        assert not plugin.rule.evaluate(make_ctx(price=990.0, origin_price=1000.0))
 
     def test_exit_price_is_origin_price(self):
         plugin = ShortReturnToReferenceExit()
@@ -61,10 +66,19 @@ class TestShortReturnToReferenceExit:
 class TestBracketTPSLExit:
     def test_rule_is_or_of_take_profit_and_stop_loss(self):
         plugin = BracketTPSLExit(take_profit_pct=1.0, stop_loss_pct=0.5)
-        assert isinstance(plugin.rule, Or)
-        tp, sl = plugin.rule.conditions
-        assert isinstance(tp, PriceChangeFromEntry) and (tp.threshold_pct, tp.direction) == (1.0, "up")
-        assert isinstance(sl, PriceChangeFromEntry) and (sl.threshold_pct, sl.direction) == (0.5, "down")
+        assert plugin.rule == ByDirection(
+            Or(PriceChangeFromEntry(1.0, "up"), PriceChangeFromEntry(0.5, "down")),
+            Or(PriceChangeFromEntry(1.0, "down"), PriceChangeFromEntry(0.5, "up")),
+        )
+
+    def test_short_take_profit_is_below_and_stop_loss_above(self):
+        plugin = BracketTPSLExit(take_profit_pct=1.0, stop_loss_pct=0.5)
+        short = dict(entry_price=1000.0, direction="short")
+        assert plugin.rule.evaluate(make_ctx(price=990.0, **short))  # 跌 1% 停利
+        assert plugin.rule.evaluate(make_ctx(price=1005.0, **short))  # 漲 0.5% 停損
+        assert not plugin.rule.evaluate(make_ctx(price=1003.0, **short))
+        planned = plugin.planned_exit(make_ctx(price=1000.0, **short))
+        assert planned.take_profit == pytest.approx(990.0) and planned.stop_loss == pytest.approx(1005.0)
 
     def test_exit_price_is_current_price(self):
         plugin = BracketTPSLExit(take_profit_pct=1.0, stop_loss_pct=0.5)

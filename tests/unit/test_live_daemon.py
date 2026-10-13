@@ -140,14 +140,23 @@ def test_default_command_runs_live_main_with_the_config():
     assert cmd[1:] == ["-m", "strategy_lab.live.main", "--config", "/abs/live_btc_band.yaml"]
 
 
-class TestDetach:
+class TestHandover:
     def test_old_program_without_handler_is_ended_and_pid_file_removed(self, env):
-        """舊版程式沒裝 SIGUSR1 處理器 → 預設動作是直接結束(不收尾),正好是脫離要的效果。"""
+        """舊版程式沒裝 SIGUSR1 處理器 → 預設動作是直接結束(不收尾),正好是交接要的效果。"""
         config, run_dir, log_dir, started = env
         info = start(config, run_dir, log_dir, started)
-        message = daemon.detach(config, run_dir=run_dir, timeout=10)
-        assert "已脫離" in message and not daemon.is_alive(info.pid) and not info.pid_file.exists()
+        message = daemon.handover(config, run_dir=run_dir, timeout=10)
+        assert "已交接" in message and not daemon.is_alive(info.pid) and not info.pid_file.exists()
 
     def test_not_running_is_reported(self, env):
         config, run_dir, _, _ = env
-        assert "沒有在跑" in daemon.detach(config, run_dir=run_dir, timeout=1)
+        assert "沒有在跑" in daemon.handover(config, run_dir=run_dir, timeout=1)
+
+
+@pytest.mark.parametrize("action", ["handover", "detach"])
+def test_cli_handover_and_old_detach_name_both_work(action, monkeypatch, capsys):
+    """2026-10-12 detach 改名 handover(交接);舊指令名 detach 一樣能用。"""
+    calls = []
+    monkeypatch.setattr(daemon, "handover", lambda config: calls.append(config) or "已交接")
+    assert daemon.main([action, "--config", "x.yaml"]) == 0
+    assert calls == ["x.yaml"] and "已交接" in capsys.readouterr().out

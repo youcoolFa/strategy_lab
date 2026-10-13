@@ -168,8 +168,8 @@ def stop(config: os.PathLike, run_dir: Path = RUN_DIR, timeout: float = 90.0) ->
     )
 
 
-def detach(config: os.PathLike, run_dir: Path = RUN_DIR, timeout: float = 30.0) -> str:
-    """脫離:送 SIGUSR1,程式直接結束、**不收尾**(不取消掛單、不平倉),掛單與持倉留在交易所上,
+def handover(config: os.PathLike, run_dir: Path = RUN_DIR, timeout: float = 30.0) -> str:
+    """交接:送 SIGUSR1,程式直接結束、**不收尾**(不取消掛單、不平倉),掛單與持倉留在交易所上,
     給下一次啟動用 adopt_existing_position 接手。新版程式在這個 tick 結束後退出並發 Telegram;
     還沒裝 SIGUSR1 處理器的舊版程式,預設動作就是立刻結束,效果一樣。"""
     config = Path(config).resolve()
@@ -188,9 +188,12 @@ def detach(config: os.PathLike, run_dir: Path = RUN_DIR, timeout: float = 30.0) 
     while time.monotonic() < deadline:
         if not is_alive(pid):
             pid_file.unlink(missing_ok=True)
-            return f"{config.stem} 已脫離(PID {pid} 已結束,沒有收尾:掛單與持倉保留在交易所)"
+            return f"{config.stem} 已交接(PID {pid} 已結束,沒有收尾:掛單與持倉保留在交易所)"
         time.sleep(0.5)
-    raise DaemonError(f"送出脫離訊號 {timeout:.0f} 秒後 PID {pid} 還沒結束,請看 log")
+    raise DaemonError(f"送出交接訊號 {timeout:.0f} 秒後 PID {pid} 還沒結束,請看 log")
+
+
+detach = handover  # 2026-10-12 改名前的舊名
 
 
 def status(config: os.PathLike, run_dir: Path = RUN_DIR, log_dir: Path = LOG_DIR) -> str:
@@ -203,8 +206,9 @@ def status(config: os.PathLike, run_dir: Path = RUN_DIR, log_dir: Path = LOG_DIR
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="在背景啟動/停止 strategy_lab live runner")
-    parser.add_argument("action", choices=["start", "stop", "detach", "status"],
-                        help="stop = 收尾(取消掛單、市價平倉)後結束;detach = 直接結束不收尾,掛單與持倉留給下次接手")
+    parser.add_argument("action", choices=["start", "stop", "handover", "detach", "status"],
+                        help="stop = 收尾(取消掛單、市價平倉)後結束;handover = 交接:直接結束不收尾,掛單與持倉留給下次接手"
+                             "(detach 是 2026-10-12 改名前的舊名,一樣能用)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="執行設定檔,預設 live_execution_config.yaml")
     args = parser.parse_args(argv)
 
@@ -216,8 +220,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"停止: python -m strategy_lab.live.daemon stop --config {args.config}")
         elif args.action == "stop":
             print(stop(args.config))
-        elif args.action == "detach":
-            print(detach(args.config))
+        elif args.action in ("handover", "detach"):
+            print(handover(args.config))
         else:
             print(status(args.config))
     except DaemonError as e:

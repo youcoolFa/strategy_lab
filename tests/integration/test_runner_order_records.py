@@ -132,3 +132,27 @@ class TestHoldSeconds:
 
         [forced] = [r for r in records if r.purpose == "forced_close" and r.status == "closed"]
         assert forced.hold_seconds == (cleanup_at - at(1)).total_seconds()
+
+
+class TestEveryStrategyCanFlipDirection:
+    """weekend_short_breakout 的 plugin(舊名 *_short)設定成 long:跌破買進、回到 origin 賣出(2026-10-12)。"""
+
+    def test_short_named_plugins_run_long(self):
+        from strategy_lab.plugins.entry.deviation_from_reference_short import ShortDeviationFromReferenceEntry
+        from strategy_lab.plugins.exit.return_to_reference_short import ShortReturnToReferenceExit
+
+        records = []
+        runner = StrategyRunner(
+            entry=ShortDeviationFromReferenceEntry(deviation_pct=1.0), exit=ShortReturnToReferenceExit(),
+            time_window=WeeklyWindow(end_weekday=0, end_time="06:00", cleanup_buffer_minutes=5),
+            order_qty=1.0, direction="long", on_order=records.append,
+        )
+        runner.start(NOW, price=1000.0)
+        runner.tick(at(0), 1005.0)  # 漲:做多不進場
+        assert records == []
+        runner.tick(at(1), 989.0)  # 跌破 1% → 掛買 990
+        runner.tick(at(2), 989.0)  # 成交
+        runner.tick(at(3), 1001.0)  # 回到 origin → 賣出
+        runner.tick(at(4), 1001.0)
+        assert [(r.side, r.status) for r in records if r.status == "closed"] == [("Buy", "closed"), ("Sell", "closed")]
+        assert runner.trades[0].pnl > 0

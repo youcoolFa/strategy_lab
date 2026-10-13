@@ -272,17 +272,21 @@ def db_url() -> Optional[str]:
     return os.getenv("TRADING_DB_URL")
 
 
+UI_DEFAULT_ACCOUNT = "main"  # 頁面上帳戶選單預設選這個(2026-10-12);設定檔沒寫 account 仍是 test1(DEFAULT_ACCOUNT)
+
+
 def list_accounts() -> List[str]:
-    """.env 裡的帳戶名稱;預設帳戶 test1 永遠排第一(它可以用原本的 BYBIT_API_KEY)。"""
+    """.env 裡的帳戶名稱,頁面選單用:main 排第一(預設選它),接著 test1(可以用原本的 BYBIT_API_KEY,
+    .env 沒寫也一定有),其他照 .env 順序。.env 沒有 main 就是 test1 排第一。"""
     from strategy_lab.live import accounts
 
     try:
         found = accounts.list_accounts()
     except OSError:  # 沒有 .env
         found = []
-    rest = [a for a in found if a.upper() != DEFAULT_ACCOUNT.upper()]
-    first = next((a for a in found if a.upper() == DEFAULT_ACCOUNT.upper()), DEFAULT_ACCOUNT)
-    return [first, *rest]
+    test1 = next((a for a in found if a.upper() == DEFAULT_ACCOUNT.upper()), DEFAULT_ACCOUNT)
+    names = [test1, *(a for a in found if a.upper() != DEFAULT_ACCOUNT.upper())]
+    return sorted(names, key=lambda a: a.upper() != UI_DEFAULT_ACCOUNT.upper())  # 穩定排序:只把 main 移到最前面
 
 
 def make_client(account: Optional[str] = None) -> Any:

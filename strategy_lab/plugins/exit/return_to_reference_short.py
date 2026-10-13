@@ -5,25 +5,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from strategy_lab.interfaces import PlannedExit, StrategyContext
+from strategy_lab.plugins.exit.return_to_reference import ReturnToReferenceExit
 from strategy_lab.registry import register
-from strategy_lab.rules.base import Condition
-from strategy_lab.rules.conditions import PriceAtOrBelowReference
 
 
 @register("exit", "return_to_reference_short")
 @dataclass
-class ShortReturnToReferenceExit:
-    rule: Condition = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.rule = PriceAtOrBelowReference()
-
-    def exit_price(self, ctx: StrategyContext) -> float:
-        assert ctx.origin_price is not None, "出場前必須先設定 origin_price"
-        return ctx.origin_price
-
-    def planned_exit(self, ctx: StrategyContext) -> PlannedExit:
-        return PlannedExit(take_profit=self.exit_price(ctx), stop_loss=None)
+class ShortReturnToReferenceExit(ReturnToReferenceExit):
+    """舊名,行為跟 return_to_reference 完全一樣:方向看 ctx.direction(2026-10-12)。"""

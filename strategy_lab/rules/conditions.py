@@ -77,10 +77,12 @@ class PriceAtOrBelowReference:
 
 @dataclass
 class MovingAverageCross:
-    """快線由下往上穿越慢線,剛發生的那一刻(不含已經穿越過、持續在上方的情況)。"""
+    """快線由下往上穿越慢線,剛發生的那一刻(不含已經穿越過、持續在上方的情況)。
+    downward=True 是鏡像:快線由上往下穿越慢線(做空用)。"""
 
     fast_window: int
     slow_window: int
+    downward: bool = False
 
     def evaluate(self, ctx: StrategyContext) -> bool:
         history = ctx.price_history
@@ -92,6 +94,8 @@ class MovingAverageCross:
         slow_prev = simple_moving_average(history[:-1], self.slow_window)
         if None in (fast_now, slow_now, fast_prev, slow_prev):
             return False
+        if self.downward:
+            return fast_prev >= slow_prev and fast_now < slow_now
         return fast_prev <= slow_prev and fast_now > slow_now
 
 
