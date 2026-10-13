@@ -9,7 +9,7 @@ time_window(排程時間窗)、kill_switch(市場行為觸發的終止條件,選
 `rules/`、`dsl/`、`engine/`)只對內建的模擬交易所(paper broker)與合成
 價格產生器運作,不連任何真實交易所。
 
-**現況(2026-10-10)**:另外疊加的 `strategy_lab/live/` 已經在 Bybit
+**現況(2026-10-14;目前沒有策略在跑,SUI 10-12 已收尾 §6.32)**:另外疊加的 `strategy_lab/live/` 已經在 Bybit
 mainnet 小額帳戶實盤(分注策略 `scale_in_ladder`,preflight → 背景 daemon),
 交易紀錄寫進共用的 `trading` PostgreSQL(§6.21),Telegram 通知(§6.24);
 另有不用策略 YAML、只記帳的 free style(§6.27)、每注持倉計時(§6.28),
@@ -2056,6 +2056,15 @@ upsert 不重複),檔案改名 `.jsonl.done`;再跑 `setup_db` 確認 account = 
 **手續費點數**(同一天,使用者要求):上方第 4 個數字「手續費點數(ETHUSDT,maker 買+賣)」= ETHUSDT 現價 × 所選帳戶的
 maker 費率 × 2(買一次 + 賣一次),例 2500 × 0.02% × 2 = 1.00 點 → 用 maker 開倉、maker 平倉,價格要往有利方向走這麼多點
 才賺回手續費。`data.fee_points`(只讀:`get_last_price` + `get_fee_rates`),頁面 30 秒快取,查不到顯示「—」。
+
+**費率事實(10-14 查證,Bybit 說明中心「Trading Fee Structure」2026-09-02 版 + 實際成交)**:
+- 手續費 = 成交價 × 數量 × 費率,**跟槓桿無關**:MAIN 近 14 天 137 筆成交反算,maker 全部 0.02%、taker 全部 0.055%。
+  提高槓桿只會讓手續費佔保證金的比例變高,不會變便宜。
+- 費率由 VIP 等級決定(資產餘額或近 30 天交易量,取較高的等級;主帳戶 + 子帳戶交易量合併;資金費不算交易量;
+  每天 UTC 7:00 更新;依下單當時等級):VIP 0 = 0.02% / 0.055%(兩個帳戶目前都是)、VIP 1 = 0.018% / 0.04%
+  (資產 ≥ 10 萬 USD 或 30 天合約量 ≥ 1,000 萬)、VIP 2 = 0.016% / 0.0375%(≥ 25 萬 / ≥ 2,500 萬)。
+  10-14 時 30 天合約量合計約 46.7 萬 USD。
+- 省手續費最有效的是多用 maker(taker 是 maker 的 2.75 倍)。手續費點數會自動用帳戶的實際費率,升 VIP 後不用改程式。
 
 **表格改用 AG Grid 免費版(Community)**(同一天,使用者要「像 Excel 一樣點欄位名稱再選功能」;`streamlit-aggrid==1.2.1.post2`,
 裝在 strategy_lab 的 `.venv`、寫進 requirements.txt):點欄位標題旁的圖示 → 排序 / 篩選(文字「包含 / 等於」、
