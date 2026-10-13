@@ -385,3 +385,106 @@ def test_backfill_summary_names_the_strategy_and_says_backfill(db, tmp_path):
                          strategy_name="sat_weekend", pending_dir=tmp_path)
     text = fs.summary_message(result)
     assert text.splitlines()[0] == "📝 sat_weekend 補記|ETHUSDT|帳戶 test1"
+
+
+class TestBackfillUserFields:
+    """補記時可以事後填:預計持倉時間、方向、備註(2026-10-13,使用者選 B:只寫自己確定的值)。
+    都是選填;填了寫進 sl_run(預計持倉時間也寫到每一輪 sl_event),config.user_filled 標明是事後補填。"""
+
+    NOW = t(24 * 60)
+
+    def write(self, db, tmp_path, **k):
+        orders, executions = two_round_trips()
+        return fs.backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", T0, t(90), self.NOW,
+                           pending_dir=tmp_path, **k)
+
+    def test_filled_values_are_written_and_marked(self, db, tmp_path):
+        self.write(db, tmp_path, expected_hold=timedelta(hours=4), direction="both", note="  週末試手感  ")
+        [run] = rows(db, SlRun)
+        assert (run.expected_hold_seconds, run.direction, run.note) == (4 * 3600, "both", "週末試手感")
+        assert run.config["user_filled"] == ["expected_hold", "direction", "note"]
+        assert {e.expected_hold_seconds for e in rows(db, SlEvent)} == {4 * 3600}
+
+    def test_nothing_filled_stays_empty(self, db, tmp_path):
+        self.write(db, tmp_path)
+        [run] = rows(db, SlRun)
+        assert (run.expected_hold_seconds, run.direction, run.note) == (None, "NA", None)
+        assert run.config["user_filled"] == []
+
+    @pytest.mark.parametrize("k,match", [
+        ({"direction": "up"}, "方向"),
+        ({"expected_hold": timedelta(0)}, "預計持倉時間"),
+        ({"note": "x" * 501}, "備註"),
+    ])
+    def test_bad_values_are_refused_at_preview(self, db, k, match):
+        orders, executions = two_round_trips()
+        with pytest.raises(fs.FreeStyleError, match=match):
+            fs.preview_backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", T0, t(90), self.NOW, **k)
+
+    @pytest.mark.parametrize("text,expected", [("90m", timedelta(minutes=90)), ("4h", timedelta(hours=4)),
+                                               ("1.5d", timedelta(days=1.5)), ("", None)])
+    def test_parse_hold(self, text, expected):
+        assert fs.parse_hold(text) == expected
+
+    def test_parse_hold_rejects_garbage(self):
+        with pytest.raises(fs.FreeStyleError, match="預計持倉時間"):
+            fs.parse_hold("4 hours")
+
+    def test_cli_passes_the_fields(self, db, monkeypatch, tmp_path):
+        from strategy_lab.live import accounts
+
+        env = tmp_path / ".env"
+        env.write_text("BYBIT_API_KEY=k\nBYBIT_API_SECRET=s\n")
+        monkeypatch.setattr(accounts, "ENV_PATH", env)
+        monkeypatch.setattr(fs, "load_dotenv", lambda *a, **k: None)
+        monkeypatch.setenv("TRADING_DB_URL", db)
+        seen = {}
+        monkeypatch.setattr(fs, "backfill", lambda *a, **k: seen.update(k) or "RESULT")
+        monkeypatch.setattr(fs, "summary_message", lambda r: "總結")
+        monkeypatch.setattr(fs, "send_telegram", lambda text: None)
+        assert fs.main(["backfill", "--symbol", "eth", "--start", "2026-10-09 10:00", "--end", "2026-10-09 11:30",
+                        "--hold", "4h", "--direction", "long", "--note", "測試"]) == 0
+        assert (seen["expected_hold"], seen["direction"], seen["note"]) == (timedelta(hours=4), "long", "測試")
+
+
+class TestSegments:
+    """補記的紅字(2026-10-13):同帳戶同幣種已有的紀錄時段(不分策略),開始 / 結束落在哪一段就標「重疊」。
+    只查 DB,不碰 Bybit,所以畫面一改就能馬上顯示。"""
+
+    NOW = t(24 * 60)
+
+    def setup_runs(self, db, tmp_path):
+        orders, executions = two_round_trips()
+        fs.backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", T0, t(90), self.NOW,
+                    pending_dir=tmp_path)  # 已結束:T0 → t(90)
+        fs.start(db, FakeClient(), "ETHUSDT", t(600), pending_dir=tmp_path)  # 進行中:t(600) → 現在
+
+    def test_segments_of_this_account_and_symbol_oldest_first(self, db, tmp_path):
+        self.setup_runs(db, tmp_path)
+        fs.start(db, FakeClient(), "BTCUSDT", t(5), pending_dir=tmp_path)  # 別的幣
+        segs = fs.existing_segments(db, "ETHUSDT", None, self.NOW)
+        assert [(s.strategy_name, s.start, s.end, s.running) for s in segs] == [
+            ("free style", T0, t(90), False), ("free style", t(600), self.NOW, True)]
+        assert fs.existing_segments(db, "ETHUSDT", "MAIN", self.NOW) == []  # 別的帳戶
+
+    def test_marks_start_end_and_windows_that_swallow_a_segment(self, db, tmp_path):
+        self.setup_runs(db, tmp_path)
+        segs = fs.existing_segments(db, "ETHUSDT", None, self.NOW)
+        assert fs.overlap_marks(segs, t(30), t(120)) == {"start": segs[0], "end": None, "inside": []}
+        assert fs.overlap_marks(segs, t(100), t(700)) == {"start": None, "end": segs[1], "inside": []}
+        assert fs.overlap_marks(segs, t(95), t(500)) == {"start": None, "end": None, "inside": []}
+        assert fs.overlap_marks(segs, t(-10), t(100)) == {"start": None, "end": None, "inside": [segs[0]]}
+        assert fs.overlap_marks(segs, t(90), t(600)) == {"start": None, "end": None, "inside": []}  # 剛好接上不算
+
+    def test_cli_symbol_only_needs_the_coin(self, db, monkeypatch, tmp_path):
+        from strategy_lab.live import accounts
+
+        env = tmp_path / ".env"
+        env.write_text("BYBIT_API_KEY=k\nBYBIT_API_SECRET=s\n")
+        monkeypatch.setattr(accounts, "ENV_PATH", env)
+        monkeypatch.setattr(fs, "load_dotenv", lambda *a, **k: None)
+        monkeypatch.setenv("TRADING_DB_URL", db)
+        seen = {}
+        monkeypatch.setattr(fs, "start", lambda db_, client, symbol, when, **k: seen.update(symbol=symbol) or "run-1")
+        assert fs.main(["start", "--symbol", "eth"]) == 0
+        assert seen["symbol"] == "ETHUSDT"

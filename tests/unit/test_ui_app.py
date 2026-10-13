@@ -45,6 +45,8 @@ class FakeClient:
         return []
 
 
+UNRECORDED = []
+
 SUI_ROW = {"kind": "strategy", "config": "live_execution_config", "account": "test1", "symbol": "SUIUSDT", "strategy": "scale_in_ladder",
            "mode": "🔴 實盤", "started_at": NOW}
 ETH_ROW = {"kind": "free style", "config": None, "account": "test1", "symbol": "ETHUSDT", "strategy": "free style",
@@ -86,6 +88,11 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(fs, "summary_message", lambda r: f"🏁 free style 結束|{r}")
     monkeypatch.setattr(fs, "send_telegram", lambda text: calls.append(("telegram", text)))
 
+    from strategy_lab.live import reconcile as rc
+
+    monkeypatch.setattr(rc, "load_unrecorded", lambda *a: list(UNRECORDED))
+    monkeypatch.setattr(rc, "last_run", lambda *a: None)
+    monkeypatch.setattr(rc, "run_daily", lambda db, now, **k: calls.append(("reconcile",)) or [])
     monkeypatch.setattr(actions, "daemon_running", lambda path: Path(path).name == "live_execution_config.yaml")
     monkeypatch.setattr(actions, "prepare_config", lambda root_, strategy, symbol, settings, params, **k: calls.append(
         ("prepare", strategy, symbol, settings, params)) or calls.append(("prepare_account", k.get("account"))) or (root / f"live_{Path(strategy).stem}_{symbol.lower()}.yaml"))
@@ -130,7 +137,7 @@ def test_refresh_queries_bybit_again(fake, monkeypatch):
 
 def test_tabs(fake):
     at = run()
-    assert [t.label for t in at.tabs] == ["總覽", "交易紀錄", "Log", "策略"]
+    assert [t.label for t in at.tabs] == ["總覽", "交易紀錄", "Log", "策略", "補記"]
 
 
 # ---------------------------------------------------------------- 策略:選策略
@@ -483,15 +490,21 @@ def test_free_style_on_many_accounts_starts_each(fake):
 def backfill_calls(fake, monkeypatch):
     calls, _ = fake
 
-    def preview(db, client, symbol, start, end, now, account=None, strategy_name="free style"):
+    def preview(db, client, symbol, start, end, now, account=None, strategy_name="free style", **user):
         calls.append(("bf_preview", symbol, account, strategy_name, start, end))
+        calls.append(("bf_user", user))
         return fs.BackfillPreview(symbol=symbol, account=account, strategy_name=strategy_name, start=start, end=end,
                                   orders=5, events=2, gross_pnl=3.0, trade_fees=0.64, open_position=0, warnings=[])
 
     monkeypatch.setattr(fs, "preview_backfill", preview)
+    monkeypatch.setattr(fs, "existing_segments", lambda db, symbol, account, now: list(SEGMENTS))
     monkeypatch.setattr(fs, "backfill", lambda db, client, symbol, start, end, now, **k: calls.append(
-        ("bf_write", symbol, k.get("account"), k.get("strategy_name"))) or "RESULT")
+        ("bf_write", symbol, k.get("account"), k.get("strategy_name"))) or calls.append(
+        ("bf_write_user", {x: k.get(x) for x in ("expected_hold", "direction", "note")})) or "RESULT")
     return calls
+
+
+SEGMENTS = []
 
 
 def fill_backfill(at, name="sat_weekend"):
@@ -544,3 +557,113 @@ def test_backfill_error_is_shown(backfill_calls, monkeypatch):
     at = fill_backfill(run())
     at.button(key="bf_preview").click().run()
     assert any("重疊" in str(e.value) for e in at.error) and "bf_write" not in buttons(at)
+
+
+def test_backfill_lives_in_its_own_tab_and_free_style_start_does_not_say_backfill(fake):
+    """2026-10-13 使用者分不清「現在開始記錄」和「補回過去」:補記放獨立分頁,free style 開始時間不叫「補記」"""
+    at = run()
+    backfill_tab, strategy_tab = at.tabs[4], at.tabs[3]
+    assert "bf_preview" in [b.key for b in backfill_tab.button]
+    assert "bf_preview" not in [b.key for b in strategy_tab.button]
+    at.radio(key="new_strategy").set_value("free style").run()
+    labels = [d.label for d in at.date_input if d.key.startswith("fs_")] + \
+             [t.label for t in at.time_input if t.key.startswith("fs_")]
+    assert labels and not any("補記" in label for label in labels)
+
+
+def test_backfill_optional_fields_default_to_empty(backfill_calls):
+    calls = backfill_calls
+    at = fill_backfill(run())
+    at.button(key="bf_preview").click().run()
+    [user] = [c[1] for c in calls if c[0] == "bf_user"]
+    assert user == {"expected_hold": None, "direction": None, "note": None}
+
+
+def test_backfill_passes_hold_direction_and_note(backfill_calls):
+    calls = backfill_calls
+    at = fill_backfill(run())
+    at.number_input(key="bf_hold_value").set_value(4.0)
+    at.selectbox(key="bf_hold_unit").set_value("小時")
+    at.selectbox(key="bf_direction").set_value("short")
+    at.text_area(key="bf_note").input("週末試手感").run()
+    at.button(key="bf_preview").click().run()
+    at.checkbox(key="bf_confirm").check()
+    at.button(key="bf_write").click().run()
+    expected = {"expected_hold": timedelta(hours=4), "direction": "short", "note": "週末試手感"}
+    assert [c[1] for c in calls if c[0] == "bf_user"] == [expected]
+    assert [c[1] for c in calls if c[0] == "bf_write_user"] == [expected] and not at.exception
+
+
+@pytest.fixture
+def busy(backfill_calls):
+    """MAIN 的 ETHUSDT 在 10-09 10:30 → 11:00(HKT)已經有一段 scale_in_ladder。"""
+    seg = fs.Segment("r1", "scale_in_ladder", datetime(2026, 10, 9, 2, 30, tzinfo=timezone.utc),
+                     datetime(2026, 10, 9, 3, 0, tzinfo=timezone.utc), False)
+    SEGMENTS[:] = [seg]
+    yield backfill_calls
+    SEGMENTS.clear()
+
+
+def test_backfill_lists_existing_segments_and_marks_overlap_in_red(busy):
+    at = fill_backfill(run())  # 10:00 → 11:30,把 10:30 → 11:00 整段包住
+    page = " ".join(str(c.value) for c in at.caption) + " ".join(str(m.value) for m in at.markdown)
+    assert "scale_in_ladder 10-09 10:30 → 10-09 11:00" in page
+    assert any("重疊" in str(e.value) for e in at.error)
+    assert at.button(key="bf_preview").disabled
+
+
+def test_backfill_start_inside_a_segment_is_marked_on_the_start_field(busy):
+    from datetime import time as dtime
+
+    at = fill_backfill(run())
+    at.time_input(key="bf_start_time").set_value(dtime(10, 45))
+    at.time_input(key="bf_end_time").set_value(dtime(12, 0)).run()
+    errors = [str(e.value) for e in at.error]
+    assert any("開始重疊" in e for e in errors) and not any("結束重疊" in e for e in errors)
+
+
+def test_backfill_free_window_can_be_previewed(busy):
+    from datetime import time as dtime
+
+    at = fill_backfill(run())
+    at.time_input(key="bf_start_time").set_value(dtime(11, 0))
+    at.time_input(key="bf_end_time").set_value(dtime(12, 0)).run()  # 剛好接在後面
+    assert not any("重疊" in str(e.value) for e in at.error)
+    assert not at.button(key="bf_preview").disabled
+
+
+# ---------------------------------------------------------------- 每日對帳(2026-10-13)
+
+@pytest.fixture
+def unrecorded(fake):
+    from strategy_lab.live import reconcile as rc
+
+    UNRECORDED[:] = [rc.Unrecorded("MAIN", "ETHUSDT", datetime(2026, 10, 9, 11, 10, 30, tzinfo=timezone.utc),
+                                   datetime(2026, 10, 9, 13, 51, 5, tzinfo=timezone.utc), 9, ["x"] * 9)]
+    yield fake
+    UNRECORDED.clear()
+
+
+def test_overview_lists_unrecorded_trades(unrecorded):
+    at = run()
+    tables = " ".join(df.value.to_csv() for df in at.dataframe)
+    assert "MAIN" in tables and "10-09 19:10" in tables and "10-09 21:51" in tables
+
+
+def test_prefill_fills_the_backfill_form_around_the_trades(unrecorded):
+    from datetime import date, time as dtime
+
+    at = run()
+    at.button(key="unrec_fill_0").click().run()
+    assert at.selectbox(key="bf_account").value == "MAIN"
+    assert at.text_input(key="bf_symbol").value == "ETH"
+    assert (at.date_input(key="bf_start_date").value, at.time_input(key="bf_start_time").value) == (date(2026, 10, 9), dtime(19, 10))
+    assert (at.date_input(key="bf_end_date").value, at.time_input(key="bf_end_time").value) == (date(2026, 10, 9), dtime(21, 52))
+    assert not at.exception
+
+
+def test_reconcile_now_button(fake):
+    calls, _ = fake
+    at = run()
+    at.button(key="reconcile_now").click().run()
+    assert ("reconcile",) in calls and not at.exception

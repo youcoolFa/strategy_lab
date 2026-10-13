@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -57,7 +57,39 @@ if top_r.button("🔄 重新整理", key="refresh"):
     st.cache_data.clear()
     st.rerun()
 
-tab_overview, tab_records, tab_log, tab_strategy = st.tabs(["總覽", "交易紀錄", "Log", "策略"])
+def _unrecorded_section():
+    """每日對帳(2026-10-13)留下、還沒補記的成交;一鍵帶入「補記」分頁的帳戶、幣種、時間。"""
+    from strategy_lab.live import reconcile as rc
+
+    st.subheader("未記錄的交易(每日對帳,08:00 HKT)")
+    last = rc.last_run()
+    left, right = st.columns([4, 1])
+    left.caption(f"上次對帳:{hkt(last) if last else '還沒跑過'}。Bybit 上有成交、DB 卻沒有任何紀錄的時段"
+                 "(全手動交易沒記);策略紀錄漏記的會自動補回。")
+    if right.button("🔄 立即對帳", key="reconcile_now"):
+        with st.spinner("對帳中(只讀 Bybit)…"):
+            rc.run_daily(DB_URL, datetime.now(timezone.utc))
+        st.success("對帳完成,有問題會發 Telegram 系統警報")
+    items = rc.load_unrecorded()
+    if not items:
+        st.caption("沒有未記錄的交易")
+        return
+    st.dataframe(pd.DataFrame([{"帳戶": u.account, "幣種": u.symbol, "第一筆(HKT)": hkt(u.first),
+                                "最後一筆(HKT)": hkt(u.last), "成交筆數": u.count} for u in items]),
+                 hide_index=True, width="stretch")
+    for i, u in enumerate(items):
+        if st.button(f"📝 補記 {u.account} {u.symbol} {hkt(u.first)} → {hkt(u.last)}", key=f"unrec_fill_{i}"):
+            start = u.first.astimezone(HKT).replace(second=0, microsecond=0)
+            end = (u.last.astimezone(HKT) + timedelta(minutes=1)).replace(second=0, microsecond=0)
+            st.session_state.update(
+                bf_account=u.account, bf_symbol=u.symbol.removesuffix("USDT"), bf_start_date=start.date(),
+                bf_start_time=start.time(), bf_end_date=end.date(), bf_end_time=end.time())
+            st.session_state.pop("bf_pending", None)
+            st.success("已帶入,請切到「補記」分頁:先看有沒有紅字重疊,再預覽、寫入。"
+                       "開始時已有持倉會被擋下,這時把開始時間往前移到建倉之前。")
+
+
+tab_overview, tab_records, tab_log, tab_strategy, tab_backfill = st.tabs(["總覽", "交易紀錄", "Log", "策略", "補記"])
 
 # ---------------------------------------------------------------------------
 with tab_overview:
@@ -116,6 +148,8 @@ with tab_overview:
             c2.caption("沒有掛單")
     except Exception as e:  # noqa: BLE001
         st.error(f"查詢 Bybit 失敗:{e}")
+
+    _unrecorded_section()
 
 # ---------------------------------------------------------------------------
 with tab_records:
@@ -314,14 +348,15 @@ def _symbol_input(placeholder: str, key: str) -> str:
 
 
 def _start_free_style(accounts):
-    st.caption("自己在 Bybit 手動交易,這裡只負責記帳:開始只記時間,結束時從 Bybit 拉回這段期間的單寫進資料庫。不會下單或取消。")
+    st.caption("自己在 Bybit 手動交易,這裡只負責記帳:開始只記時間,結束時從 Bybit 拉回這段期間的單寫進資料庫。不會下單或取消。"
+               "這裡是**還沒結束**的交易;已經結束的交易請到「補記」分頁。")
     symbol = _symbol_input("ETH", key="fs_symbol")
-    # 補記開始時間用選的(不用打字):預設是打開這頁的這一刻,日曆停在當年當月;往前選 = 補記之前已經開始的手動交易
+    # 開始時間用選的(不用打字):預設是打開這頁的這一刻;往前選 = 交易其實之前就開始了
     now = datetime.now(HKT).replace(second=0, microsecond=0)
     day_col, time_col = st.columns(2)
-    since_day = day_col.date_input("補記開始日期(HKT)", value=now.date(), max_value=now.date(), format="YYYY-MM-DD",
+    since_day = day_col.date_input("開始日期(HKT,預設現在,可往前選)", value=now.date(), max_value=now.date(), format="YYYY-MM-DD",
                                    key="fs_since_day")
-    since_time = time_col.time_input("補記開始時間(HKT)", value=now.time(), step=60, key="fs_since_time")
+    since_time = time_col.time_input("開始時間(HKT)", value=now.time(), step=60, key="fs_since_time")
     ok = st.checkbox("我確認要開始記錄(會寫進 trading 資料庫)", key="fs_start_confirm")
     if st.button("▶️ 開始 free style", key="fs_start"):
         if not symbol:
@@ -331,7 +366,7 @@ def _start_free_style(accounts):
         else:
             when = datetime.combine(since_day, since_time, tzinfo=HKT).astimezone(timezone.utc)
             if when > datetime.now(timezone.utc):
-                st.error("補記開始時間不能在未來")
+                st.error("開始時間不能在未來")
                 return
             for account in accounts:  # 每個帳戶各記一段;某個失敗不影響其他
                 try:
@@ -460,6 +495,33 @@ def _start_strategy(choice, root, accounts):
             st.session_state.pop("new_preview", None)
 
 
+_HOLD_UNITS = {"分鐘": "minutes", "小時": "hours", "天": "days"}
+
+
+def _backfill_overlap(account, symbol, start, end, start_cols, end_cols) -> bool:
+    """列出同帳戶同幣種已有的紀錄時段(只查 DB,馬上有結果);開始 / 結束落在某段裡就在那個欄位下面標紅字。
+    回傳有沒有重疊(有就不能預覽)。"""
+    if not symbol or not DB_URL:
+        return False
+    try:
+        segments = fs.existing_segments(DB_URL, symbol, account, datetime.now(timezone.utc))
+    except fs.FreeStyleError as e:
+        st.error(f"❌ {e}")
+        return True
+    if segments:
+        st.caption(f"帳戶 {account} {symbol} 已有的紀錄(不能重疊):\n" + "\n".join(f"• {g.label()}" for g in segments))
+    else:
+        st.caption(f"帳戶 {account} {symbol} 還沒有任何紀錄")
+    marks = fs.overlap_marks(segments, start, end)
+    if marks["start"]:
+        start_cols[1].error(f"🔴 開始重疊:{marks['start'].label()}")
+    if marks["end"]:
+        end_cols[1].error(f"🔴 結束重疊:{marks['end'].label()}")
+    for g in marks["inside"]:
+        st.error(f"🔴 重疊:這段時間包住了 {g.label()}")
+    return bool(marks["start"] or marks["end"] or marks["inside"])
+
+
 def _backfill_section():
     """補記過去一段(2026-10-13):開始、結束都在過去;從 Bybit 拉回那段期間的單與成交,
     預覽 → 勾確認 → 一次寫進 DB。策略名稱可填(預設 free style),例如把 sat_strategy 的交易記進來。"""
@@ -472,24 +534,39 @@ def _backfill_section():
     name = c3.text_input("策略名稱", value=fs.FREE_STYLE, key="bf_name").strip()
     now = datetime.now(HKT).replace(second=0, microsecond=0)
     s1, s2, e1, e2 = st.columns(4)
-    start_day = s1.date_input("開始日期(HKT)", value=now.date(), max_value=now.date(), format="YYYY-MM-DD",
-                              key="bf_start_date")
-    start_time = s2.time_input("開始時間(HKT)", value=now.time(), step=60, key="bf_start_time")
-    end_day = e1.date_input("結束日期(HKT)", value=now.date(), max_value=now.date(), format="YYYY-MM-DD",
-                            key="bf_end_date")
-    end_time = e2.time_input("結束時間(HKT)", value=now.time(), step=60, key="bf_end_time")
+    for key, default in (("bf_start_date", now.date()), ("bf_start_time", now.time()),
+                         ("bf_end_date", now.date()), ("bf_end_time", now.time())):
+        st.session_state.setdefault(key, default)  # 預設現在;總覽「未記錄的交易」一鍵帶入時會先寫好
+    start_day = s1.date_input("開始日期(HKT)", max_value=now.date(), format="YYYY-MM-DD", key="bf_start_date")
+    start_time = s2.time_input("開始時間(HKT)", step=60, key="bf_start_time")
+    end_day = e1.date_input("結束日期(HKT)", max_value=now.date(), format="YYYY-MM-DD", key="bf_end_date")
+    end_time = e2.time_input("結束時間(HKT)", step=60, key="bf_end_time")
     start = datetime.combine(start_day, start_time, tzinfo=HKT).astimezone(timezone.utc)
     end = datetime.combine(end_day, end_time, tzinfo=HKT).astimezone(timezone.utc)
-    signature = (account, symbol, name, start, end)
+    overlapped = _backfill_overlap(account, symbol, start, end, (s1, s2), (e1, e2))
 
-    if st.button("🔍 預覽(從 Bybit 拉回,不寫入)", key="bf_preview"):
+    st.markdown("**選填(只填你確定的;會標明是事後補填)**")
+    h1, h2, h3 = st.columns(3)
+    hold_value = h1.number_input("預計持倉時間(0 = 不填)", min_value=0.0, value=0.0, format="%g", key="bf_hold_value")
+    hold_unit = h2.selectbox("單位", list(_HOLD_UNITS), index=1, key="bf_hold_unit")
+    direction = h3.selectbox("方向", ["不填", *fs.BACKFILL_DIRECTIONS], key="bf_direction")
+    note = st.text_area("備註", max_chars=fs.MAX_NOTE_CHARS, key="bf_note").strip()
+    user = {
+        "expected_hold": timedelta(**{_HOLD_UNITS[hold_unit]: hold_value}) if hold_value else None,
+        "direction": None if direction == "不填" else direction,
+        "note": note or None,
+    }
+    signature = (account, symbol, name, start, end, tuple(user.items()))
+
+    if st.button("🔍 預覽(從 Bybit 拉回,不寫入)", key="bf_preview", disabled=overlapped):
         if not symbol:
             st.warning("請填幣種")
         else:
             try:
                 with st.spinner("從 Bybit 拉回訂單與成交…"):
                     preview = fs.preview_backfill(DB_URL, data.make_client(account), symbol, start, end,
-                                                  datetime.now(timezone.utc), account=account, strategy_name=name)
+                                                  datetime.now(timezone.utc), account=account, strategy_name=name,
+                                                  **user)
                 st.session_state["bf_pending"] = {"sig": signature, "preview": preview}
             except Exception as e:  # noqa: BLE001  FreeStyleError / AccountError
                 st.session_state.pop("bf_pending", None)
@@ -505,6 +582,8 @@ def _backfill_section():
         "帳戶": p.account, "幣種": p.symbol, "策略名稱": p.strategy_name,
         "期間(HKT)": f"{hkt(p.start)} → {hkt(p.end)}", "訂單": p.orders, "完成幾輪": p.events,
         "毛利": round(p.gross_pnl, 4), "成交手續費": round(p.trade_fees, 4), "結束時持倉": p.open_position,
+        "預計持倉時間": f"{hold_value:g} {hold_unit}" if user["expected_hold"] else "—",
+        "方向": user["direction"] or "—", "備註": user["note"] or "—",
     }]), hide_index=True, width="stretch")
     st.caption("淨利(含資金費)寫入後計算。")
     for w in p.warnings:
@@ -517,7 +596,7 @@ def _backfill_section():
         try:
             with st.spinner("重新拉資料並寫入…"):
                 result = fs.backfill(DB_URL, data.make_client(account), symbol, start, end, datetime.now(timezone.utc),
-                                     account=account, strategy_name=name)
+                                     account=account, strategy_name=name, **user)
             text = fs.summary_message(result)
             fs.send_telegram(text)
             st.success("已寫入")
@@ -560,5 +639,6 @@ with tab_strategy:
     else:
         _start_strategy(choice, root, accounts)
 
-    st.subheader("補記過去一段")
+with tab_backfill:
+    st.subheader("補記已經結束的交易")
     _backfill_section()

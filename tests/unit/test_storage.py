@@ -451,3 +451,21 @@ class TestBackfillAccount:
         assert runs[old.run_id].account == "test1" and runs[new.run_id].account == "MAIN"
         [e] = rows(db, SlEvent)
         assert (e.account, e.strategy_name) == ("test1", "weekend_band_reversion")
+
+
+class TestRunNote:
+    """補記時使用者填的備註(2026-10-13):sl_run.note,選填、有中文說明。"""
+
+    def test_note_column(self):
+        from strategy_lab.storage.models import SlRun
+
+        col = SlRun.__table__.columns["note"]
+        assert col.nullable is True and "備註" in col.comment
+
+    def test_recorder_writes_the_note(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path, FakeExecutions([]))
+        rec.start_run(run_info(note="手動搶反彈"))
+        engine = create_engine(db)
+        with Session(engine) as s:
+            assert s.scalars(select(SlRun)).one().note == "手動搶反彈"
+        engine.dispose()

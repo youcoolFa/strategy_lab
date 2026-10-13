@@ -58,7 +58,9 @@ class SlRun(Base):
     expected_end_at = Column(TS, comment="預估結束時間:啟動當下算出的策略時間窗強制收尾時間(取消掛單、市價平倉);"
                                          "loop 做完、手動停止會更早結束(2026-10-11 起才有)")
     expected_duration_seconds = Column(Integer, comment="預估執行秒數 = expected_end_at − started_at(2026-10-11 起才有)")
-    expected_hold_seconds = Column(Integer, comment="策略 YAML 的 expected_hold(預估每注持倉時間)換算成秒;沒設定為 NULL(2026-10-11 起才有)")
+    expected_hold_seconds = Column(Integer, comment="策略 YAML 的 expected_hold(預估每注持倉時間)換算成秒;沒設定為 NULL(2026-10-11 起才有);"
+                                                    "補記(end_reason = backfill)時是使用者事後填的")
+    note = Column(Text, comment="備註:補記(end_reason = backfill)時使用者填的說明;一般執行為 NULL(2026-10-13 起才有)")
 
 
 class SlOrder(Base):

@@ -300,13 +300,16 @@ class BybitClient:
         resp = self._call_with_retry(self._http.get_account_info)
         return resp["result"].get("marginMode")
 
-    def get_executions(self, symbol: str, start: datetime, end: datetime) -> list:
+    def get_executions(self, symbol: Optional[str], start: datetime, end: datetime) -> list:
         """成交明細(含 execType=Funding 的資金費),以交易所回報的手續費為準。
-        Bybit 一次最多回 100 筆,用 nextPageCursor 翻頁;查詢區間上限 7 天。"""
+        Bybit 一次最多回 100 筆,用 nextPageCursor 翻頁;查詢區間上限 7 天。
+        symbol = None:不分幣種,拉回帳戶所有成交(每日對帳用,2026-10-13)。"""
         params = dict(
-            category=self._category, symbol=symbol, limit=100,
+            category=self._category, limit=100,
             startTime=int(start.timestamp() * 1000), endTime=int(end.timestamp() * 1000),
         )
+        if symbol:
+            params["symbol"] = symbol
         rows: list = []
         while True:
             resp = self._call_with_retry(self._http.get_executions, **params)
