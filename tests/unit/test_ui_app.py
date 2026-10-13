@@ -475,3 +475,72 @@ def test_free_style_on_many_accounts_starts_each(fake):
     at.checkbox(key="fs_start_confirm").check()
     at.button(key="fs_start").click().run()
     assert [c[1] for c in calls if c[0] == "fs_account"] == ["test1", "MAIN"] and not at.exception
+
+
+# ---------------------------------------------------------------- 補記過去一段(2026-10-13)
+
+@pytest.fixture
+def backfill_calls(fake, monkeypatch):
+    calls, _ = fake
+
+    def preview(db, client, symbol, start, end, now, account=None, strategy_name="free style"):
+        calls.append(("bf_preview", symbol, account, strategy_name, start, end))
+        return fs.BackfillPreview(symbol=symbol, account=account, strategy_name=strategy_name, start=start, end=end,
+                                  orders=5, events=2, gross_pnl=3.0, trade_fees=0.64, open_position=0, warnings=[])
+
+    monkeypatch.setattr(fs, "preview_backfill", preview)
+    monkeypatch.setattr(fs, "backfill", lambda db, client, symbol, start, end, now, **k: calls.append(
+        ("bf_write", symbol, k.get("account"), k.get("strategy_name"))) or "RESULT")
+    return calls
+
+
+def fill_backfill(at, name="sat_weekend"):
+    from datetime import date, time as dtime
+
+    at.selectbox(key="bf_account").set_value("MAIN")
+    at.text_input(key="bf_symbol").input("eth")
+    at.text_input(key="bf_name").input(name)
+    at.date_input(key="bf_start_date").set_value(date(2026, 10, 9))
+    at.time_input(key="bf_start_time").set_value(dtime(10, 0))
+    at.date_input(key="bf_end_date").set_value(date(2026, 10, 9))
+    at.time_input(key="bf_end_time").set_value(dtime(11, 30))
+    return at.run()
+
+
+def test_backfill_defaults_to_free_style(backfill_calls):
+    at = run()
+    assert at.text_input(key="bf_name").value == "free style"
+
+
+def test_backfill_preview_then_confirm_writes(backfill_calls):
+    calls = backfill_calls
+    at = fill_backfill(run())
+    assert "bf_write" not in buttons(at)  # 沒預覽 → 沒有寫入按鈕
+    at.button(key="bf_preview").click().run()
+    [(_, symbol, account, name, start, end)] = [c for c in calls if c[0] == "bf_preview"]
+    assert (symbol, account, name) == ("ETHUSDT", "MAIN", "sat_weekend")
+    assert (start, end) == (datetime(2026, 10, 9, 2, 0, tzinfo=timezone.utc), datetime(2026, 10, 9, 3, 30, tzinfo=timezone.utc))
+    at.button(key="bf_write").click().run()
+    assert not [c for c in calls if c[0] == "bf_write"]  # 沒勾確認
+    at.checkbox(key="bf_confirm").check()
+    at.button(key="bf_write").click().run()
+    assert ("bf_write", "ETHUSDT", "MAIN", "sat_weekend") in calls
+    assert any(c[0] == "telegram" for c in calls) and not at.exception
+
+
+def test_backfill_changed_after_preview_needs_a_new_preview(backfill_calls):
+    calls = backfill_calls
+    at = fill_backfill(run())
+    at.button(key="bf_preview").click().run()
+    at.text_input(key="bf_symbol").input("btc").run()
+    assert "bf_write" not in buttons(at)
+
+
+def test_backfill_error_is_shown(backfill_calls, monkeypatch):
+    def refuse(*a, **k):
+        raise fs.FreeStyleError("跟已有的紀錄重疊")
+
+    monkeypatch.setattr(fs, "preview_backfill", refuse)
+    at = fill_backfill(run())
+    at.button(key="bf_preview").click().run()
+    assert any("重疊" in str(e.value) for e in at.error) and "bf_write" not in buttons(at)

@@ -286,3 +286,102 @@ def test_cli_account_option_uses_that_accounts_keys(monkeypatch, tmp_path):
         key=client._http.api_key, account=k.get("account"), symbol=symbol) or "run-1")
     assert fs.main(["start", "--symbol", "ethusdt", "--account", "main"]) == 0
     assert seen == {"key": "mainkey", "account": "main", "symbol": "ETHUSDT"}
+
+
+class TestBackfill:
+    """補記過去一段(2026-10-13):選帳戶、幣種、開始與結束(都在過去)、策略名稱(預設 free style),
+    從 Bybit 拉回那段期間的單與成交,先預覽、確認後一次寫進 DB(sl_run.end_reason = backfill)。"""
+
+    NOW = t(24 * 60)
+
+    def client(self):
+        orders, executions = two_round_trips()
+        return FakeClient(orders=orders, executions=executions)
+
+    def test_preview_counts_without_writing(self, db):
+        p = fs.preview_backfill(db, self.client(), "ETHUSDT", T0, t(90), self.NOW)
+        assert (p.orders, p.events, p.gross_pnl, p.open_position) == (5, 2, pytest.approx(3.0), 0)
+        assert p.strategy_name == "free style" and p.account == "test1" and p.warnings == []
+        assert rows(db, SlRun) == []
+
+    def test_backfill_writes_one_finished_run_with_the_chosen_window_and_name(self, db, tmp_path):
+        result = fs.backfill(db, self.client(), "ETHUSDT", T0, t(90), self.NOW, account="MAIN",
+                             strategy_name="sat_weekend", pending_dir=tmp_path)
+        [run] = rows(db, SlRun)
+        assert run.strategy_name == "sat_weekend" and run.account == "MAIN" and run.end_reason == "backfill"
+        assert run.started_at.replace(tzinfo=timezone.utc) == T0 and run.ended_at.replace(tzinfo=timezone.utc) == t(90)
+        assert len(rows(db, SlOrder)) >= 5 and len(rows(db, SlEvent)) == 2 and len(rows(db, SlFill)) >= 4
+        assert {e.strategy_name for e in rows(db, SlEvent)} == {"sat_weekend"}
+        assert result.events == 2 and result.net_pnl == pytest.approx(3.0 - result.fees - result.funding)
+
+    def test_only_the_chosen_window_is_used(self, db):
+        p = fs.preview_backfill(db, self.client(), "ETHUSDT", T0, t(35), self.NOW)  # 只有第 1 輪
+        assert (p.events, p.gross_pnl) == (1, pytest.approx(1.0))
+
+    @pytest.mark.parametrize("start,end,match", [
+        (t(90), T0, "開始要早於結束"),
+        (T0, t(24 * 60 + 1), "結束不能晚於現在"),
+        (T0 - timedelta(days=731), t(90), "2 年"),
+    ])
+    def test_bad_windows_are_refused(self, db, start, end, match):
+        with pytest.raises(fs.FreeStyleError, match=match):
+            fs.preview_backfill(db, self.client(), "ETHUSDT", start, end, self.NOW)
+
+    def test_strategy_name_is_required(self, db):
+        with pytest.raises(fs.FreeStyleError, match="策略名稱"):
+            fs.preview_backfill(db, self.client(), "ETHUSDT", T0, t(90), self.NOW, strategy_name="  ")
+
+    def test_overlapping_an_existing_run_on_the_same_account_is_refused(self, db, tmp_path):
+        """同帳戶同幣種、時間重疊的紀錄 → 成交會被算兩次;別的帳戶不算重疊"""
+        fs.backfill(db, self.client(), "ETHUSDT", T0, t(35), self.NOW, pending_dir=tmp_path)
+        with pytest.raises(fs.FreeStyleError, match="重疊"):
+            fs.preview_backfill(db, self.client(), "ETHUSDT", t(30), t(90), self.NOW)
+        fs.preview_backfill(db, self.client(), "ETHUSDT", t(30), t(90), self.NOW, account="MAIN")
+        fs.preview_backfill(db, self.client(), "ETHUSDT", t(36), t(90), self.NOW)  # 接在後面不算重疊
+
+    def test_unfinished_run_overlaps_until_now(self, db, tmp_path):
+        fs.start(db, FakeClient(), "ETHUSDT", t(100), pending_dir=tmp_path)
+        with pytest.raises(fs.FreeStyleError, match="重疊"):
+            fs.preview_backfill(db, self.client(), "ETHUSDT", t(200), t(300), self.NOW)
+
+    def test_position_already_open_at_the_start_is_refused(self, db):
+        """第一筆成交就是平倉(Bybit closedSize > 0)= 開始前已經有持倉,算不出成本"""
+        client = self.client()
+        client.executions[0]["closedSize"] = "0.1"
+        with pytest.raises(fs.FreeStyleError, match="開始時已經有持倉"):
+            fs.preview_backfill(db, client, "ETHUSDT", T0, t(90), self.NOW)
+
+    def test_position_left_at_the_end_is_a_warning(self, db):
+        p = fs.preview_backfill(db, self.client(), "ETHUSDT", T0, t(55), self.NOW)  # 第 2 輪只開了空單
+        assert p.open_position == pytest.approx(-0.2) and p.events == 1
+        assert any("結束時還有持倉" in w for w in p.warnings)
+
+    def test_empty_window_is_refused(self, db):
+        with pytest.raises(fs.FreeStyleError, match="沒有交易"):
+            fs.preview_backfill(db, FakeClient(), "ETHUSDT", T0, t(90), self.NOW)
+
+    def test_cli_backfill(self, db, monkeypatch, tmp_path):
+        from strategy_lab.live import accounts
+
+        env = tmp_path / ".env"
+        env.write_text("BYBIT_API_KEY=k\nBYBIT_API_SECRET=s\n")
+        monkeypatch.setattr(accounts, "ENV_PATH", env)
+        monkeypatch.setattr(fs, "load_dotenv", lambda *a, **k: None)
+        monkeypatch.setenv("TRADING_DB_URL", db)
+        seen = {}
+        monkeypatch.setattr(fs, "backfill", lambda db_, client, symbol, start, end, now, **k: seen.update(
+            symbol=symbol, start=start, end=end, **k) or "RESULT")
+        monkeypatch.setattr(fs, "summary_message", lambda r: f"總結 {r}")
+        monkeypatch.setattr(fs, "send_telegram", lambda text: None)
+        assert fs.main(["backfill", "--symbol", "ethusdt", "--start", "2026-10-09 10:00", "--end", "2026-10-09 11:30",
+                        "--name", "sat_weekend"]) == 0
+        assert seen["symbol"] == "ETHUSDT" and seen["strategy_name"] == "sat_weekend" and seen["account"] is None
+        assert (seen["start"], seen["end"]) == (T0, t(90))  # HKT 10:00 = UTC 02:00
+
+
+def test_backfill_summary_names_the_strategy_and_says_backfill(db, tmp_path):
+    orders, executions = two_round_trips()
+    result = fs.backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", T0, t(90), t(24 * 60),
+                         strategy_name="sat_weekend", pending_dir=tmp_path)
+    text = fs.summary_message(result)
+    assert text.splitlines()[0] == "📝 sat_weekend 補記|ETHUSDT|帳戶 test1"

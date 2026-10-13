@@ -4,6 +4,7 @@
     (在 Bybit App / 網頁自己交易)
     .venv/bin/python -m strategy_lab.live.free_style stop --symbol ETHUSDT
     .venv/bin/python -m strategy_lab.live.free_style status
+    .venv/bin/python -m strategy_lab.live.free_style backfill --symbol ETHUSDT --start "2026-10-09 14:00" --end "2026-10-09 18:00"
 
 - start:只在 sl_run 寫一列(strategy_name = "free style"、開始時間、幣種;策略參數類欄位
   填 NA / NULL)就結束。中間不用有程式在跑,Mac 合蓋睡眠也不影響。
@@ -41,6 +42,8 @@ from strategy_lab.storage.recorder import RunInfo, TradeRecorder
 FREE_STYLE = "free style"
 NA = "NA"
 END_REASON = "free_style_stop"
+BACKFILL_END_REASON = "backfill"
+MAX_BACKFILL_AGE = timedelta(days=730)  # Bybit 的訂單歷史 / 成交明細最多查 2 年
 MAX_QUERY_SPAN = timedelta(days=7)
 HKT = ZoneInfo("Asia/Hong_Kong")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -68,6 +71,8 @@ class StopResult:
     net_pnl: float
     open_position: float
     account: str = "test1"  # 用哪個 Bybit 帳戶(2026-10-12)
+    strategy_name: str = FREE_STYLE
+    backfill: bool = False  # 補記過去一段(2026-10-13)
 
 
 # ---------------------------------------------------------------------------
@@ -126,31 +131,142 @@ def stop(db_url: Optional[str], client: Any, symbol: str, now: datetime, pending
     run_row["started_at"] = started
 
     fetch_executions = _chunked(client.get_executions)
-    orders = _orders_in(client, symbol, started, now)
-    executions = [e for e in fetch_executions(symbol, started, now) if (e.get("execType") or "Trade") != "Funding"]
-    events, order_event = _replay(orders, executions)
-
+    orders, executions = _fetch_window(client, symbol, started, now)
     recorder = TradeRecorder(db_url=db_url, pending_dir=pending_dir, fetch_executions=fetch_executions)
     recorder.run_id, recorder._run = run_row["run_id"], run_row
+    return _write_window(recorder, symbol, orders, executions, started, now, END_REASON,
+                         open_position=client.get_position_qty(symbol), account=run_row.get("account") or account)
+
+
+def _fetch_window(client: Any, symbol: str, start: datetime, end: datetime) -> Tuple[List[dict], List[dict]]:
+    """這段期間的訂單與成交(不含資金費;資金費由 recorder.event_costs 另外算)。"""
+    orders = _orders_in(client, symbol, start, end)
+    executions = [e for e in _chunked(client.get_executions)(symbol, start, end)
+                  if (e.get("execType") or "Trade") != "Funding"]
+    return orders, executions
+
+
+def _write_window(recorder: TradeRecorder, symbol: str, orders: List[dict], executions: List[dict],
+                  start: datetime, end: datetime, end_reason: str, open_position: float, account: str,
+                  strategy_name: str = FREE_STYLE) -> StopResult:
+    events, order_event = _replay(orders, executions)
     for o in sorted(orders, key=lambda o: int(o["createdTime"])):
         _record_order(recorder, o, order_event[o["orderId"]])
     for event in events:
         recorder.record_event(event)
-    recorder.end_run(now, END_REASON, summarize(events))
+    recorder.end_run(end, end_reason, summarize(events))
 
     costs = [recorder.event_costs(e.index) or (0.0, 0.0) for e in events]
     gross = sum(e.realized_pnl for e in events)
     fees, funding = sum(c[0] for c in costs), sum(c[1] for c in costs)
     return StopResult(
-        run_id=run_row["run_id"], symbol=symbol, started_at=started, ended_at=now, events=len(events),
+        run_id=recorder.run_id, symbol=symbol, started_at=start, ended_at=end, events=len(events),
         orders=len(orders), gross_pnl=gross, fees=fees, funding=funding, net_pnl=gross - fees - funding,
-        open_position=client.get_position_qty(symbol), account=run_row.get("account") or account,
+        open_position=open_position, account=account, strategy_name=strategy_name,
+        backfill=end_reason == BACKFILL_END_REASON,
     )
+
+
+# ---------------------------------------------------------------------------
+# 補記過去一段(2026-10-13):通用,策略名稱可填(預設 free style)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BackfillPreview:
+    symbol: str
+    account: str
+    strategy_name: str
+    start: datetime
+    end: datetime
+    orders: int
+    events: int
+    gross_pnl: float
+    trade_fees: float  # 成交手續費(資金費寫入時才算)
+    open_position: float  # 結束時的持倉(帶正負;0 = 已平)
+    warnings: List[str]
+
+
+def preview_backfill(db_url: Optional[str], client: Any, symbol: str, start: datetime, end: datetime, now: datetime,
+                     account: Optional[str] = None, strategy_name: str = FREE_STYLE) -> BackfillPreview:
+    """只讀:檢查時間、重疊,從 Bybit 拉回那段期間的單與成交並算出每一輪。不寫 DB。"""
+    _, _, preview = _prepare_backfill(db_url, client, symbol, start, end, now, account, strategy_name)
+    return preview
+
+
+def backfill(db_url: Optional[str], client: Any, symbol: str, start: datetime, end: datetime, now: datetime,
+             account: Optional[str] = None, strategy_name: str = FREE_STYLE,
+             pending_dir: Path = PENDING_DIR) -> StopResult:
+    """重新檢查、重新拉資料後一次寫進 DB:sl_run(started/ended = 選的時間,end_reason = backfill)、
+    sl_order / sl_fill / sl_event。"""
+    orders, executions, p = _prepare_backfill(db_url, client, symbol, start, end, now, account, strategy_name)
+    recorder = TradeRecorder(db_url=db_url, pending_dir=pending_dir, fetch_executions=_chunked(client.get_executions))
+    if not recorder.db_available:
+        raise FreeStyleError("交易資料庫連不上;請先確認 trading-postgres 有在跑")
+    recorder.start_run(RunInfo(
+        strategy_name=p.strategy_name, strategy_path=NA, strategy_yaml=NA, strategy_params={},
+        config={"mode": "backfill", "symbol": symbol, "backfilled_at": now.isoformat()}, symbol=symbol,
+        category="linear", direction=NA, origin_price=None, origin_source=None, qty=None, order_type=NA, loop=None,
+        testnet=False, preflight=None, log_path=None, started_at=start, account=p.account,
+    ))
+    return _write_window(recorder, symbol, orders, executions, start, end, BACKFILL_END_REASON,
+                         open_position=p.open_position, account=p.account, strategy_name=p.strategy_name)
+
+
+def _prepare_backfill(db_url, client, symbol, start, end, now, account, strategy_name):
+    account = _account_name(account)
+    name = (strategy_name or "").strip()
+    if not name:
+        raise FreeStyleError("請填策略名稱(例:free style)")
+    start, end, now = _utc(start), _utc(end), _utc(now)
+    if start >= end:
+        raise FreeStyleError("開始要早於結束")
+    if end > now:
+        raise FreeStyleError("結束不能晚於現在(補記只做已經結束的期間)")
+    if now - start > MAX_BACKFILL_AGE:
+        raise FreeStyleError("Bybit 的訂單歷史最多只能查 2 年")
+    _check_overlap(db_url, symbol, account, start, end, now)
+
+    orders, executions = _fetch_window(client, symbol, start, end)
+    if not orders and not executions:
+        raise FreeStyleError(f"{_hkt(start)} → {_hkt(end)} {symbol} 沒有交易(帳戶 {account})")
+    first = min(executions, key=lambda e: (int(e["execTime"]), e["execId"])) if executions else None
+    if first is not None and float(first.get("closedSize") or 0) > 0:
+        raise FreeStyleError(f"開始時已經有持倉({_hkt(_ms(first['execTime']))} 的第一筆成交是平倉),"
+                             "算不出成本;請把開始時間往前移到建倉之前")
+    events, _ = _replay(orders, executions)
+    position = round(sum((1 if e.get("side") == "Buy" else -1) * float(e["execQty"]) for e in executions), 10)
+    warnings = []
+    if position:
+        warnings.append(f"結束時還有持倉 {position:g}:最後這一輪沒算進損益(成交明細照樣寫進 sl_fill)")
+    preview = BackfillPreview(
+        symbol=symbol, account=account, strategy_name=name, start=start, end=end, orders=len(orders),
+        events=len(events), gross_pnl=sum(e.realized_pnl for e in events),
+        trade_fees=sum(float(e.get("execFee") or 0) for e in executions), open_position=position, warnings=warnings)
+    return orders, executions, preview
+
+
+def _check_overlap(db_url, symbol, account, start, end, now) -> None:
+    """同帳戶、同幣種、時間重疊的紀錄 → 成交會被算兩次。還沒結束的紀錄算到現在。"""
+    engine = _engine(db_url)
+    try:
+        with Session(engine) as s:
+            runs = list(s.scalars(select(SlRun).where(SlRun.symbol == symbol)))
+    except Exception as e:  # noqa: BLE001
+        raise FreeStyleError(f"交易資料庫連不上:{e}") from None
+    finally:
+        engine.dispose()
+    for r in runs:
+        if _account_name(r.account).upper() != account.upper():
+            continue
+        r_end = _utc(r.ended_at) if r.ended_at else now
+        if _utc(r.started_at) < end and r_end > start:
+            raise FreeStyleError(f"跟已有的紀錄重疊:{r.strategy_name},{_hkt(r.started_at)} → "
+                                 f"{_hkt(r_end) if r.ended_at else '進行中'}(run_id {r.run_id});同一段成交會被算兩次")
 
 
 def summary_message(r: StopResult) -> str:
     lines = [
-        f"🏁 free style 結束|{r.symbol}|帳戶 {r.account}",
+        (f"📝 {r.strategy_name} 補記" if r.backfill else "🏁 free style 結束") + f"|{r.symbol}|帳戶 {r.account}",
         f"{_hkt(r.started_at)} → {_hkt(r.ended_at)}(共 {_duration(r.ended_at - r.started_at)})",
         f"完成 {r.events} 輪|訂單 {r.orders} 張",
         f"合計淨利 {r.net_pnl:+.2f} USDT(毛利 {r.gross_pnl:+.2f} − 手續費 {r.fees:.4f} − 資金費 {r.funding:.4f})",
@@ -304,6 +420,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_stop = sub.add_parser("stop", help="結束,從 Bybit 拉回期間的訂單 / 成交寫進資料庫")
     p_stop.add_argument("--symbol", required=True)
     p_stop.add_argument("--account", help="Bybit 帳戶名稱;不填 = test1")
+    p_back = sub.add_parser("backfill", help="補記過去一段(開始、結束都在過去),從 Bybit 拉回那段期間的單寫進資料庫")
+    p_back.add_argument("--symbol", required=True)
+    p_back.add_argument("--start", required=True, help="HKT,格式 \"2026-10-09 14:00\"")
+    p_back.add_argument("--end", required=True, help="HKT,格式 \"2026-10-09 18:00\"")
+    p_back.add_argument("--name", default=FREE_STYLE, help="策略名稱(預設 free style)")
+    p_back.add_argument("--account", help="Bybit 帳戶名稱;不填 = test1")
     sub.add_parser("status", help="列出進行中的 free style")
     args = parser.parse_args(argv)
 
@@ -321,6 +443,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         client = BybitClient(api_key=account.api_key, api_secret=account.api_secret, testnet=False)
         symbol = args.symbol.upper()
         now = datetime.now(timezone.utc)
+        if args.command == "backfill":
+            result = backfill(db_url, client, symbol, _parse_since(args.start), _parse_since(args.end), now,
+                              account=args.account, strategy_name=args.name)
+            text = summary_message(result)
+            print(text)
+            send_telegram(text)
+            return 0
         if args.command == "start":
             when = _parse_since(args.since) if args.since else now
             run_id = start(db_url, client, symbol, when, account=args.account)

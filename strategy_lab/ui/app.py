@@ -460,6 +460,73 @@ def _start_strategy(choice, root, accounts):
             st.session_state.pop("new_preview", None)
 
 
+def _backfill_section():
+    """補記過去一段(2026-10-13):開始、結束都在過去;從 Bybit 拉回那段期間的單與成交,
+    預覽 → 勾確認 → 一次寫進 DB。策略名稱可填(預設 free style),例如把 sat_strategy 的交易記進來。"""
+    st.caption("忘了按開始的手動交易、或沒寫進這個資料庫的程式交易,都可以補記。只讀 Bybit,不下單或取消。"
+               "跟同帳戶同幣種已有的紀錄時間重疊會被擋下(不然成交會算兩次)。")
+    c1, c2, c3 = st.columns(3)
+    account = c1.selectbox("帳戶", data.list_accounts(), key="bf_account")
+    with c2:
+        symbol = _symbol_input("ETH", key="bf_symbol")
+    name = c3.text_input("策略名稱", value=fs.FREE_STYLE, key="bf_name").strip()
+    now = datetime.now(HKT).replace(second=0, microsecond=0)
+    s1, s2, e1, e2 = st.columns(4)
+    start_day = s1.date_input("開始日期(HKT)", value=now.date(), max_value=now.date(), format="YYYY-MM-DD",
+                              key="bf_start_date")
+    start_time = s2.time_input("開始時間(HKT)", value=now.time(), step=60, key="bf_start_time")
+    end_day = e1.date_input("結束日期(HKT)", value=now.date(), max_value=now.date(), format="YYYY-MM-DD",
+                            key="bf_end_date")
+    end_time = e2.time_input("結束時間(HKT)", value=now.time(), step=60, key="bf_end_time")
+    start = datetime.combine(start_day, start_time, tzinfo=HKT).astimezone(timezone.utc)
+    end = datetime.combine(end_day, end_time, tzinfo=HKT).astimezone(timezone.utc)
+    signature = (account, symbol, name, start, end)
+
+    if st.button("🔍 預覽(從 Bybit 拉回,不寫入)", key="bf_preview"):
+        if not symbol:
+            st.warning("請填幣種")
+        else:
+            try:
+                with st.spinner("從 Bybit 拉回訂單與成交…"):
+                    preview = fs.preview_backfill(DB_URL, data.make_client(account), symbol, start, end,
+                                                  datetime.now(timezone.utc), account=account, strategy_name=name)
+                st.session_state["bf_pending"] = {"sig": signature, "preview": preview}
+            except Exception as e:  # noqa: BLE001  FreeStyleError / AccountError
+                st.session_state.pop("bf_pending", None)
+                st.error(f"❌ {e}")
+    pending = st.session_state.get("bf_pending")
+    if not pending:
+        return
+    if pending["sig"] != signature:
+        st.warning("條件在預覽之後改過了,請重新預覽")
+        return
+    p = pending["preview"]
+    st.dataframe(pd.DataFrame([{
+        "帳戶": p.account, "幣種": p.symbol, "策略名稱": p.strategy_name,
+        "期間(HKT)": f"{hkt(p.start)} → {hkt(p.end)}", "訂單": p.orders, "完成幾輪": p.events,
+        "毛利": round(p.gross_pnl, 4), "成交手續費": round(p.trade_fees, 4), "結束時持倉": p.open_position,
+    }]), hide_index=True, width="stretch")
+    st.caption("淨利(含資金費)寫入後計算。")
+    for w in p.warnings:
+        st.warning(w)
+    ok = st.checkbox("我確認要寫進 trading 資料庫", key="bf_confirm")
+    if st.button("💾 寫入資料庫", key="bf_write"):
+        if not ok:
+            st.warning("請先勾「我確認」")
+            return
+        try:
+            with st.spinner("重新拉資料並寫入…"):
+                result = fs.backfill(DB_URL, data.make_client(account), symbol, start, end, datetime.now(timezone.utc),
+                                     account=account, strategy_name=name)
+            text = fs.summary_message(result)
+            fs.send_telegram(text)
+            st.success("已寫入")
+            st.code(text, language=None)
+            st.session_state.pop("bf_pending", None)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"❌ {e}")
+
+
 with tab_strategy:
     root = data.project_root()
     st.subheader("進行中")
@@ -492,3 +559,6 @@ with tab_strategy:
         _start_free_style(accounts)
     else:
         _start_strategy(choice, root, accounts)
+
+    st.subheader("補記過去一段")
+    _backfill_section()

@@ -532,6 +532,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | Telegram 設定簡化 + 實際驗證 | 兩個新 bot 的 chat id 預設共用 `TELEGRAM_CHAT_ID`(`.env` 只要加兩行 token);`scripts/telegram_route_check.py` 實際發 4 則測試訊息驗證分流;sat_strategy 測試的 log 導到臨時資料夾(之前會寫進真的 `logs/sat_strategy.log`) | 改 §6.24 | 已完成 |
 | 多帳戶 | 新增 `live/accounts.py`(.env 的 `ACCOUNT = 名稱` + `BYBIT_<名稱>_API_KEY/SECRET/UID`,不分大小寫;test1 = 原本的 `BYBIT_API_KEY`;其他帳戶找不到 key 就報錯)、`BybitClient.api_key_info()`(啟動前核對 UID / 唯讀 / 到期);`ExecutionConfig.account`;`sl_run.account` / `bybit_uid`、`sl_event.account` / `strategy_name`,`setup_db` 舊紀錄補成 test1;free style `--account`;頁面可選帳戶、總覽分帳戶 | 新增 §6.31 | 已完成;真 DB 已補欄位、Superset 已同步,兩個帳戶的 UID 已核對 |
 | 一次多個帳戶跑同一個策略 | `ui/actions.py` 的 `prepare_many` / `start_many`(`AccountPlan`、`StartResult`);頁面帳戶改多選;多個帳戶時數量只能用權益百分比;預覽沒過的帳戶不開始、其他照樣開始 | §6.31 新增小節 | 已完成 |
+| 補記過去一段(通用) | `live/free_style.py` 的 `preview_backfill` / `backfill`(`BackfillPreview`)、CLI `backfill --symbol --start --end [--name] [--account]`;頁面「策略」分頁底下「補記過去一段」 | §6.27 新增小節 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1688,6 +1689,28 @@ stop 時還有持倉 → 這一輪不算進 `sl_event`(成交明細照寫),總�
 **資料表中文說明**(同一天):`storage/models.py` 每張表、每個欄位都有 `comment`;`setup_db` 每次
 執行都用 `COMMENT ON` 寫進 Postgres(說明有冒號,用 `exec_driver_sql` 原樣送出,不能用 `text()`;psycopg2 會把 `%` 當格式符號,送出前改成 `%%`)。
 Superset 的 dataset 欄位描述另外從資料庫同步過一次(不會自動同步,改了說明要再同步)。
+
+#### 補記過去一段(2026-10-13,通用)
+
+忘了按開始的手動交易、或沒寫進這個資料庫的程式交易(例如 sat_strategy 的 BTC),事後補進 DB。
+開始、結束都在過去;**策略名稱可填**(預設 `free style`)。
+
+- `preview_backfill(db, client, symbol, start, end, now, account, strategy_name)`:只讀,回傳 `BackfillPreview`
+  (訂單數、完成幾輪、毛利、成交手續費、結束時持倉、警告)。
+- `backfill(...)`:重新檢查、重新拉資料後一次寫入:`sl_run`(started / ended = 選的時間,`end_reason = backfill`,
+  `config.mode = backfill`)+ sl_order / sl_fill / sl_event;結束總結標「📝 <策略名稱> 補記」並發 Telegram。
+- 跟 stop 共用 `_fetch_window`(訂單 + 成交,7 天分段)與 `_write_window`(重播成 event、寫入、算手續費 / 資金費)。
+
+**擋下**:開始不早於結束、結束晚於現在、超過 2 年(Bybit 歷史上限)、策略名稱空白、這段沒有交易、
+**跟同帳戶同幣種已有的紀錄時間重疊**(還沒結束的紀錄算到現在;不然成交會算兩次)、
+**開始時已經有持倉**(第一筆成交的 Bybit `closedSize > 0` = 是平倉,算不出成本)。
+**警告**:結束時還有持倉(最後一輪不算進損益,成交明細照樣寫)。
+
+```
+.venv/bin/python -m strategy_lab.live.free_style backfill --symbol ETHUSDT --start "2026-10-09 14:00" --end "2026-10-09 18:00" [--name sat_weekend] [--account MAIN]
+```
+頁面:「策略」分頁最底下「補記過去一段」:帳戶、幣種(只填幣名)、策略名稱、開始 / 結束日期與時間 → 🔍 預覽 →
+勾確認 → 💾 寫入;預覽之後改了條件要重新預覽。
 
 ### 6.28 持倉計時(時間暴露)與預估持倉時間(`engine/hold_time.py`,2026-10-09)
 
