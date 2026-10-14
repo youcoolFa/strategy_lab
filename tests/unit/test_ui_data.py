@@ -311,10 +311,10 @@ class TestPnlTable:
         assert (older["幣種"], older["方向"], older["數量"], older["平倉價格"]) == ("ETHUSDT", "long", 2.0, 2510.0)
         assert older["真實損益"] == pytest.approx(20.0 - 0.5) and older["手續費"] == pytest.approx(0.5)
         assert older["手續費佔比"] == pytest.approx(2.5)  # 0.5 / 20 毛利
-        assert (older["預估時長"], older["實際時長"]) == ("4h", "1 小時 30 分")
+        assert (older["預估時長"], older["預估單位"], older["實際時長"]) == (4, "小時", "1 小時 30 分")
         assert (older["預估秒數"], older["實際秒數"]) == (4 * 3600, 5400)  # 給總結列算平均,畫面不顯示
         assert (older["目標價"], older["停損價"], older["備註"]) == (2520.0, 2480.0, "試單")
-        assert rows[0]["預估時長"] == "" and rows[0]["目標價"] is None
+        assert rows[0]["預估時長"] is None and rows[0]["預估單位"] == "" and rows[0]["目標價"] is None
         assert {"run_id", "event_index"} <= set(older)  # 存檔用,畫面不顯示
 
     def test_strategies_of_an_account_start_with_free_style(self, db, tmp_path):
@@ -326,14 +326,13 @@ class TestPnlTable:
         self.add_round(db, tmp_path, None, "scale_in_ladder", "SUIUSDT", NOW, 10, 1.2, 1.3)
         assert len(data.pnl_rows(db, "test1", "scale_in_ladder")) == 1
 
-    @pytest.mark.parametrize("seconds,text", [(None, ""), (5400, "90m"), (4 * 3600, "4h"), (36 * 3600, "1.5d"),
-                                              (2 * 86400, "2d")])
-    def test_fmt_hold_round_trips_with_parse_hold(self, seconds, text):
-        from strategy_lab.live.free_style import parse_hold
-
-        assert data.fmt_hold(seconds) == text
+    @pytest.mark.parametrize("seconds,parts", [(None, (None, "")), (45, (45, "秒")), (5400, (90, "分鐘")),
+                                               (4 * 3600, (4, "小時")), (36 * 3600, (1.5, "天")), (2 * 86400, (2, "天"))])
+    def test_hold_parts_number_and_unit(self, seconds, parts):
+        """預估時長拆成「數字 + 單位」(2026-10-14 使用者:單位用下拉選,不用手打 4h)"""
+        assert data.hold_parts(seconds) == parts
         if seconds:
-            assert parse_hold(text).total_seconds() == seconds
+            assert data.hold_seconds(*parts) == seconds
 
 
 def test_pnl_summary_row():

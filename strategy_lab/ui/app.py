@@ -535,7 +535,7 @@ with tab_strategy:
 
 # ---------------------------------------------------------------------------
 _PNL_SHOWN = ["日期", "幣種", "方向", "數量", "建倉價格", "建倉時間", "平倉價格", "真實損益", "手續費", "手續費佔比(%)",
-              "預估時長", "實際時長", "目標價", "停損價", "備註"]
+              "預估時長", "預估單位", "實際時長", "目標價", "停損價", "備註"]
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -590,7 +590,7 @@ def _pnl_section():
         return
     m1, m2, m3, m4 = st.columns(4)  # 先佔位置,等表格回傳篩選後的列再填
     _fee_points_metric(m4, account)
-    st.caption("點欄位標題右邊的 ☰ → 排序 / 篩選(像 Excel);淡黃底的欄位可以直接點進去改。")
+    st.caption("點欄位標題右邊的 ☰ → 排序 / 篩選(像 Excel);淡黃底的欄位可以直接點進去改;預估時長打數字,單位從旁邊下拉選。")
     table = pd.DataFrame(rows).rename(columns={"手續費佔比": "手續費佔比(%)"})
     table = table[_PNL_SHOWN + [c for c in grid.HIDDEN if c in table.columns]]
     response = st_aggrid.AgGrid(

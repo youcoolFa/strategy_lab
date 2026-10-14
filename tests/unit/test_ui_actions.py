@@ -450,10 +450,11 @@ class TestSavePnlEdits:
         return out
 
     def edit(self, index, **k):
-        return {"run_id": self.run_id, "event_index": index, "預估時長": "", "目標價": None, "停損價": None, "備註": "", **k}
+        return {"run_id": self.run_id, "event_index": index, "預估時長": None, "預估單位": "", "目標價": None, "停損價": None,
+                "備註": "", **k}
 
     def test_saves_and_clears(self, db):
-        n = actions.save_pnl_edits(db, [self.edit(1, 預估時長="4h", 目標價=110.0, 停損價=95.0, 備註="照計劃"),
+        n = actions.save_pnl_edits(db, [self.edit(1, 預估時長=4, 預估單位="小時", 目標價=110.0, 停損價=95.0, 備註="照計劃"),
                                         self.edit(2)])
         e = self.events(db)
         assert n == 2
@@ -466,7 +467,8 @@ class TestSavePnlEdits:
         assert self.events(db)[1].target_price is None
 
     @pytest.mark.parametrize("bad,match", [
-        ({"預估時長": "4 hours"}, "預估時長"),
+        ({"預估時長": -1, "預估單位": "小時"}, "預估時長"),
+        ({"預估時長": 4, "預估單位": "年"}, "單位"),
         ({"目標價": -1.0}, "目標價"),
         ({"目標價": 90.0, "停損價": 95.0}, "停損價要低於目標價"),  # 第 1 列做多
         ({"備註": "x" * 501}, "備註"),
@@ -482,20 +484,32 @@ class TestSavePnlEdits:
 
 
 def test_pnl_changes_only_returns_rows_whose_editable_cells_changed():
-    original = [{"run_id": "r", "event_index": 1, "真實損益": 5.0, "預估時長": "", "目標價": None, "停損價": None, "備註": ""},
-                {"run_id": "r", "event_index": 2, "真實損益": 6.0, "預估時長": "4h", "目標價": 2600.0, "停損價": None, "備註": "a"}]
-    edited = [{"預估時長": "", "目標價": float("nan"), "停損價": float("nan"), "備註": "", "真實損益": 5.0},  # NaN = 空白,沒改
-              {"預估時長": "6h", "目標價": 2600.0, "停損價": float("nan"), "備註": "a", "真實損益": 6.0}]
+    original = [{"run_id": "r", "event_index": 1, "真實損益": 5.0, "預估時長": None, "預估單位": "", "目標價": None, "停損價": None,
+                 "備註": ""},
+                {"run_id": "r", "event_index": 2, "真實損益": 6.0, "預估時長": 4, "預估單位": "小時", "目標價": 2600.0,
+                 "停損價": None, "備註": "a"}]
+    edited = [{"預估時長": float("nan"), "預估單位": "", "目標價": float("nan"), "停損價": float("nan"), "備註": "",
+               "真實損益": 5.0},  # NaN = 空白,沒改
+              {"預估時長": 4, "預估單位": "天", "目標價": 2600.0, "停損價": float("nan"), "備註": "a", "真實損益": 6.0}]
     assert actions.pnl_changes(original, edited) == [
-        {"run_id": "r", "event_index": 2, "預估時長": "6h", "目標價": 2600.0, "停損價": None, "備註": "a"}]
+        {"run_id": "r", "event_index": 2, "預估時長": 4, "預估單位": "天", "目標價": 2600.0, "停損價": None, "備註": "a"}]
 
 
 def test_pnl_changes_match_rows_by_key_not_position():
     """AG Grid 回傳的是篩選 / 排序後的列(2026-10-14):要用 run_id + event_index 對回原本那一列"""
-    original = [{"run_id": "r", "event_index": 1, "預估時長": "", "目標價": None, "停損價": None, "備註": ""},
-                {"run_id": "r", "event_index": 2, "預估時長": "", "目標價": None, "停損價": None, "備註": ""},
-                {"run_id": "s", "event_index": 1, "預估時長": "", "目標價": None, "停損價": None, "備註": ""}]
-    edited = [{"run_id": "s", "event_index": 1, "預估時長": "", "目標價": 10.0, "停損價": None, "備註": ""},  # 排序後在前
-              {"run_id": "r", "event_index": 1, "預估時長": "", "目標價": None, "停損價": None, "備註": ""}]  # r/2 被篩掉
+    blank = {"預估時長": None, "預估單位": "", "目標價": None, "停損價": None, "備註": ""}
+    original = [{"run_id": "r", "event_index": 1, **blank}, {"run_id": "r", "event_index": 2, **blank},
+                {"run_id": "s", "event_index": 1, **blank}]
+    edited = [{"run_id": "s", "event_index": 1, **blank, "目標價": 10.0},  # 排序後在前
+              {"run_id": "r", "event_index": 1, **blank}]  # r/2 被篩掉
     assert actions.pnl_changes(original, edited) == [
-        {"run_id": "s", "event_index": 1, "預估時長": None, "目標價": 10.0, "停損價": None, "備註": None}]
+        {"run_id": "s", "event_index": 1, "預估時長": None, "預估單位": None, "目標價": 10.0, "停損價": None, "備註": None}]
+
+
+def test_pnl_hold_number_and_unit():
+    """預估時長 = 數字 + 單位下拉(2026-10-14):90 分鐘、1.5 天;沒選單位當小時;數字清空 = 不填"""
+    from strategy_lab.ui.data import hold_seconds
+
+    assert (hold_seconds(90, "分鐘"), hold_seconds(1.5, "天"), hold_seconds(30, "秒")) == (5400, 129600, 30)
+    assert hold_seconds(4, "") == 4 * 3600 and hold_seconds(None, "小時") is None
+    assert hold_seconds(float("nan"), "小時") is None

@@ -273,7 +273,7 @@ def pnl_rows(db_url: str, account: str, strategy: str) -> List[Dict[str, Any]]:
             "數量": num(e.max_position), "建倉價格": num(e.avg_entry), "建倉時間": _hkt(e.start_time).strftime("%m-%d %H:%M"),
             "平倉價格": num(e.avg_exit), "真實損益": num(e.net_pnl), "手續費": fees,
             "手續費佔比": round(fees / abs(gross) * 100, 2) if gross and fees is not None else None,
-            "預估時長": fmt_hold(e.expected_hold_seconds),
+            "預估時長": hold_parts(e.expected_hold_seconds)[0], "預估單位": hold_parts(e.expected_hold_seconds)[1],
             "實際時長": fmt_duration(timedelta(seconds=e.hold_seconds)) if e.hold_seconds is not None else
             fmt_duration(_utc(e.end_time) - _utc(e.start_time)),
             "目標價": num(e.target_price), "停損價": num(e.stop_price), "備註": e.note or "",
@@ -312,15 +312,30 @@ def pnl_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def fmt_hold(seconds: Optional[int]) -> str:
-    """預估時長 → 跟補記一樣的簡寫(90m / 4h / 1.5d),表格裡直接改也用這個格式。"""
+HOLD_UNITS = {"秒": 1, "分鐘": 60, "小時": 3600, "天": 86400}  # 預估時長的單位(下拉選)
+
+
+def hold_parts(seconds: Optional[int]):
+    """預估時長秒數 → (數字, 單位),表格裡數字自己打、單位用下拉選(2026-10-14 使用者)。沒填 = (None, "")。
+    挑最大、又能寫成整數或 .5 的單位:5400 秒 → 90 分鐘,36 小時 → 1.5 天。"""
     if not seconds:
-        return ""
-    if seconds >= 86400 and seconds % 43200 == 0:  # 整天或半天:1d / 1.5d
-        return f"{seconds / 86400:g}d"
-    if seconds % 3600 == 0:
-        return f"{seconds // 3600}h"
-    return f"{seconds / 60:g}m"
+        return None, ""
+    if seconds >= 86400 and seconds % 43200 == 0:
+        value, unit = seconds / 86400, "天"
+    elif seconds % 3600 == 0:
+        value, unit = seconds / 3600, "小時"
+    elif seconds % 60 == 0:
+        value, unit = seconds / 60, "分鐘"
+    else:
+        value, unit = seconds, "秒"
+    return (int(value) if float(value).is_integer() else value), unit
+
+
+def hold_seconds(value: Any, unit: Optional[str]) -> Optional[int]:
+    """(數字, 單位) → 秒數;數字空白 = 不填(None);單位空白當小時。"""
+    if value is None or value == "" or (isinstance(value, float) and value != value):
+        return None
+    return round(float(value) * HOLD_UNITS[unit or "小時"])
 
 
 def _hkt(dt: datetime) -> datetime:

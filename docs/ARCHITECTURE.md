@@ -2049,7 +2049,7 @@ upsert 不重複),檔案改名 `.jsonl.done`;再跑 `setup_db` 確認 account = 
 | 建倉價格 / 建倉時間 / 平倉價格 | `avg_entry` / `start_time` / `avg_exit` |
 | 真實損益 | `net_pnl` = 價差毛利 − 手續費 − 資金費 |
 | 手續費 / 手續費佔比(%) | `fees` / 手續費 ÷ \|價差毛利\| |
-| 預估時長(可後補) | `expected_hold_seconds`,顯示成 90m / 4h / 1.5d(`fmt_hold`,跟補記同格式) |
+| 預估時長 + 單位(可後補) | `expected_hold_seconds` 拆成「數字 + 單位」(`data.hold_parts` / `hold_seconds`):數字自己打,單位從下拉選 秒 / 分鐘 / 小時 / 天(2026-10-14 使用者要求,原本要手打 4h);沒選單位當小時 |
 | 實際時長 | `hold_seconds`(自動) |
 | 目標價 / 停損價 / 備註(可後補) | sl_event 新欄位 `target_price` / `stop_price` / `note` |
 

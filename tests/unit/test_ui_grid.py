@@ -4,7 +4,7 @@
 from strategy_lab.ui import grid
 
 COLS = ["日期", "幣種", "方向", "數量", "建倉價格", "建倉時間", "平倉價格", "真實損益", "手續費", "手續費佔比(%)",
-        "預估時長", "實際時長", "目標價", "停損價", "備註"]
+        "預估時長", "預估單位", "實際時長", "目標價", "停損價", "備註"]
 
 
 def defs():
@@ -22,7 +22,7 @@ def test_every_column_sorts_and_filters_from_its_header():
 
 def test_only_the_backfill_fields_are_editable():
     d = defs()
-    assert {c for c in COLS if d[c].get("editable")} == {"預估時長", "目標價", "停損價", "備註"}
+    assert {c for c in COLS if d[c].get("editable")} == {"預估時長", "預估單位", "目標價", "停損價", "備註"}
 
 
 def test_hidden_keys_and_seconds_columns():
@@ -36,6 +36,14 @@ def test_number_formats_and_duration_sort_by_seconds():
     assert "toFixed(2)" in d["建倉價格"]["valueFormatter"].js_code and "toFixed(2)" in d["平倉價格"]["valueFormatter"].js_code
     assert "toFixed(0)" in d["真實損益"]["valueFormatter"].js_code and "toFixed(0)" in d["手續費"]["valueFormatter"].js_code
     assert "實際秒數" in d["實際時長"]["comparator"].js_code and "預估秒數" in d["預估時長"]["comparator"].js_code
+
+
+def test_expected_hold_is_a_number_with_a_unit_dropdown():
+    """2026-10-14 使用者:預估時長打數字,單位從下拉選(秒 / 分鐘 / 小時 / 天),不用手打 4h"""
+    d = defs()
+    assert d["預估時長"]["filter"] == "agNumberColumnFilter" and d["預估時長"]["cellEditor"] == "agNumberCellEditor"
+    assert d["預估單位"]["cellEditor"] == "agSelectCellEditor"
+    assert d["預估單位"]["cellEditorParams"]["values"] == ["", "秒", "分鐘", "小時", "天"]
 
 
 def test_default_sort_is_newest_first():

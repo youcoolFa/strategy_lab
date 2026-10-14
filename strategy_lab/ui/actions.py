@@ -395,13 +395,14 @@ def _blank(value: Any) -> bool:
 
 
 def save_pnl_edits(db_url: str, edits: List[Dict[str, Any]]) -> int:
-    """損益表裡改的「預估時長 / 目標價 / 停損價 / 備註」寫回 sl_event。每一列要有 run_id、event_index。
+    """損益表裡改的「預估時長(數字 + 單位)/ 目標價 / 停損價 / 備註」寫回 sl_event。每一列要有 run_id、event_index。
     全部驗證過才寫(一列不對就一列都不寫);空白 / NaN = 清空(NULL)。回傳寫了幾列。"""
     from sqlalchemy import create_engine, select
     from sqlalchemy.orm import Session
 
     from strategy_lab.live import free_style as fs
     from strategy_lab.storage.models import SlEvent
+    from strategy_lab.ui.data import HOLD_UNITS, hold_seconds
 
     engine = create_engine(db_url, future=True)
     try:
@@ -411,10 +412,15 @@ def save_pnl_edits(db_url: str, edits: List[Dict[str, Any]]) -> int:
                 event = s.get(SlEvent, (row["run_id"], int(row["event_index"])))
                 if event is None:
                     raise ValueError(f"第 {n} 列找不到這一對交易(可能已被刪除),請重新整理")
+                unit = None if _blank(row.get("預估單位")) else str(row["預估單位"])
+                if unit is not None and unit not in HOLD_UNITS:
+                    raise ValueError(f"第 {n} 列預估時長的單位只能是 {' / '.join(HOLD_UNITS)},收到 {unit!r}")
                 try:
-                    hold = None if _blank(row.get("預估時長")) else fs.parse_hold(str(row["預估時長"]))
-                except fs.FreeStyleError as e:
-                    raise ValueError(f"第 {n} 列預估時長:{e}") from None
+                    hold = hold_seconds(None if _blank(row.get("預估時長")) else row["預估時長"], unit)
+                except (TypeError, ValueError):
+                    raise ValueError(f"第 {n} 列預估時長要是數字,收到 {row.get('預估時長')!r}") from None
+                if hold is not None and hold <= 0:
+                    raise ValueError(f"第 {n} 列預估時長要大於 0")
                 prices = {}
                 for key, label in (("目標價", "target_price"), ("停損價", "stop_price")):
                     value = None if _blank(row.get(key)) else float(row[key])
@@ -428,7 +434,7 @@ def save_pnl_edits(db_url: str, edits: List[Dict[str, Any]]) -> int:
                 note = None if _blank(row.get("備註")) else str(row["備註"]).strip()
                 if note and len(note) > fs.MAX_NOTE_CHARS:
                     raise ValueError(f"第 {n} 列備註最多 {fs.MAX_NOTE_CHARS} 字")
-                planned.append((event, round(hold.total_seconds()) if hold else None, prices, note))
+                planned.append((event, hold, prices, note))
             for event, hold_s, prices, note in planned:
                 event.expected_hold_seconds = hold_s
                 event.target_price, event.stop_price = prices["target_price"], prices["stop_price"]
@@ -439,7 +445,7 @@ def save_pnl_edits(db_url: str, edits: List[Dict[str, Any]]) -> int:
     return len(planned)
 
 
-PNL_EDITABLE = ("預估時長", "目標價", "停損價", "備註")
+PNL_EDITABLE = ("預估時長", "預估單位", "目標價", "停損價", "備註")  # 預估時長 = 數字 + 單位下拉(2026-10-14)
 
 
 def pnl_changes(original: List[Dict[str, Any]], edited: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

@@ -10,16 +10,16 @@ from typing import Any, Dict, List
 
 from st_aggrid import JsCode
 
-EDITABLE = ("預估時長", "目標價", "停損價", "備註")
+EDITABLE = ("預估時長", "預估單位", "目標價", "停損價", "備註")
 HIDDEN = ("run_id", "event_index", "實際秒數", "預估秒數")
-NUMBER_DIGITS = {"數量": None, "建倉價格": 2, "平倉價格": 2, "真實損益": 0, "手續費": 0, "手續費佔比(%)": 2,
+NUMBER_DIGITS = {"預估時長": None, "數量": None, "建倉價格": 2, "平倉價格": 2, "真實損益": 0, "手續費": 0, "手續費佔比(%)": 2,
                  "目標價": None, "停損價": None}
 SECONDS_OF = {"實際時長": "實際秒數", "預估時長": "預估秒數"}
 # 每欄寬度(px):AG Grid 的自動欄寬量不準中文,會把日期、幣種、方向縮成一個字(2026-10-14 實際看到)
 WIDTH = {"日期": 110, "幣種": 100, "方向": 75, "數量": 75, "建倉價格": 95, "建倉時間": 115, "平倉價格": 95,
-         "真實損益": 90, "手續費": 80, "手續費佔比(%)": 115, "預估時長": 135, "實際時長": 140, "目標價": 120,
+         "真實損益": 90, "手續費": 80, "手續費佔比(%)": 115, "預估時長": 135, "預估單位": 105, "實際時長": 140, "目標價": 120,
          "停損價": 120, "備註": 200}
-EDIT_HINT = {"預估時長": "預估時長(可後補)", "目標價": "目標價(可後補)", "停損價": "停損價(可後補)", "備註": "備註(可後補)"}
+EDIT_HINT = {"預估時長": "預估時長(可後補)", "預估單位": "單位 ▼", "目標價": "目標價(可後補)", "停損價": "停損價(可後補)", "備註": "備註(可後補)"}
 
 # 日期欄是 "2026/10/13" 文字:日期篩選要自己比
 _DATE_COMPARATOR = JsCode("""
@@ -65,6 +65,10 @@ def pnl_grid_options(columns: List[str]) -> Dict[str, Any]:
             d["comparator"] = _by_seconds(SECONDS_OF[col])
         if col in EDITABLE:
             d.update(editable=True, cellStyle={"backgroundColor": "rgba(255, 215, 0, 0.08)"})
+            if col == "預估時長":  # 打數字;單位在旁邊下拉選(2026-10-14 使用者)
+                d["cellEditor"] = "agNumberCellEditor"
+            if col == "預估單位":
+                d.update(cellEditor="agSelectCellEditor", cellEditorParams={"values": ["", "秒", "分鐘", "小時", "天"]})
             if col in ("目標價", "停損價"):
                 d["valueParser"] = JsCode("function(p) { const v = p.newValue; "
                                           "return (v === '' || v === null) ? null : Number(v); }")

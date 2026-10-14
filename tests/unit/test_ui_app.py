@@ -564,7 +564,7 @@ PNL_ROW = {"run_id": "r1", "event_index": 1, "日期": "2026/10/09", "幣種": "
            "手續費佔比": 6.25, "預估時長": "", "實際時長": "8 小時 3 分", "目標價": None, "停損價": None, "備註": "",
            "實際秒數": 29000, "預估秒數": None}
 PNL_COLUMNS = ["日期", "幣種", "方向", "數量", "建倉價格", "建倉時間", "平倉價格", "真實損益", "手續費", "手續費佔比(%)",
-               "預估時長", "實際時長", "目標價", "停損價", "備註"]
+               "預估時長", "預估單位", "實際時長", "目標價", "停損價", "備註"]
 
 
 @pytest.fixture
@@ -583,11 +583,11 @@ def test_backfill_tab_is_gone_and_failures_point_to_the_command(unrecorded):
 
 PNL_ROW = {"run_id": "r1", "event_index": 1, "日期": "2026/10/09", "幣種": "ETHUSDT", "方向": "short", "數量": 13.0,
            "建倉價格": 2513.0, "建倉時間": "10-08 21:36", "平倉價格": 2470.0, "真實損益": 450.0, "手續費": 30.0,
-           "手續費佔比": 6.25, "預估時長": "", "實際時長": "8 小時 3 分", "目標價": None, "停損價": None, "備註": "",
-           "實際秒數": 29000, "預估秒數": None}
+           "手續費佔比": 6.25, "預估時長": None, "預估單位": "", "實際時長": "8 小時 3 分", "目標價": None, "停損價": None,
+           "備註": "", "實際秒數": 29000, "預估秒數": None}
 LONG_ROW = {**PNL_ROW, "run_id": "r2", "方向": "long", "日期": "2026/10/07", "真實損益": -6.0, "手續費": 2.0}
 PNL_COLUMNS = ["日期", "幣種", "方向", "數量", "建倉價格", "建倉時間", "平倉價格", "真實損益", "手續費", "手續費佔比(%)",
-               "預估時長", "實際時長", "目標價", "停損價", "備註"]
+               "預估時長", "預估單位", "實際時長", "目標價", "停損價", "備註"]
 
 
 @pytest.fixture
@@ -629,12 +629,13 @@ def test_totals_and_summary_follow_what_the_grid_shows(pnl):
 
 
 def test_save_sends_only_edited_rows(pnl):
-    edited = {**LONG_ROW, "手續費佔比(%)": 6.25, "目標價": 2600.0, "備註": "照計劃"}
+    edited = {**LONG_ROW, "手續費佔比(%)": 6.25, "預估時長": 4, "預估單位": "小時", "目標價": 2600.0, "備註": "照計劃"}
     GRID_RETURN["data"] = pd.DataFrame([{**PNL_ROW, "手續費佔比(%)": 6.25}, edited])
     at = run()
     at.button(key="pnl_save").click().run()
     [(_, edits)] = [c for c in pnl if c[0] == "pnl_save"]
-    assert edits == [{"run_id": "r2", "event_index": 1, "預估時長": None, "目標價": 2600.0, "停損價": None, "備註": "照計劃"}]
+    assert edits == [{"run_id": "r2", "event_index": 1, "預估時長": 4, "預估單位": "小時", "目標價": 2600.0, "停損價": None,
+                      "備註": "照計劃"}]
     assert any("1 列" in str(x.value) for x in at.success)
 
 
