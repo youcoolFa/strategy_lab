@@ -687,3 +687,11 @@ def test_pnl_fee_points_error_does_not_break_the_page(pnl, monkeypatch):
     at = run()
     metrics = {m.label: m.value for m in at.tabs[0].metric}
     assert metrics["手續費點數(ETHUSDT,maker 買+賣)"] == "—" and not at.exception
+
+
+def test_pnl_update_button_reconciles_now(pnl):
+    """2026-10-14 使用者:剛做完一筆手動交易,在損益表手動按更新 → 馬上對帳,新的一對自動記成 free style"""
+    at = run()
+    at.button(key="pnl_update").click().run()
+    assert ("reconcile",) in pnl and not at.exception
+    assert any("更新完成" in str(x.value) for x in at.tabs[0].success)

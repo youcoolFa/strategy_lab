@@ -2053,6 +2053,9 @@ upsert 不重複),檔案改名 `.jsonl.done`;再跑 `setup_db` 確認 account = 
 | 實際時長 | `hold_seconds`(自動) |
 | 目標價 / 停損價 / 備註(可後補) | sl_event 新欄位 `target_price` / `stop_price` / `note` |
 
+**🔄 更新按鈕**(同一天,使用者剛做完一筆手動交易):損益表右上角,按下去馬上跑一次 `reconcile.run_daily`
+(跟每天 08:00 一樣:已平倉的新交易自動記成 free style、發 📝 通知),清快取後表格多出新的一列;還沒平倉的等平倉後再按。
+
 **手續費點數**(同一天,使用者要求):上方第 4 個數字「手續費點數(ETHUSDT,maker 買+賣)」= ETHUSDT 現價 × 所選帳戶的
 maker 費率 × 2(買一次 + 賣一次),例 2500 × 0.02% × 2 = 1.00 點 → 用 maker 開倉、maker 平倉,價格要往有利方向走這麼多點
 才賺回手續費。`data.fee_points`(只讀:`get_last_price` + `get_fee_rates`),頁面 30 秒快取,查不到顯示「—」。

@@ -569,8 +569,16 @@ def _pnl_section():
         return
     accounts = data.list_accounts()
     main = next((i for i, a in enumerate(accounts) if a.upper() == "MAIN"), 0)
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns([3, 3, 1.4])
     account = c1.selectbox("帳戶", accounts, index=main, key="pnl_account")
+    c3.write("")  # 跟下拉選單對齊
+    if c3.button("🔄 更新", key="pnl_update", help="馬上對帳一次:剛做完、已經平倉的交易會自動記成 free style"):
+        from strategy_lab.live import reconcile as rc
+
+        with st.spinner("對帳中(只讀 Bybit)…"):
+            rc.run_daily(DB_URL, datetime.now(timezone.utc))
+        st.cache_data.clear()
+        st.success("更新完成:已平倉的新交易已記成 free style(還沒平倉的等平倉後再按一次)")
     try:
         strategy = c2.selectbox("策略", data.pnl_strategies(DB_URL, account), key="pnl_strategy")
         rows = data.pnl_rows(DB_URL, account, strategy)
