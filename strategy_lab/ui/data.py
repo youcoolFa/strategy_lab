@@ -293,7 +293,7 @@ def fee_points(client: Any, symbol: str = "ETHUSDT") -> Dict[str, Any]:
 
 
 def pnl_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """損益表最底的總結列(使用者指定):數量平均、真實損益總和、手續費總和、手續費佔比平均、
+    """損益表最底的總結列(使用者指定):勝率(淨利 > 0 的對數 ÷ 總對數)、數量平均、真實損益總和、手續費總和、手續費佔比平均、
     實際時長平均、預估時長平均(只平均有值的);其他欄位空白。沒有資料 → {}。"""
     if not rows:
         return {}
@@ -305,6 +305,7 @@ def pnl_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     actual, expected = avg("實際秒數"), avg("預估秒數")
     return {
         "日期": f"總結({len(rows)} 對)", "數量": avg("數量"),
+        "勝率": sum(1 for r in rows if (r.get("真實損益") or 0) > 0) / len(rows),  # 淨利 > 0 才算贏
         "真實損益": sum(r["真實損益"] or 0 for r in rows), "手續費": sum(r["手續費"] or 0 for r in rows),
         "手續費佔比": avg("手續費佔比"),
         "實際時長": fmt_duration(timedelta(seconds=actual)) if actual is not None else "",

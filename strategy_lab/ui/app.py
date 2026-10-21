@@ -588,7 +588,7 @@ def _pnl_section():
     if not rows:
         st.caption(f"帳戶 {account} 的 {strategy} 還沒有任何交易紀錄(全手動交易會在每天 08:00 對帳時自動記成 free style)")
         return
-    m1, m2, m3, m4 = st.columns(4)  # 先佔位置,等表格回傳篩選後的列再填
+    m1, m_win, m2, m3, m4 = st.columns(5)  # 先佔位置,等表格回傳篩選後的列再填
     _fee_points_metric(m4, account)
     st.caption("點欄位標題右邊的 ☰ → 排序 / 篩選(像 Excel);淡黃底的欄位可以直接點進去改;預估時長打數字,單位從旁邊下拉選。")
     table = pd.DataFrame(rows).rename(columns={"手續費佔比": "手續費佔比(%)"})
@@ -601,23 +601,24 @@ def _pnl_section():
     shown_rows = [{k: (None if isinstance(v, float) and v != v else v) for k, v in r.items()}
                   for r in pd.DataFrame(shown).to_dict("records")]
     m1.metric("交易對數", len(shown_rows))
+    wins = sum(1 for r in shown_rows if (r.get("真實損益") or 0) > 0)
+    m_win.metric("勝率", f"{wins / len(shown_rows) * 100:.1f}%" if shown_rows else "—",
+                 help=f"真實損益(淨利,已扣手續費、資金費)> 0 的對數 ÷ 總對數 = {wins} / {len(shown_rows)}")
     m2.metric("真實損益合計(USDT)", f"{sum(r.get('真實損益') or 0 for r in shown_rows):.0f}")
     m3.metric("手續費合計(USDT)", f"{sum(r.get('手續費') or 0 for r in shown_rows):.0f}")
     if not shown_rows:
         st.caption("篩選後沒有交易,放寬欄位標題上的篩選看看")
         return
     summary = data.pnl_summary([{**r, "手續費佔比": r.get("手續費佔比(%)")} for r in shown_rows])
-    shown_summary = {  # 總結列(使用者指定的幾欄);全部用文字,空的留白
-        "日期": summary["日期"],
-        "數量": f"{summary['數量']:.2f}" if summary["數量"] is not None else "",
-        "真實損益": f"{summary['真實損益']:.0f}", "手續費": f"{summary['手續費']:.0f}",
-        "手續費佔比(%)": f"{summary['手續費佔比']:.2f}" if summary["手續費佔比"] is not None else "",
-        "實際時長": summary["實際時長"], "預估時長": summary["預估時長"],
+    shown_summary = {  # 總結表:只放有數字的欄位(2026-10-21 使用者:沒用的欄位去掉、加勝率)
+        "總結": f"{len(shown_rows)} 對",
+        "勝率": f"{summary['勝率'] * 100:.1f}%",
+        "數量(平均)": f"{summary['數量']:.2f}" if summary["數量"] is not None else "",
+        "真實損益(總和)": f"{summary['真實損益']:.0f}", "手續費(總和)": f"{summary['手續費']:.0f}",
+        "手續費佔比(%,平均)": f"{summary['手續費佔比']:.2f}" if summary["手續費佔比"] is not None else "",
+        "實際時長(平均)": summary["實際時長"], "預估時長(平均)": summary["預估時長"] or "未填",
     }
-    st.dataframe(pd.DataFrame([{c: shown_summary.get(c, "") for c in _PNL_SHOWN}]), hide_index=True, width="stretch",
-                 column_config={"數量": "數量(平均)", "真實損益": "真實損益(總和)", "手續費": "手續費(總和)",
-                                "手續費佔比(%)": "手續費佔比(%,平均)", "實際時長": "實際時長(平均)",
-                                "預估時長": "預估時長(平均)"})
+    st.dataframe(pd.DataFrame([shown_summary]), hide_index=True, width="stretch")
     st.caption("真實損益 = 淨利(已扣手續費、資金費);手續費佔比 = 手續費 ÷ 價差毛利;日期 = 平倉日(HKT);"
                "數量 = 這一對交易的最大持倉。儲存只會存目前表格看得到(沒被篩掉)的列。")
     if st.button("💾 儲存後補欄位", key="pnl_save"):

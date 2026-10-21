@@ -617,6 +617,10 @@ def test_pnl_defaults_and_the_grid_gets_every_column(pnl):
     assert not at.exception
 
 
+SUMMARY_COLUMNS = ["總結", "勝率", "數量(平均)", "真實損益(總和)", "手續費(總和)", "手續費佔比(%,平均)", "實際時長(平均)",
+                   "預估時長(平均)"]
+
+
 def test_totals_and_summary_follow_what_the_grid_shows(pnl):
     """在表格裡篩選後(假 AG Grid 只回傳 long 那一列),合計和總結列跟著變"""
     GRID_RETURN["data"] = pd.DataFrame([{**LONG_ROW, "手續費佔比(%)": LONG_ROW["手續費佔比"]}])
@@ -624,9 +628,22 @@ def test_totals_and_summary_follow_what_the_grid_shows(pnl):
     metrics = {m.label: m.value for m in at.tabs[0].metric}
     assert (metrics["交易對數"], metrics["真實損益合計(USDT)"], metrics["手續費合計(USDT)"]) == ("1", "-6", "2")
     summary = at.tabs[0].dataframe[0].value.iloc[0]
-    assert (summary["日期"], summary["真實損益"], summary["手續費"]) == ("總結(1 對)", "-6", "2")
-    assert list(at.tabs[0].dataframe[0].value.columns) == PNL_COLUMNS
+    assert (summary["總結"], summary["真實損益(總和)"], summary["手續費(總和)"]) == ("1 對", "-6", "2")
 
+
+def test_summary_has_only_useful_columns_and_win_rate(pnl):
+    """2026-10-21 使用者:總結表去掉沒用(空白)的欄位,加勝率"""
+    at = run()  # 一賺(450)一虧(-6)
+    summary = at.tabs[0].dataframe[0].value
+    assert list(summary.columns) == SUMMARY_COLUMNS
+    assert summary.iloc[0]["勝率"] == "50.0%"
+
+
+def test_win_rate_is_a_big_number_on_top(pnl):
+    at = run()
+    metrics = {m.label: m.value for m in at.tabs[0].metric}
+    assert metrics["勝率"] == "50.0%"
+    assert [m.label for m in at.tabs[0].metric][:2] == ["交易對數", "勝率"]
 
 def test_save_sends_only_edited_rows(pnl):
     edited = {**LONG_ROW, "手續費佔比(%)": 6.25, "預估時長": 4, "預估單位": "小時", "目標價": 2600.0, "備註": "照計劃"}

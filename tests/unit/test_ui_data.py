@@ -346,7 +346,7 @@ def test_pnl_summary_row():
     assert s["數量"] == pytest.approx(6.0) and s["真實損益"] == pytest.approx(41.24) and s["手續費"] == pytest.approx(23.6)
     assert s["手續費佔比"] == pytest.approx(17.2)  # 只平均有數字的
     assert s["實際時長"] == "1 小時 10 分" and s["預估時長"] == "3 小時 0 分"
-    assert {k for k, v in s.items() if v not in ("", None)} == {"日期", "數量", "真實損益", "手續費", "手續費佔比", "實際時長", "預估時長"}
+    assert {k for k, v in s.items() if v not in ("", None)} == {"日期", "勝率", "數量", "真實損益", "手續費", "手續費佔比", "實際時長", "預估時長"}
 
 
 def test_pnl_summary_of_nothing_is_empty():
@@ -369,3 +369,12 @@ def test_fee_points_round_trip_at_maker_rate():
     got = data.fee_points(Client())
     assert (got["symbol"], got["price"], got["maker_rate"]) == ("ETHUSDT", 2516.0, 0.0002)
     assert got["points"] == pytest.approx(2516.0 * 0.0002 * 2)
+
+
+def test_pnl_summary_win_rate():
+    """勝率(2026-10-21 使用者):真實損益(淨利)> 0 的對數 ÷ 總對數;剛好 0 不算贏"""
+    rows = [{"數量": 1.0, "真實損益": 5.0, "手續費": 1.0, "手續費佔比": None, "實際秒數": 60, "預估秒數": None},
+            {"數量": 1.0, "真實損益": -3.0, "手續費": 1.0, "手續費佔比": None, "實際秒數": 60, "預估秒數": None},
+            {"數量": 1.0, "真實損益": 0.0, "手續費": 1.0, "手續費佔比": None, "實際秒數": 60, "預估秒數": None},
+            {"數量": 1.0, "真實損益": 8.0, "手續費": 1.0, "手續費佔比": None, "實際秒數": 60, "預估秒數": None}]
+    assert data.pnl_summary(rows)["勝率"] == pytest.approx(0.5)
