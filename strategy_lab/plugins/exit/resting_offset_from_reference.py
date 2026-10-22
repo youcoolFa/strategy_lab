@@ -1,4 +1,4 @@
-"""weekend_band_reversion 的平倉機制:跟 resting_return_to_reference 一樣,
+"""sat_strategy 的平倉機制:跟 resting_return_to_reference 一樣,
 進場一成交就馬上掛 reduceOnly 限價平倉單,差別在平倉點不是 origin,而是
 往獲利方向再偏 offset_pct%:
     long  -> 賣出平倉在 origin × (1 + offset_pct%)

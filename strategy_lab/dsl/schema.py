@@ -41,8 +41,8 @@ class StrategyDefinition(BaseModel):
     # 分注策略(engine/scale_in_runner.py)= true;必須跟 entry/exit plugin 一致,
     # dsl/loader.py 會檢查。每個策略 YAML 都明確寫出來,一眼看得出是哪一種。
     scale_in: bool = False
-    # 區間策略(engine/band_runner.py)= true:上下各掛一張、成交就在對面補一張;必須跟 entry/exit plugin
-    # 一致、direction 要是 both(dsl/loader.py 檢查)。2026-10-10 weekend_band_reversion 改版。
+    # 區間策略(engine/band_runner.py)= true:上下各掛一張進場單、成交就在起點平倉再補回進場單;必須跟 entry/exit plugin
+    # 一致、direction 要是 both(dsl/loader.py 檢查)。2026-10-10 sat_strategy 改版。
     band: bool = False
     # 預估持倉時間(分注策略):{value: 4, unit: hours};持倉超過就 🟡 警告,不自動平倉;
     # null = 不預估。格式由 engine/hold_time.parse_expected_hold 檢查(2026-10-09)。

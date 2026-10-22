@@ -76,14 +76,15 @@ class OrderPlanMetric:
 
     @staticmethod
     def _band_rows(plan, price):
-        """區間策略(2026-10-10):上下各一張,成交就在對面補一張。"""
+        """區間策略(sat_strategy,2026-10-17):上下各一張進場單;哪邊成交就在起點掛反向平倉單,平倉成交後把進場單補回去。"""
         buy, sell = plan.entry_price, plan.band_sell_price
         rows = [
             Row("origin", "origin", f"{plan.origin_price}({plan.origin_source}),離現價 {_pct(plan.origin_price, price)}", plan.origin_price),
-            Row("band_buy", "買單", f"買 {buy}(離現價 {_pct(buy, price)})× {plan.qty}", buy),
-            Row("band_sell", "賣單", f"賣 {sell}(離現價 {_pct(sell, price)})× {plan.qty}", sell),
+            Row("band_buy", "買單(進場做多)", f"買 {buy}(離現價 {_pct(buy, price)})× {plan.qty}", buy),
+            Row("band_sell", "賣單(進場做空)", f"賣 {sell}(離現價 {_pct(sell, price)})× {plan.qty}", sell),
+            Row("band_exit", "平倉", f"哪邊成交,就立刻在起點 {plan.origin_price} 掛反向平倉單(reduce_only);另一邊的進場單繼續掛著"),
             Row("band_rule", "規則",
-                f"成交一張就在對面價位補一張同數量的單;第一張成交後持倉在 ±{plan.qty:g} 之間切換,直到收尾"),
+                "平倉成交後把這一邊的進場單補回去,回到最初狀態,一直循環(沒有次數上限),直到收尾"),
         ]
         if plan.entry_crosses_market:
             rows.append(Row("entry_crosses_market", "⚠ 掛單",
@@ -91,6 +92,6 @@ class OrderPlanMetric:
         else:
             rows.append(Row("entry_crosses_market", "掛單", "兩張都在交易所上等價格碰到(maker)"))
         rows.append(Row("stop_loss", "停損", "無停損"))
-        rows.append(Row("notional", "數量 / 名義價值", f"{plan.qty} / {plan.notional:.2f} USDT(最大部位 ±{plan.qty:g})", plan.notional))
+        rows.append(Row("notional", "數量 / 名義價值", f"{plan.qty} / {plan.notional:.2f} USDT(同一時間最多一筆持倉,最大部位 {plan.qty:g})", plan.notional))
         return rows
 

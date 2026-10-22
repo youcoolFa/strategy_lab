@@ -180,7 +180,7 @@ class TestStrategyInfo:
 
 
 EXAMPLE = """# 範本
-strategy_path: strategies/weekend_band_reversion.yaml  # 要跑哪個策略
+strategy_path: strategies/sat_strategy.yaml  # 要跑哪個策略
 symbol_override: null  # 幣種
 entry_prices: null  # 分注每注建倉價
 dry_run: true   # 先觀察
@@ -212,8 +212,8 @@ class TestConfigFor:
         assert path == root / "live_scale_in_ladder_wldusdt.yaml" and not path.exists()
 
     def test_same_symbol_but_other_strategy_is_a_different_config(self, root):
-        path = actions.config_for(root, "strategies/weekend_band_reversion.yaml", "SUIUSDT")
-        assert path.name == "live_weekend_band_reversion_suiusdt.yaml"
+        path = actions.config_for(root, "strategies/sat_strategy.yaml", "SUIUSDT")
+        assert path.name == "live_sat_strategy_suiusdt.yaml"
 
     def test_symbol_is_required(self, root):
         with pytest.raises(ValueError, match="幣種"):
@@ -291,7 +291,7 @@ class TestBandStrategyFromThePage:
     """區間策略(2026-10-10):頁面填買賣 %,寫進設定檔的 strategy_overrides.band;不寫 loop(一定做到收尾)。"""
 
     def test_strategy_info_reports_band_and_its_pct(self):
-        info = actions.strategy_info(Path(__file__).resolve().parents[2] / "strategies" / "weekend_band_reversion.yaml")
+        info = actions.strategy_info(Path(__file__).resolve().parents[2] / "strategies" / "sat_strategy.yaml")
         assert info["band"] is True and info["scale_in"] is False
         assert info["buy_pct"] > 0 and info["sell_pct"] > 0
 
@@ -300,11 +300,11 @@ class TestBandStrategyFromThePage:
         assert info["band"] is False
 
     def test_prepare_config_writes_band_pct_and_no_loop(self, root):
-        path = actions.prepare_config(root, "strategies/weekend_band_reversion.yaml", "xrpusdt", TestPrepareConfig.SETTINGS,
+        path = actions.prepare_config(root, "strategies/sat_strategy.yaml", "xrpusdt", TestPrepareConfig.SETTINGS,
                                       {"band": {"buy_pct": 0.3, "sell_pct": 0.5}, "loop": 3},
                                       example=root / "live_execution_config.example.yaml")
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert path.name == "live_weekend_band_reversion_xrpusdt.yaml"
+        assert path.name == "live_sat_strategy_xrpusdt.yaml"
         assert data["strategy_overrides"] == {"band": {"buy_pct": 0.3, "sell_pct": 0.5}}
         assert data["dry_run"] is False and data["testnet"] is False
 
@@ -318,10 +318,10 @@ class TestBandStrategyFromThePage:
 
     def test_bad_band_pct_rejected_before_writing(self, root):
         with pytest.raises(ValueError, match="buy_pct"):
-            actions.prepare_config(root, "strategies/weekend_band_reversion.yaml", "XRPUSDT", TestPrepareConfig.SETTINGS,
+            actions.prepare_config(root, "strategies/sat_strategy.yaml", "XRPUSDT", TestPrepareConfig.SETTINGS,
                                    {"band": {"buy_pct": 0, "sell_pct": 0.5}},
                                    example=root / "live_execution_config.example.yaml")
-        assert not (root / "live_weekend_band_reversion_xrpusdt.yaml").exists()
+        assert not (root / "live_sat_strategy_xrpusdt.yaml").exists()
 
 
 class TestAccountConfig:

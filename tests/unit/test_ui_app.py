@@ -157,6 +157,54 @@ def test_tabs(fake):
     assert [t.label for t in at.tabs] == ["損益表", "sat_strategy", "策略", "交易紀錄", "Log", "總覽"]  # 10-22 加 sat_strategy
 
 
+# ---------------------------------------------------------------- 總覽:背景程式表下面的 停止 / 結束(2026-10-17)
+# 使用者要求:停止、結束鍵放在總覽的背景程式表旁邊,不用切到策略分頁。確認方式不變(打 STOP / 勾我確認),
+# 只放停止與結束,不放交接;key 都加 ov_ 前綴,避免跟策略分頁同一支 daemon 的元件撞 key。
+
+def test_overview_stop_requires_STOP_typed_for_an_alive_daemon(fake):
+    calls, _ = fake
+    at = run()
+    c = "live_execution_config"
+    assert not at.exception  # 兩個分頁都畫同一支 daemon:key 不能重複
+    at.text_input(key=f"ov_stop_typed_{c}").input("stop")
+    at.button(key=f"ov_stop_btn_{c}").click().run()
+    assert ("stop", "live_execution_config.yaml") not in calls
+    at.text_input(key=f"ov_stop_typed_{c}").input("STOP")
+    at.button(key=f"ov_stop_btn_{c}").click().run()
+    assert ("stop", "live_execution_config.yaml") in calls and not at.exception
+
+
+def test_overview_offers_stop_but_not_handover(fake):
+    at = run()
+    keys = [b.key for b in at.button] + [t.key for t in at.text_input]
+    assert "ov_stop_btn_live_execution_config" in keys
+    assert not any(str(k).startswith("ov_handover") for k in keys)
+
+
+def test_overview_has_no_stop_when_no_daemon_is_alive(fake, monkeypatch, tmp_path):
+    monkeypatch.setattr(data, "list_daemons", lambda *a: [data.DaemonRow(
+        config="live_execution_config", symbol="SUIUSDT", pid=None, alive=False,
+        console_log=tmp_path / "c.log", last_log_at=NOW - timedelta(minutes=90))])
+    monkeypatch.setattr(data, "unfinished_runs", lambda url: {})
+    at = run()
+    assert not at.exception
+    assert not any(str(b.key).startswith("ov_") for b in at.button)
+
+
+def test_overview_free_style_end_requires_confirmation_and_sends_summary(fake, monkeypatch):
+    calls, _ = fake
+    monkeypatch.setattr(data, "unfinished_runs", lambda url: {("TEST1", "ETHUSDT"): {
+        "symbol": "ETHUSDT", "account": "test1", "strategy_name": "free style", "git_commit": None, "started_at": NOW}})
+    at = run()
+    assert not at.exception
+    at.button(key="ov_fs_stop_test1_ETHUSDT").click().run()
+    assert ("fs_stop", "ETHUSDT") not in calls  # 沒勾我確認
+    at.checkbox(key="ov_fs_stop_confirm_test1_ETHUSDT").check()
+    at.button(key="ov_fs_stop_test1_ETHUSDT").click().run()
+    assert ("fs_stop", "ETHUSDT") in calls
+    assert ("telegram", "🏁 free style 結束|RESULT") in calls and not at.exception
+
+
 # ---------------------------------------------------------------- 策略:選策略
 
 def test_strategy_choices_are_every_strategy_yaml_plus_free_style(fake):
@@ -337,7 +385,7 @@ def test_running_row_handover_only_with_HANDOVER_typed(fake):
 
 # ---------------------------------------------------------------- 區間策略(2026-10-10)
 
-BAND_CONFIG = """strategy_path: strategies/weekend_band_reversion.yaml
+BAND_CONFIG = """strategy_path: strategies/sat_strategy.yaml
 symbol_override: XRPUSDT
 dry_run: false
 testnet: false
@@ -347,14 +395,14 @@ position_sizing:
 strategy_overrides:
   band: {buy_pct: 0.3, sell_pct: 0.5}
 """
-BAND_ROW = {"kind": "strategy", "config": "live_weekend_band_reversion_xrpusdt", "symbol": "XRPUSDT",
-            "strategy": "weekend_band_reversion", "mode": "🔴 實盤", "started_at": NOW}
+BAND_ROW = {"kind": "strategy", "config": "live_sat_strategy_xrpusdt", "symbol": "XRPUSDT",
+            "strategy": "sat_strategy", "mode": "🔴 實盤", "started_at": NOW}
 
 
 def test_band_form_asks_buy_and_sell_pct_only(fake):
     calls, _ = fake
     at = run()
-    at.radio(key="new_strategy").set_value("weekend_band_reversion").run()
+    at.radio(key="new_strategy").set_value("sat_strategy").run()
     at.text_input(key="new_symbol").input("xrpusdt").run()
     keys = {w.key for w in list(at.text_input) + list(at.number_input) + list(at.checkbox)}
     assert {"new_buy_pct", "new_sell_pct"} <= keys
@@ -363,7 +411,7 @@ def test_band_form_asks_buy_and_sell_pct_only(fake):
     at.number_input(key="new_sell_pct").set_value(0.5).run()
     at.button(key="new_prepare").click().run()
     [(_, strategy, symbol, settings, params)] = [c for c in calls if c[0] == "prepare"]
-    assert strategy == "strategies/weekend_band_reversion.yaml" and symbol == "XRPUSDT"
+    assert strategy == "strategies/sat_strategy.yaml" and symbol == "XRPUSDT"
     assert params == {"band": {"buy_pct": 0.3, "sell_pct": 0.5}}
     assert "adopt_existing_position" not in settings
     assert not at.exception
@@ -386,14 +434,14 @@ def test_every_non_band_strategy_offers_long_and_short(fake):
 
 def test_band_strategy_has_no_direction_choice(fake):
     at = run()
-    at.radio(key="new_strategy").set_value("weekend_band_reversion").run()
+    at.radio(key="new_strategy").set_value("sat_strategy").run()
     at.text_input(key="new_symbol").input("xrp").run()
     assert "new_direction" not in [r.key for r in at.radio]
 
 def test_running_band_row_offers_stop_only(fake):
     _, state = fake
     root = actions_root(fake)
-    (root / "live_weekend_band_reversion_xrpusdt.yaml").write_text(BAND_CONFIG, encoding="utf-8")
+    (root / "live_sat_strategy_xrpusdt.yaml").write_text(BAND_CONFIG, encoding="utf-8")
     state["active"] = [BAND_ROW]
     at = run()
     c = BAND_ROW["config"]

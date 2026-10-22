@@ -1,4 +1,4 @@
-"""區間策略(weekend_band_reversion,2026-10-10 改版)的 plugin:
+"""區間策略(sat_strategy,2026-10-10 改版)的 plugin:
 上下各掛一張(買 = origin × (1 − buy_pct%)、賣 = origin × (1 + sell_pct%)),成交一張就在對面補一張。
 買、賣的 % 分開設。下單與補單由 engine/band_runner.py 處理,plugin 只負責價格。"""
 

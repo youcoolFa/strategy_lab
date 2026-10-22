@@ -51,7 +51,7 @@ class TestWeekendBandReversionYaml:
         from strategy_lab.plugins.entry.band import BandEntry
         from strategy_lab.plugins.exit.band import BandExit
 
-        strategy = load_strategy(STRATEGIES_DIR / "weekend_band_reversion.yaml")
+        strategy = load_strategy(STRATEGIES_DIR / "sat_strategy.yaml")
         assert strategy.band is True and strategy.scale_in is False
         assert isinstance(strategy.entry, BandEntry) and isinstance(strategy.exit, BandExit)
         assert strategy.entry.buy_pct > 0 and strategy.entry.sell_pct > 0

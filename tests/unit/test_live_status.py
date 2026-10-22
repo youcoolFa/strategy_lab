@@ -168,7 +168,7 @@ class TestHoldTimeInStatus:
 
 
 class TestBandMessages:
-    """區間策略(2026-10-10):啟動訊息列出上下兩個價位與規則;狀態回報的掛單標「區間」。"""
+    """區間策略(sat_strategy):啟動訊息列出上下兩個進場價位與規則(成交就在起點平倉);狀態回報的掛單標「進場」/「平倉」。"""
 
     def _runner(self):
         from strategy_lab.engine.band_runner import BandRunner
@@ -184,13 +184,14 @@ class TestBandMessages:
     def test_start_message_shows_both_prices_and_the_rule(self):
         msg = start_message(self._runner(), CONFIG, "XRPUSDT", 100.0, NOW, 60)
         assert "買 99 × 2" in msg and "賣 102 × 2" in msg
-        assert "對面" in msg and "±2" in msg
+        assert "起點" in msg and "平倉" in msg and "補回" in msg
+        assert "對面" not in msg and "切換" not in msg  # 舊邏輯的說法
         assert "最大部位 2" in msg
 
     def test_status_lists_band_orders(self):
         runner = self._runner()
         runner.tick(NOW, 100.0)
-        runner.tick(NOW + timedelta(minutes=5), 99.0)  # 買單成交 → 對面兩張賣單
+        runner.tick(NOW + timedelta(minutes=5), 99.0)  # 買單成交 → 在起點掛平倉賣單,賣價的進場單還掛著
         msg = status_message(runner, CONFIG, "XRPUSDT", 100.0, NOW + timedelta(hours=1), started_at=NOW)
-        assert msg.count("區間 Sell 2 @ 102") == 2
+        assert "平倉 Sell 2 @ 100" in msg and "進場 Sell 2 @ 102" in msg
         assert "部位 多 2" in msg

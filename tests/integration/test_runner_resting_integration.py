@@ -134,7 +134,7 @@ class TestRestingPluginsRequireLimitOrders:
 
 
 class TestBandReversionCycle:
-    """weekend_band_reversion:進場在 origin 下方 1%,平倉在 origin 上方 1%。"""
+    """sat_strategy:進場在 origin 下方 1%,平倉在 origin 上方 1%。"""
 
     def _runner(self, direction):
         from strategy_lab.plugins.exit.resting_offset_from_reference import RestingOffsetFromReferenceExit

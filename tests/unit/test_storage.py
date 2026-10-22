@@ -25,8 +25,8 @@ def t(minutes):
 
 def run_info(**overrides):
     base = dict(
-        strategy_name="weekend_band_reversion", strategy_path="strategies/weekend_band_reversion.yaml",
-        strategy_yaml="name: weekend_band_reversion\n", strategy_params={"direction": "long"},
+        strategy_name="sat_strategy", strategy_path="strategies/sat_strategy.yaml",
+        strategy_yaml="name: sat_strategy\n", strategy_params={"direction": "long"},
         config={"symbol_override": "BTCUSDT", "dry_run": False}, symbol="BTCUSDT", category="linear",
         direction="long", origin_price=1000.0, origin_source="手動輸入", qty=1.0, order_type="limit",
         loop=None, testnet=False, preflight=None, log_path="logs/x.log", started_at=T0,
@@ -96,7 +96,7 @@ class TestRunLifecycle:
 
         [run] = rows(db, SlRun)
         assert run.run_id == run_id
-        assert run.strategy_name == "weekend_band_reversion"
+        assert run.strategy_name == "sat_strategy"
         assert run.config["symbol_override"] == "BTCUSDT"
         assert run.end_reason == "window_cleanup"
         assert run.ended_at is not None
@@ -425,7 +425,7 @@ class TestRecorderWritesAccount:
         [r] = rows(db, SlRun)
         assert (r.account, r.bybit_uid) == ("MAIN", "22222222")
         [e] = rows(db, SlEvent)
-        assert (e.account, e.strategy_name) == ("MAIN", "weekend_band_reversion")
+        assert (e.account, e.strategy_name) == ("MAIN", "sat_strategy")
 
     def test_account_defaults_to_none_for_old_callers(self, db, tmp_path):
         rec = make_recorder(db, tmp_path, FakeExecutions([]))
@@ -450,7 +450,7 @@ class TestBackfillAccount:
         runs = {r.run_id: r for r in rows(db, SlRun)}
         assert runs[old.run_id].account == "test1" and runs[new.run_id].account == "MAIN"
         [e] = rows(db, SlEvent)
-        assert (e.account, e.strategy_name) == ("test1", "weekend_band_reversion")
+        assert (e.account, e.strategy_name) == ("test1", "sat_strategy")
 
 
 class TestRunNote:

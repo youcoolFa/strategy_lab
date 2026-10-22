@@ -47,7 +47,7 @@ class FakeClient:
 def write_config(tmp_path, origin="84967.5", dry_run="false", sizing="fixed_qty", value="0.001"):
     path = tmp_path / "live_btc_band.yaml"
     path.write_text(
-        "strategy_path: strategies/weekend_band_reversion.yaml\n"
+        "strategy_path: strategies/sat_strategy.yaml\n"
         "symbol_override: BTCUSDT\n"
         f"origin_price: {origin}\n"
         f"dry_run: {dry_run}\ntestnet: false\n"
@@ -215,14 +215,16 @@ def write_band_config(tmp_path, origin="null", adopt="false"):
 
 
 class TestBandPreflight:
-    """區間策略(2026-10-10):預覽列出上下兩張單與規則;交易所上有殘留就拒絕(不支援接手)。"""
+    """區間策略(sat_strategy):預覽列出上下兩張進場單、起點平倉與規則;交易所上有殘留就拒絕(不支援接手)。"""
 
     def test_shows_both_orders_and_starts_after_yes(self, tmp_path, monkeypatch):
         code, out, started = run(tmp_path, FakeClient(price=100000.0), "yes", monkeypatch,
                                  config=write_band_config(tmp_path))
         assert code == 0 and len(started) == 1
         assert "買 99900" in out and "賣 100200" in out  # origin = 現價 100000
-        assert "對面" in out and "每次穿過區間" in out and "多單或空單" in out
+        assert "起點" in out and "平倉" in out and "補回" in out  # 哪邊成交就在起點平倉、再把進場單補回去
+        assert "做多一輪" in out and "做空一輪" in out and "多單或空單" in out
+        assert "對面" not in out and "每次穿過區間" not in out  # 舊邏輯的說法
 
     def test_leftovers_are_refused_even_with_adopt(self, tmp_path, monkeypatch):
         client = FakeClient(price=100000.0, position=0.001)

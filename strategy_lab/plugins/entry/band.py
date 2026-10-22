@@ -1,9 +1,9 @@
-"""區間策略的建倉 plugin(weekend_band_reversion,2026-10-10 改版):只決定兩個價位。
+"""區間策略的建倉 plugin(sat_strategy,2026-10-10 改版):只決定兩個價位。
 
     買單 = origin × (1 − buy_pct%)    賣單 = origin × (1 + sell_pct%)
 
-一啟動上下各掛一張;成交一張就在對面價位補一張同數量的單,持倉在 ±1 之間切換
-(單向持倉:買賣單是淨部位的加減),直到時間窗結束收尾。下單與補單由 engine/band_runner.py 處理。"""
+一啟動上下各掛一張進場單;哪邊成交就在 origin 掛反向的平倉單,平倉成交後把這一邊的進場單補回去,
+一直循環(2026-10-17 改版),直到時間窗結束收尾。下單與補單由 engine/band_runner.py 處理。"""
 
 from __future__ import annotations
 
