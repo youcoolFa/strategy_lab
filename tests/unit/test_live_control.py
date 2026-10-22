@@ -271,7 +271,7 @@ class TestBandOverride:
 
     def test_band_override_replaces_buy_and_sell_pct(self):
         config = ExecutionConfig(strategy_overrides={"band": {"buy_pct": 0.3, "sell_pct": 0.5}})
-        strategy = apply_strategy_overrides(load_strategy("strategies/weekend_band_reversion.yaml"), config)
+        strategy = apply_strategy_overrides(load_strategy("strategies/sat_strategy.yaml"), config)
         assert (strategy.entry.buy_pct, strategy.entry.sell_pct) == (0.3, 0.5)
 
     def test_band_override_on_a_non_band_strategy_is_an_error(self):
@@ -282,7 +282,7 @@ class TestBandOverride:
     def test_bad_band_values_are_rejected(self):
         config = ExecutionConfig(strategy_overrides={"band": {"buy_pct": 0, "sell_pct": 0.5}})
         with pytest.raises(ValueError, match="buy_pct"):
-            apply_strategy_overrides(load_strategy("strategies/weekend_band_reversion.yaml"), config)
+            apply_strategy_overrides(load_strategy("strategies/sat_strategy.yaml"), config)
 
 
 class TestWriteBackBand:

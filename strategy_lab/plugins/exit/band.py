@@ -1,7 +1,7 @@
-"""區間策略的平倉 plugin(weekend_band_reversion,2026-10-10 改版):只是標記,沒有參數。
+"""區間策略的平倉 plugin(sat_strategy,2026-10-10 改版):只是標記,沒有參數。
 
-區間策略的平倉就是對面那張補單(多單在賣價被平掉、同時翻成空單,反之亦然),
-價位由 entry/band.py 決定,下單由 engine/band_runner.py 處理。策略 YAML 規定要有 exit,所以寫:
+區間策略的平倉價 = origin(2026-10-17 改版):進場單成交後,由 engine/band_runner.py 立刻在 origin 掛反向的
+reduce_only 限價單。策略 YAML 規定要有 exit,所以寫:
     exit:
       type: band
       params: {}
@@ -30,4 +30,4 @@ class BandExit:
         self.rule = AlwaysTrue()
 
     def exit_price(self, ctx: StrategyContext) -> float:
-        raise NotImplementedError("區間策略沒有獨立的平倉價:對面那張補單就是平倉")
+        raise NotImplementedError("區間策略的平倉價就是 origin,由 BandRunner 直接掛單")

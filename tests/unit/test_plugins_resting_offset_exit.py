@@ -1,4 +1,4 @@
-"""weekend_band_reversion 的平倉 plugin:平倉點不是 origin,而是往獲利
+"""sat_strategy 的平倉 plugin:平倉點不是 origin,而是往獲利
 方向再偏 offset_pct%——long 在 origin 上方,short 在 origin 下方。"""
 
 from datetime import datetime, timezone

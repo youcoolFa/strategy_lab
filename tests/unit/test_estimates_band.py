@@ -1,4 +1,5 @@
-"""區間策略(2026-10-10)的啟動前估算:上下兩個價位、每次穿過區間的損益、風險。"""
+"""區間策略(sat_strategy)的啟動前估算:上下兩個進場價位、在起點平倉的每輪損益(做多一輪 / 做空一輪)、風險。
+2026-10-17 改成「各自回到起點平倉」:平倉價 = origin,不再是對面價位。"""
 
 from datetime import datetime, timedelta, timezone
 
@@ -28,7 +29,7 @@ def band_plan(price=100.0, origin=100.0, buy_pct=1.0, sell_pct=2.0, qty=2.0):
     from strategy_lab.estimates.plan import build_band_plan
     from strategy_lab.plugins.entry.band import BandEntry
 
-    return build_band_plan(strategy_name="weekend_band_reversion", entry=BandEntry(buy_pct=buy_pct, sell_pct=sell_pct),
+    return build_band_plan(strategy_name="sat_strategy", entry=BandEntry(buy_pct=buy_pct, sell_pct=sell_pct),
                            origin_price=origin, origin_source="啟動當下即時價", qty=qty, market=market(price),
                            cleanup_at=NOW + timedelta(days=2))
 
@@ -36,9 +37,9 @@ def band_plan(price=100.0, origin=100.0, buy_pct=1.0, sell_pct=2.0, qty=2.0):
 class TestBuildBandPlan:
     def test_buy_below_sell_above_origin(self):
         plan = band_plan()
-        assert plan.band is True and plan.direction == "long"  # 每輪損益照 買價 → 賣價 算
+        assert plan.band is True and plan.direction == "long"  # level 1 = 做多一輪:買價 → 起點
         assert plan.entry_price == pytest.approx(99.0) and plan.band_sell_price == pytest.approx(102.0)
-        assert plan.take_profit == pytest.approx(102.0) and plan.qty == 2.0
+        assert plan.take_profit == pytest.approx(100.0) and plan.qty == 2.0  # 平倉價 = 起點
         assert plan.exit_resting is True and plan.stop_loss is None and plan.loop is None
         assert plan.entry_crosses_market is False
 
@@ -63,8 +64,8 @@ class TestOrderPlanMetricForBand:
     def test_lists_both_orders_and_the_rule(self):
         out = text(metric("order_plan", band_plan()))
         assert "買 99" in out and "賣 102" in out
-        assert "對面" in out and "±2" in out
-        assert "進場買" not in out  # 不是單邊的進場 → 平倉
+        assert "起點" in out and "補回" in out and "reduce_only" in out
+        assert "對面" not in out and "切換" not in out  # 舊邏輯(對面補單、翻空)的說法不能留著
 
     def test_warns_when_price_is_outside_the_band(self):
         result = metric("order_plan", band_plan(price=103.0), price=103.0)
@@ -74,13 +75,27 @@ class TestOrderPlanMetricForBand:
 class TestRiskForBand:
     def test_says_the_position_can_be_long_or_short(self):
         out = text(metric("risk", band_plan()))
-        assert "多單或空單" in out
+        assert "多單或空單" in out and "最多一筆" in out
         assert "無停損" in out
 
 
 class TestCyclePnlForBand:
-    def test_one_crossing_earns_the_band_minus_maker_fees(self):
+    def test_long_round_earns_origin_minus_buy_minus_maker_fees(self):
         result = metric("cycle_pnl", band_plan(buy_pct=1.0, sell_pct=2.0, qty=2.0))
         level1 = result.rows[0]
-        assert level1.details["gross"] == pytest.approx((102.0 - 99.0) * 2.0)
-        assert "每次穿過區間" in level1.text
+        assert level1.details["gross"] == pytest.approx((100.0 - 99.0) * 2.0)  # 買價 99 → 起點 100
+        fees = 99.0 * 2.0 * 0.0002 + 100.0 * 2.0 * 0.0002  # 進場、平倉都是限價單(maker)
+        assert level1.details["fees"] == pytest.approx(fees)
+        assert "做多" in level1.text
+
+    def test_short_round_earns_sell_minus_origin_minus_maker_fees(self):
+        result = metric("cycle_pnl", band_plan(buy_pct=1.0, sell_pct=2.0, qty=2.0))
+        level2 = result.rows[1]
+        assert level2.details["gross"] == pytest.approx((102.0 - 100.0) * 2.0)  # 賣價 102 → 起點 100
+        fees = 102.0 * 2.0 * 0.0002 + 100.0 * 2.0 * 0.0002
+        assert level2.details["fees"] == pytest.approx(fees)
+        assert "做空" in level2.text
+
+    def test_no_third_level(self):
+        result = metric("cycle_pnl", band_plan())
+        assert "null" in result.rows[2].text

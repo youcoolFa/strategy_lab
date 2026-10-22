@@ -16,7 +16,7 @@
 # 不同策略要用不同的 symbol——同一個 symbol 在 Bybit 單向持倉模式下共用
 # 一個部位,會互相平掉對方的倉位。
 
-strategy_path: strategies/weekend_band_reversion.yaml  # 要跑哪個策略;也可以用 live/select_strategy.py 互動選擇
+strategy_path: strategies/sat_strategy.yaml  # 要跑哪個策略;也可以用 live/select_strategy.py 互動選擇
 symbol_override: null  # 不設就從策略 YAML 的 symbol 轉換成 Bybit 格式(如 "BTCUSDT")
 origin_price: null  # 起點價格:填數字 = 手動指定(例如週六 04:00 的價格);null = 用啟動當下的即時價格
 # ↑ 分注策略(scale_in: true)不用 origin_price,維持 null(保留日後用)
@@ -30,7 +30,7 @@ retry_backoff_cap_seconds: 60.0   # 指數退避(2^次數 秒)最多等這麼久
 category: linear   # linear(USDT 永續,預設)/ spot(現貨)/ inverse(幣本位)/ option(期權)
 
 # 下單方式——「下多大單」不是策略邏輯,是這裡的事(見 dsl/order_config.py)。
-order_type: limit  # limit 或 market;kill_switch/收攤平倉永遠是 market,不受這裡影響。一啟動就掛單的策略(mean_reversion_breakout_guard、weekend_band_reversion)只能用 limit
+order_type: limit  # limit 或 market;kill_switch/收攤平倉永遠是 market,不受這裡影響。一啟動就掛單的策略(mean_reversion_breakout_guard、sat_strategy)只能用 limit
 position_sizing:
   mode: fixed_qty       # fixed_qty(直接給數量) / fixed_quote_amount(給報價貨幣金額,如 USDT) / account_percentage(帳戶權益百分比)
   value: 0.001            # 對應上面 mode 的數字

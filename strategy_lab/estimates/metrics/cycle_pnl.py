@@ -20,7 +20,9 @@ class CyclePnlMetric:
         plan = est.plan
         levels = plan.lot_levels()
         rows = []
-        if plan.take_profit is None:
+        if getattr(plan, "band", False):
+            rows = self._band_rows(est)
+        elif plan.take_profit is None:
             rows.append(Row("level_1", "level 1", "出場價事前無法決定,無法估算"))
         else:
             gross = fees = exposure = 0.0
@@ -39,6 +41,31 @@ class CyclePnlMetric:
                         net, warning=net <= 0, details={"gross": gross, "fees": fees, "exposure": exposure},
                     )
                 )
-        for k in range(len(rows) + 1, SHOWN_LEVELS + 1):
+        for k in range(len(rows) + 1, SHOWN_LEVELS + 1):  # noqa: E501
             rows.append(Row(f"level_{k}", f"level {k}", "null(這個策略沒有分注)"))
         return MetricResult(self.title, rows)
+
+    @staticmethod
+    def _band_rows(est: Estimate):
+        """區間策略(sat_strategy):level 1 = 做多一輪(買價進場 → 起點平倉)、level 2 = 做空一輪(賣價進場 → 起點平倉)。
+        進場、平倉都是限價單(maker);現價已經在區間外、進場單一掛就吃單成交的那一邊,進場手續費照 taker 算。"""
+        plan, market = est.plan, est.market
+        qty, origin, buy, sell = plan.qty, plan.take_profit, plan.entry_price, plan.band_sell_price
+        long_gross = Trade(buy, origin, qty, "long").pnl
+        short_gross = Trade(sell, origin, qty, "short").pnl
+        buy_rate = market.taker_fee_rate if market.price <= buy else market.maker_fee_rate
+        sell_rate = market.taker_fee_rate if market.price >= sell else market.maker_fee_rate
+        specs = [
+            (1, "做多一輪(買價 → 起點)", long_gross, buy * qty * buy_rate + origin * qty * market.maker_fee_rate, buy * qty),
+            (2, "做空一輪(賣價 → 起點)", short_gross, sell * qty * sell_rate + origin * qty * market.maker_fee_rate, sell * qty),
+        ]
+        rows = []
+        for index, what, gross, fees, exposure in specs:
+            net = gross - fees
+            rows.append(Row(
+                f"level_{index}", f"level {index}",
+                f"{net:+.4f} USDT({what};毛利 {gross:+.4f} − 手續費 {fees:.4f},"
+                f"{net / exposure * 100:+.3f}% of 名義價值 {exposure:.2f})",
+                net, warning=net <= 0, details={"gross": gross, "fees": fees, "exposure": exposure},
+            ))
+        return rows

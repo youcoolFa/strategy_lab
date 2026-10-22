@@ -31,7 +31,7 @@ def market(price=1005.0, equity=500.0):
 
 def band_plan(direction="long", price=1005.0):
     return build_order_plan(
-        strategy_name="weekend_band_reversion",
+        strategy_name="sat_strategy",
         entry=RestingDeviationFromReferenceEntry(deviation_pct=1.0),
         exit=RestingOffsetFromReferenceExit(offset_pct=1.0),
         direction=direction, origin_price=1000.0, origin_source="手動輸入", qty=1.0,

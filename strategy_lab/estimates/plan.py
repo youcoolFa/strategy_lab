@@ -116,12 +116,14 @@ def build_band_plan(
     cleanup_at: datetime,
     limits: Optional[InstrumentLimits] = None,
 ) -> OrderPlan:
-    """區間策略(2026-10-10):一開始上下各掛一張,成交一張就在對面補一張,持倉在 ±qty 之間切換。
-    買價放 entry_price、賣價放 take_profit 與 band_sell_price,direction 用 long:每輪損益照
-    買價 → 賣價 算(空單 賣價 → 買價 的價差一樣)。現價已經在區間外 → 有一張一掛就吃單成交。"""
+    """區間策略(sat_strategy,2026-10-17 改版):一開始上下各掛一張進場單,哪邊成交就立刻在 origin 掛反向的
+    平倉單,平倉成交後把進場單補回去、一直循環。買價放 entry_price、賣價放 band_sell_price、平倉價 = origin 放
+    take_profit,direction 用 long:level 1 = 做多一輪(買價 → origin);做空一輪(賣價 → origin)在 cycle_pnl
+    另外算成 level 2。現價已經在區間外 → 有一張進場單一掛就吃單成交。"""
     raw_buy, raw_sell = entry.prices(origin_price)
     buy = _round(raw_buy, limits, "Buy")
     sell = _round(raw_sell, limits, "Sell")
+    exit_price = _round(origin_price, limits, "Sell")
     return OrderPlan(
         strategy_name=strategy_name,
         direction="long",
@@ -131,7 +133,7 @@ def build_band_plan(
         entry_price=buy,
         entry_known_in_advance=True,
         entry_crosses_market=market.price <= buy or market.price >= sell,
-        take_profit=sell,
+        take_profit=exit_price,
         stop_loss=None,
         exit_resting=True,
         cleanup_at=cleanup_at,

@@ -3,7 +3,8 @@
     cd /Users/mac/strategy_lab && .venv/bin/streamlit run strategy_lab/ui/app.py --server.address 127.0.0.1
 
 - 只綁本機 127.0.0.1(頁面上有會寫資料庫的按鈕,不能開到區域網路)。
-- 總覽 / 交易紀錄 / Log 全部只讀:不下單、不取消、不動 daemon。
+- 交易紀錄 / Log 只讀;總覽除了「背景程式」表下面的停止(打 STOP)/ 結束 free style(勾確認)之外也只讀:
+  不下單、不取消、不改參數、不脫離(2026-10-17 使用者要求把停止 / 結束放到總覽)。
 - 策略分頁(2026-10-09 改版):選策略(free style 是其中一個)→ 填參數 → 開始;上面的進行中清單
   每一列可以改參數 / 停止(打 STOP)/ 脫離(打 DETACH)/ 結束 free style。一般策略開始前要先
   「寫入參數並預覽」(preflight),再打 yes;頁面只做真正的交易環境(沒有 dry-run / 測試網)。背後全部走 strategy_lab/ui/actions.py,
@@ -52,7 +53,7 @@ head = data.git_head()
 
 top_l, top_r = st.columns([4, 1])
 top_l.title("📈 strategy_lab")
-top_l.caption(f"現在 {hkt(now)} HKT|程式 HEAD {head or '?'}|總覽 / 交易紀錄 / Log 只讀;策略分頁的動作都要你自己確認")
+top_l.caption(f"現在 {hkt(now)} HKT|程式 HEAD {head or '?'}|交易紀錄 / Log 只讀;總覽只有停止 / 結束,策略分頁的動作都要你自己確認")
 if top_r.button("🔄 重新整理", key="refresh"):
     st.cache_data.clear()
     st.rerun()
@@ -125,6 +126,9 @@ with tab_overview:
                    "每小時一定會寫 ⚫ 狀態,超過 70 分鐘沒寫 log 通常是 Mac 睡著了。")
     else:
         st.info("沒有 live_*.yaml 執行設定")
+    # 表下面的「停止 / 結束」(2026-10-17):用到的函式在檔案後面才定義,這裡先留一個位置,tab_strategy 之後再填
+    ops_slot = st.container()
+    _ov_daemons, _ov_unfinished = daemons, unfinished
 
     st.subheader("Bybit 帳戶(只讀,30 秒快取)")
     snap_account = st.selectbox("帳戶", data.list_accounts(), key="snap_account")
@@ -297,12 +301,13 @@ def _running_params(c, path, cfg, info, word):
 
 
 
-def _stop_buttons(c, path, allow_detach=True):
+def _stop_buttons(c, path, allow_detach=True, key_prefix=""):
+    """key_prefix:總覽跟策略分頁會畫同一支 daemon,元件 key 要不一樣(總覽用 "ov_")。"""
     left, right = st.columns(2)
     with left:
         st.markdown("**停止(收尾)**:取消所有掛單、**市價平倉**後結束")
-        typed_stop = st.text_input("輸入 STOP", key=f"stop_typed_{c}")
-        if st.button("⏹️ 停止並收尾", key=f"stop_btn_{c}"):
+        typed_stop = st.text_input("輸入 STOP", key=f"{key_prefix}stop_typed_{c}")
+        if st.button("⏹️ 停止並收尾", key=f"{key_prefix}stop_btn_{c}"):
             try:
                 with st.spinner("等收尾完成(最多 90 秒)…"):
                     st.success(actions.stop(path, typed_stop))
@@ -314,8 +319,8 @@ def _stop_buttons(c, path, allow_detach=True):
         return
     with right:
         st.markdown("**脫離**:直接結束、**不收尾**,掛單與持倉留在交易所(下次用「接手現有持倉」開始)")
-        typed_detach = st.text_input("輸入 DETACH", key=f"detach_typed_{c}")
-        if st.button("⏏️ 脫離", key=f"detach_btn_{c}"):
+        typed_detach = st.text_input("輸入 DETACH", key=f"{key_prefix}detach_typed_{c}")
+        if st.button("⏏️ 脫離", key=f"{key_prefix}detach_btn_{c}"):
             try:
                 st.success(actions.detach(path, typed_detach))
             except ValueError as e:
@@ -324,10 +329,10 @@ def _stop_buttons(c, path, allow_detach=True):
                 st.error(f"脫離失敗:{e}")
 
 
-def _free_style_row(row):
+def _free_style_row(row, key_prefix=""):
     sym, account = row["symbol"], row.get("account")
-    ok = st.checkbox("我確認要結束(從 Bybit 拉回訂單寫進資料庫、發 Telegram)", key=f"fs_stop_confirm_{account}_{sym}")
-    if st.button("⏹️ 結束 free style", key=f"fs_stop_{account}_{sym}"):
+    ok = st.checkbox("我確認要結束(從 Bybit 拉回訂單寫進資料庫、發 Telegram)", key=f"{key_prefix}fs_stop_confirm_{account}_{sym}")
+    if st.button("⏹️ 結束 free style", key=f"{key_prefix}fs_stop_{account}_{sym}"):
         if not ok:
             st.warning("請先勾「我確認」")
             return
@@ -340,6 +345,22 @@ def _free_style_row(row):
             st.code(text, language=None)
         except fs.FreeStyleError as e:
             st.error(f"❌ {e}")
+
+
+def _overview_actions(daemons, unfinished):
+    """總覽背景程式表下面的操作(2026-10-17):存活的 daemon 可以停止(打 STOP)、進行中的 free style 可以結束(勾確認)。
+    只放停止與結束,不放脫離;元件 key 加 ov_ 前綴,跟策略分頁的同名元件不撞。"""
+    live = [d for d in daemons if d.alive]
+    free_runs = [r for r in unfinished.values() if r["strategy_name"] == FREE]
+    if not live and not free_runs:
+        return
+    st.markdown("**操作**:停止 = 取消掛單 + **市價平倉**(要打 `STOP`);free style 結束 = 從 Bybit 拉回訂單記帳(要勾確認)")
+    for d in live:
+        with st.expander(f"🟢 停止|{d.config}|帳戶 {d.account or '—'}|{d.symbol or '—'}"):
+            _stop_buttons(d.config, data.config_path(d.config), allow_detach=False, key_prefix="ov_")
+    for r in free_runs:
+        with st.expander(f"⏺ 結束 free style|帳戶 {r.get('account') or '—'}|{r['symbol']}"):
+            _free_style_row({"symbol": r["symbol"], "account": r.get("account")}, key_prefix="ov_")
 
 
 def _symbol_input(placeholder: str, key: str) -> str:
@@ -405,8 +426,8 @@ def _start_strategy(choice, root, accounts):
     st.warning("🔴 這裡開始的策略一律是**真正的交易環境**(Bybit 正式站、真實資金);dry-run / 測試網請用終端機")
     band = bool(info.get("band"))
     if band:
-        st.caption("區間策略:上下各掛一張,成交一張就在對面價位補一張同數量的單,持倉在 ±數量 之間切換,"
-                   "直到收尾。不支援接手現有持倉:交易所上這個幣要沒有持倉、沒有掛單。")
+        st.caption("區間策略:上下各掛一張進場單,哪邊成交就立刻在起點掛反向的平倉單;平倉成交後把進場單補回去,"
+                   "一直循環,直到收尾。不支援接手現有持倉:交易所上這個幣要沒有持倉、沒有掛單。")
         adopt = False
     else:
         adopt = st.checkbox("接手現有持倉(交易所上這個幣已有的持倉 / 掛單,不平倉直接接著管理;只支援分注策略)",
@@ -530,6 +551,10 @@ with tab_strategy:
         _start_free_style(accounts)
     else:
         _start_strategy(choice, root, accounts)
+
+# 總覽的「停止 / 結束」(位置在 tab_overview 開頭留好,函式要在這裡才有定義)
+with ops_slot:
+    _overview_actions(_ov_daemons, _ov_unfinished)
 
 
 

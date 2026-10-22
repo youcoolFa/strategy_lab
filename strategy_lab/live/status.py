@@ -166,7 +166,7 @@ def start_message(runner: Any, config: Any, symbol: str, price: float, now: date
         buy, sell = runner.entry.prices(runner.origin_price)
         q = runner.order_qty
         lines.append(f"origin {px(runner.origin_price)}|買 {px(buy)} × {q:g}|賣 {px(sell)} × {q:g}")
-        lines.append(f"成交一張就在對面價位補一張同數量的單;持倉在 ±{q:g} 之間切換,直到收尾")
+        lines.append(f"哪邊成交就立刻在起點 {px(runner.origin_price)} 掛反向平倉單;平倉成交後把進場單補回去,一直循環,直到收尾")
         max_qty, notional = q, q * price
     else:
         lines.append(f"origin {px(runner.origin_price)}|數量 {runner.order_qty:g}")
