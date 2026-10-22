@@ -469,3 +469,28 @@ def pnl_changes(original: List[Dict[str, Any]], edited: List[Dict[str, Any]]) ->
             out.append({"run_id": before["run_id"], "event_index": before["event_index"],
                         **{k: norm(after.get(k)) for k in PNL_EDITABLE}})
     return out
+
+
+def save_sat_notes(db_url: str, edits: List[Dict[str, Any]]) -> int:
+    """sat_strategy 分頁改的備註寫回 sl_run.note(每一列要有 run_id;空白 = 清空)。全部找得到才寫。回傳寫了幾列。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from strategy_lab.storage.models import SlRun
+
+    engine = create_engine(db_url, future=True)
+    try:
+        with Session(engine) as s:
+            planned = []
+            for n, row in enumerate(edits, 1):
+                run = s.get(SlRun, row["run_id"])
+                if run is None:
+                    raise ValueError(f"第 {n} 列找不到這次執行(可能已被刪除),請重新整理")
+                note = None if _blank(row.get("備註")) else str(row["備註"]).strip()
+                planned.append((run, note))
+            for run, note in planned:
+                run.note = note
+            s.commit()
+    finally:
+        engine.dispose()
+    return len(planned)

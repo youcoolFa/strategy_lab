@@ -92,7 +92,9 @@ def _unrecorded_section():
     st.code("\n".join(_backfill_command(u) for u in items), language="bash")
 
 # 分頁順序(2026-10-14 使用者指定):損益表、策略、交易紀錄、Log;總覽放最後
-tab_pnl, tab_strategy, tab_records, tab_log, tab_overview = st.tabs(["損益表", "策略", "交易紀錄", "Log", "總覽"])
+# sat_strategy 分頁放在損益表後面(2026-10-22 使用者要求)
+tab_pnl, tab_sat, tab_strategy, tab_records, tab_log, tab_overview = st.tabs(
+    ["損益表", "sat_strategy", "策略", "交易紀錄", "Log", "總覽"])
 
 # ---------------------------------------------------------------------------
 with tab_overview:
@@ -642,3 +644,61 @@ with tab_pnl:
     st.subheader("損益表")
     _pnl_section()
 
+
+_SAT_SHOWN = ["週末", "開始", "結束", "起點價", "掛單價", "方向", "輪數", "數量", "真實損益", "手續費", "實際時長",
+              "結束原因", "來源", "備註"]
+
+
+def _sat_section():
+    """sat_strategy 分頁(2026-10-22 使用者要求):每個週末一列,顯示起點價、掛單價。版面參考 free style 但不一樣:
+    一列 = 一個週末(不是一對交易);沒有預估時長 / 目標價 / 停損價;只有備註可以改;帳戶預設 test1(舊 sat_strategy 用的帳戶)。"""
+    if not DB_URL:
+        st.warning(".env 沒有 TRADING_DB_URL")
+        return
+    accounts = data.list_accounts()
+    test1 = next((i for i, a in enumerate(accounts) if a.upper() == "TEST1"), 0)
+    account = st.selectbox("帳戶", accounts, index=test1, key="sat_account")
+    try:
+        rows = data.sat_weekends(DB_URL, account)
+    except Exception as e:  # noqa: BLE001  資料庫連不上不能讓整頁掛掉
+        st.error(f"讀取 trading 資料庫失敗:{e}")
+        return
+    if not rows:
+        st.caption(f"帳戶 {account} 還沒有 sat_strategy 的紀錄")
+        return
+    traded = [r for r in rows if r["輪數"]]
+    wins = sum(1 for r in traded if r["真實損益"] > 0)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("週末數", len(rows))
+    m2.metric("有成交的週末", len(traded))
+    m3.metric("勝率", f"{wins / len(traded) * 100:.1f}%" if traded else "—",
+              help=f"有成交的週末裡,真實損益(淨利)> 0 的 = {wins} / {len(traded)}")
+    m4.metric("真實損益合計(USDT)", f"{sum(r['真實損益'] for r in rows):.4f}")
+    m5.metric("手續費合計(USDT)", f"{sum(r['手續費'] for r in rows):.4f}")
+    table = pd.DataFrame(rows)[["run_id"] + _SAT_SHOWN]
+    edited = st.data_editor(
+        table, key=f"sat_grid_{account}", hide_index=True, width="stretch",
+        disabled=[c for c in table.columns if c != "備註"],
+        column_config={"run_id": None, "真實損益": st.column_config.NumberColumn(format="%.4f"),
+                       "手續費": st.column_config.NumberColumn(format="%.4f"),
+                       "備註": st.column_config.TextColumn("備註 ✏️")})
+    st.caption("起點價 = 這個週末開始時的價格;掛單價 = 建倉限價單(舊程式 = 起點 −0.75% 的買單;strategy_lab 版 = 上下各一張)。"
+               "同一個週末跑了好幾次(例 10-17 舊程式停掉、strategy_lab 接手)合成一列,價格不同用 → 連起來。"
+               "10-17 05:09 前是舊程式(~/sat_strategy):有成交的週末從 Bybit 補進來;沒成交的週末 Bybit 不保留,起點價 / 掛單價來自舊程式的 log;"
+               "08-08 → 09-19 沒有 log 也沒有成交,所以沒有列。")
+    if st.button("💾 儲存備註", key="sat_save"):
+        before = {r["run_id"]: r["備註"] for r in rows}
+        changes = [{"run_id": r["run_id"], "備註": r["備註"]} for r in edited.to_dict("records")
+                   if (r["備註"] or "") != (before.get(r["run_id"]) or "")]
+        if not changes:
+            st.info("沒有修改")
+            return
+        try:
+            st.success(f"已儲存 {actions.save_sat_notes(DB_URL, changes)} 列")
+        except ValueError as e:
+            st.error(f"沒有儲存:{e}")
+
+
+with tab_sat:
+    st.subheader("sat_strategy")
+    _sat_section()

@@ -89,6 +89,7 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(data, "recent_runs", lambda url, limit=20: [])
     monkeypatch.setattr(data, "pnl_strategies", lambda db, account: ["free style"])
     monkeypatch.setattr(data, "pnl_rows", lambda db, account, strategy: [])
+    monkeypatch.setattr(data, "sat_weekends", lambda db, account: [])
     import st_aggrid
 
     monkeypatch.setattr(st_aggrid, "AgGrid", lambda df, **k: calls.append(("aggrid", df, k)) or
@@ -153,7 +154,7 @@ def test_refresh_queries_bybit_again(fake, monkeypatch):
 def test_tabs(fake):
     at = run()
     # 2026-10-14 使用者:損益表第一、策略第二、交易紀錄第三、Log 第四(總覽放最後);補記分頁拿掉
-    assert [t.label for t in at.tabs] == ["損益表", "策略", "交易紀錄", "Log", "總覽"]
+    assert [t.label for t in at.tabs] == ["損益表", "sat_strategy", "策略", "交易紀錄", "Log", "總覽"]  # 10-22 加 sat_strategy
 
 
 # ---------------------------------------------------------------- 策略:選策略
@@ -735,3 +736,21 @@ def test_pnl_update_button_reconciles_now(pnl):
     at.button(key="pnl_update").click().run()
     assert ("reconcile",) in pnl and not at.exception
     assert any("更新完成" in str(x.value) for x in at.tabs[0].success)
+
+
+SAT_ROW = {"run_id": "r-1017", "週末": "2026/10/17(六)", "開始": "10-17 04:00", "結束": "10-19 05:55",
+           "起點價": "81546 → 81667.6", "掛單價": "買 80934.4 → 買 81259.3 / 賣 82892.6", "方向": "long → both", "輪數": 2,
+           "數量": 0.001, "真實損益": 0.19, "手續費": 0.05, "實際時長": "2 天", "結束原因": "時間窗收尾", "執行次數": 2,
+           "來源": "舊程式 → strategy_lab", "備註": ""}
+
+
+def test_sat_strategy_tab_defaults_to_test1_one_row_per_weekend_and_saves_notes(fake, monkeypatch):
+    calls, _ = fake
+    monkeypatch.setattr(data, "sat_weekends", lambda db, account: calls.append(("sat", account)) or [dict(SAT_ROW)])
+    monkeypatch.setattr(actions, "save_sat_notes", lambda db, edits: calls.append(("sat_save", edits)) or len(edits))
+    at = run()
+    assert at.selectbox(key="sat_account").value == "test1" and ("sat", "test1") in calls
+    assert {m.label for m in at.metric} >= {"週末數", "有成交的週末", "勝率"}
+    at.button(key="sat_save").click().run()
+    assert not [c for c in calls if c[0] == "sat_save"]  # 沒改 → 不存
+    assert not at.exception

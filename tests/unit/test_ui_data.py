@@ -386,3 +386,61 @@ def test_pnl_summary_win_rate():
             {"數量": 1.0, "真實損益": 0.0, "手續費": 1.0, "手續費佔比": None, "實際秒數": 60, "預估秒數": None},
             {"數量": 1.0, "真實損益": 8.0, "手續費": 1.0, "手續費佔比": None, "實際秒數": 60, "預估秒數": None}]
     assert data.pnl_summary(rows)["勝率"] == pytest.approx(0.5)
+
+
+class TestSatWeekends:
+    """sat_strategy 分頁(2026-10-22):每個週末一列,起點價、掛單價;同一個週末好幾次執行合成一列。"""
+
+    HKT = timezone(timedelta(hours=8))
+
+    def add_run(self, db, tmp_path, start, end, origin, account="test1", rounds=(), orders=(), config=None,
+                path="NA", reason="window_cleanup"):
+        from strategy_lab.engine.events import Event
+        from strategy_lab.engine.runner import OrderRecord
+
+        start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)  # SQLite 不存時區,一律存 UTC(同 Postgres)
+        rec = TradeRecorder(db_url=db, pending_dir=tmp_path / "p", fetch_executions=lambda *a: [])
+        rec.start_run(RunInfo(
+            strategy_name="sat_strategy", strategy_path=path, strategy_yaml="NA", strategy_params={}, config=config or {},
+            symbol="BTCUSDT", category="linear", direction="long", origin_price=origin, origin_source="x", qty=0.001,
+            order_type="limit", loop=None, testnet=False, preflight=None, log_path=None, started_at=start, account=account))
+        for i, (side, price) in enumerate(orders):
+            rec.record_order(OrderRecord(order_id=f"{rec.run_id}-{i}", purpose="entry", event_index=1, side=side,
+                                         order_type="limit", price=price, qty=0.001, reduce_only=False, status="open",
+                                         avg_price=None, filled_qty=0.0, time=start))
+        for i, pnl in enumerate(rounds, 1):
+            rec._fills[f"f{i}"] = {"exec_id": f"f{i}", "event_index": i, "exec_type": "Trade", "fee": 0.05}
+            rec.record_event(Event(index=i, direction="long", start_time=start, end_time=start + timedelta(hours=1),
+                                   fills=2, max_position=0.001, avg_entry=100, avg_exit=100, realized_pnl=pnl,
+                                   max_drawdown=0.0, forced=False))
+        rec.end_run(end, reason)
+        return rec.run_id
+
+    def test_one_row_per_weekend_with_origin_and_entry_price(self, db, tmp_path):
+        h = self.HKT
+        self.add_run(db, tmp_path, datetime(2026, 10, 10, 4, 0, tzinfo=h), datetime(2026, 10, 12, 6, 0, tzinfo=h), 82265.5,
+                     config={"entry_price": 81648.51}, path="~/sat_strategy(舊程式)", reason="stop_requested")
+        # 10-17 舊程式 04:00 → 05:09,strategy_lab 05:13 接手:同一個週末合成一列
+        self.add_run(db, tmp_path, datetime(2026, 10, 17, 4, 0, tzinfo=h), datetime(2026, 10, 17, 5, 9, tzinfo=h), 81546.0,
+                     config={"entry_price": 80934.4}, path="~/sat_strategy(舊程式)", reason="stop_requested")
+        self.add_run(db, tmp_path, datetime(2026, 10, 17, 5, 13, tzinfo=h), datetime(2026, 10, 19, 5, 55, tzinfo=h), 81667.6,
+                     rounds=(0.3, -0.1), orders=(("Buy", 81259.262), ("Sell", 82892.614)), path="strategies/sat_strategy.yaml")
+        self.add_run(db, tmp_path, datetime(2026, 10, 17, 4, 0, tzinfo=h), datetime(2026, 10, 17, 5, 0, tzinfo=h), 1.0,
+                     account="MAIN")  # 別的帳戶
+
+        rows = data.sat_weekends(db, "TEST1")
+
+        assert [r["週末"] for r in rows] == ["2026/10/17(六)", "2026/10/10(六)"]  # 最近的在前
+        latest, older = rows
+        assert (latest["起點價"], latest["掛單價"]) == ("81546 → 81667.6", "買 80934.4 → 買 81259.262 / 賣 82892.614")
+        assert (latest["開始"], latest["結束"], latest["執行次數"], latest["輪數"]) == ("10-17 04:00", "10-19 05:55", 2, 2)
+        assert latest["真實損益"] == pytest.approx(0.3 - 0.1 - 0.1) and latest["手續費"] == pytest.approx(0.1)
+        assert (latest["來源"], latest["結束原因"]) == ("舊程式 → strategy_lab", "手動停止 → 時間窗收尾")
+        assert (older["起點價"], older["掛單價"], older["輪數"], older["真實損益"]) == ("82265.5", "買 81648.51", 0, 0)
+        assert "預估時長" not in latest  # 使用者:sat_strategy 不需要預估時長
+
+    def test_weekend_of_sunday_and_monday_morning_is_the_saturday(self):
+        h = self.HKT
+        for dt in (datetime(2026, 10, 17, 4, 0, tzinfo=h), datetime(2026, 10, 18, 23, 0, tzinfo=h),
+                   datetime(2026, 10, 19, 5, 55, tzinfo=h)):
+            assert data.weekend_of(dt).strftime("%m-%d") == "10-17"

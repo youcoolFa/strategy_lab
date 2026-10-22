@@ -544,6 +544,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 損益表分頁 | `ui/data.pnl_strategies` / `pnl_rows` / `fmt_hold`;`ui/actions.pnl_changes` / `save_pnl_edits`;sl_event 新增 `target_price` / `stop_price` / `note`(真 DB 已加、Superset 已同步) | 新增 §6.34 | 已完成 |
 | 損益表篩選 / 排序 / 總結列;拿掉補記分頁;對帳自動記成 free style | `data.filter_pnl` / `sort_pnl` / `pnl_summary`;app 拿掉補記分頁與一鍵帶入,總覽改列終端機指令;`reconcile.run_daily` 把找到的每一對自動 `backfill` 成 free style;補記收「先掛好、期間內成交」的訂單;方向判斷忽略小數誤差 | 改 §6.29 / §6.33 / §6.34 | 已完成 |
 | 損益表改用 AG Grid 免費版 + 分頁重排 | 新增 `ui/grid.py`(`pnl_grid_options`:欄位標題排序 / 篩選、可編輯欄、數字格式、固定欄寬);依賴 `streamlit-aggrid==1.2.1.post2`;`actions.pnl_changes` 用 run_id + event_index 對列;拿掉上方篩選列與 `data.filter_pnl` / `sort_pnl`;分頁順序改成 損益表 / 策略 / 交易紀錄 / Log / 總覽 | 改 §6.29 / §6.34 | 已完成 |
+| sat_strategy 分頁 + 舊程式紀錄補進 DB(2026-10-22) | `ui/data.sat_weekends` / `weekend_of`(每個週末一列:起點價、掛單價、輪數、淨利、手續費、時長、結束原因、來源;同一週末多次執行合成一列);`ui/actions.save_sat_notes`(備註寫回 sl_run.note);app 新分頁「sat_strategy」放在損益表後面,帳戶預設 test1,沒有預估時長。舊 `~/sat_strategy` 程式(10-17 05:09 前)補進 trading DB:有成交的 08-01、09-26 從 Bybit 只讀拉回(free_style.backfill),沒成交的 10-03、10-10、10-17 只有舊程式 log 的起點價 / 掛單價(sl_run 0 輪,掛單價在 config.entry_price);08-08 → 09-19 沒有 log 也沒有成交,不列 | — | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
