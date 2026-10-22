@@ -801,4 +801,12 @@ def test_sat_strategy_tab_defaults_to_test1_one_row_per_weekend_and_saves_notes(
     assert {m.label for m in at.metric} >= {"週末數", "有成交的週末", "勝率"}
     at.button(key="sat_save").click().run()
     assert not [c for c in calls if c[0] == "sat_save"]  # 沒改 → 不存
+
+
+def test_sat_strategy_weekend_without_trades_shows_blank_qty(fake, monkeypatch):
+    calls, _ = fake
+    monkeypatch.setattr(data, "sat_weekends", lambda db, account: [dict(SAT_ROW), dict(SAT_ROW, run_id="r2", 輪數=0, 數量=None)])
+    at = run()
+    df = next(d for d in at.dataframe if "數量" in getattr(d.value, "columns", []))
+    assert list(df.value["數量"]) == ["0.001", ""] and not at.exception
     assert not at.exception
