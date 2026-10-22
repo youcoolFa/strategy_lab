@@ -701,6 +701,8 @@ def _sat_section():
     m4.metric("真實損益合計(USDT)", f"{sum(r['真實損益'] for r in rows):.4f}")
     m5.metric("手續費合計(USDT)", f"{sum(r['手續費'] for r in rows):.4f}")
     table = pd.DataFrame(rows)[["run_id"] + _SAT_SHOWN]
+    # 沒成交的週末沒有數量:顯示空白,不顯示 None(2026-10-22 使用者要求)
+    table["數量"] = table["數量"].map(lambda v: "" if v is None or v != v else f"{v:g}")
     edited = st.data_editor(
         table, key=f"sat_grid_{account}", hide_index=True, width="stretch",
         disabled=[c for c in table.columns if c != "備註"],
