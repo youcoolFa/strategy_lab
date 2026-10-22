@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from strategy_lab.live.accounts import DEFAULT_ACCOUNT
 from strategy_lab.live.daemon import _read_pid, _tail, is_alive
-from strategy_lab.storage.models import SlEvent, SlRun
+from strategy_lab.storage.models import SlEvent, SlOrder, SlRun
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # 每小時一定有一則 ⚫ 狀態回報;運作中卻超過這麼久沒寫 log → Mac 睡著或程式卡住
@@ -284,6 +284,84 @@ def pnl_rows(db_url: str, account: str, strategy: str) -> List[Dict[str, Any]]:
     return rows
 
 
+SAT_STRATEGY = "sat_strategy"
+END_REASON_LABELS = {"window_cleanup": "時間窗收尾", "stop_requested": "手動停止", "loop_done": "輪數做完",
+                     "kill_switch": "風控停止", "crash": "當掉", "handover": "交接", "backfill": "補記"}
+
+
+def weekend_of(dt: datetime) -> datetime:
+    """這個時間屬於哪個週末:回傳那個週六的日期(HKT)。週末時間窗是週六 04:00 → 週一 06:00,
+    週日、週一早上算前一個週六;週二到週五(手動補跑)也歸到前一個週六。"""
+    local = _hkt(dt)
+    return (local - timedelta(days=(local.weekday() - 5) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def sat_weekends(db_url: str, account: str) -> List[Dict[str, Any]]:
+    """sat_strategy 分頁(2026-10-22):每個週末一列,最近的在前。起點價 = sl_run.origin_price;掛單價 = 那次執行的
+    建倉限價單(非 reduceOnly 的限價單;舊程式沒成交的週末 Bybit 不保留,用 config.entry_price,來自舊程式 log)。
+    同一個週末有好幾次執行(例 10-17 舊程式 → strategy_lab 接手)合成一列:損益 / 輪數 / 手續費相加,價格不同就用 → 連起來。
+    run_id 給存備註用(存到那個週末最後一次執行),畫面不顯示。"""
+    engine = create_engine(db_url, future=True)
+    try:
+        with Session(engine) as s:
+            runs = [r for r in s.scalars(select(SlRun).where(SlRun.strategy_name == SAT_STRATEGY))
+                    if account_key(r.account) == account_key(account)]
+            ids = [r.run_id for r in runs]
+            events = list(s.scalars(select(SlEvent).where(SlEvent.run_id.in_(ids)))) if ids else []
+            orders = list(s.scalars(select(SlOrder).where(SlOrder.run_id.in_(ids)))) if ids else []
+    finally:
+        engine.dispose()
+    num = lambda v: float(v) if v is not None else None  # noqa: E731
+
+    def entry_prices(run: SlRun) -> List[str]:
+        mine = sorted((o for o in orders if o.run_id == run.run_id and o.order_type == "limit" and not o.reduce_only
+                       and o.purpose != "exit" and o.price is not None), key=lambda o: (o.side, float(o.price)))
+        found = {}
+        for o in mine:
+            found.setdefault(o.side, f"{'買' if o.side == 'Buy' else '賣'} {float(o.price):.10g}")
+        if found:
+            return list(found.values())
+        logged = (run.config or {}).get("entry_price")
+        return [f"買 {float(logged):.10g}"] if logged is not None else []
+
+    def joined(values: List[str]) -> str:
+        out: List[str] = []
+        for v in values:
+            if v and v not in out:
+                out.append(v)
+        return " → ".join(out) if out else "—"
+
+    groups: Dict[datetime, List[SlRun]] = {}
+    for r in runs:
+        groups.setdefault(weekend_of(r.started_at), []).append(r)
+    rows = []
+    for weekend, members in sorted(groups.items(), reverse=True):
+        members.sort(key=lambda r: _utc(r.started_at))
+        mine = [e for e in events if e.run_id in {r.run_id for r in members}]
+        ended = [r for r in members if r.ended_at is not None]
+        seconds = sum(int((_utc(r.ended_at) - _utc(r.started_at)).total_seconds()) for r in ended)
+        rows.append({
+            "run_id": members[-1].run_id,
+            "週末": weekend.strftime("%Y/%m/%d") + "(六)",
+            "開始": _hkt(members[0].started_at).strftime("%m-%d %H:%M"),
+            "結束": _hkt(members[-1].ended_at).strftime("%m-%d %H:%M") if members[-1].ended_at else "進行中",
+            "起點價": joined([f"{num(r.origin_price):.10g}" if r.origin_price is not None else "" for r in members]),
+            "掛單價": joined([" / ".join(entry_prices(r)) for r in members]),
+            "方向": joined([r.direction for r in members]),
+            "輪數": len(mine),
+            "數量": max((num(e.max_position) or 0 for e in mine), default=None) or None,
+            "真實損益": sum(num(e.net_pnl) or 0 for e in mine),
+            "手續費": sum(num(e.fees) or 0 for e in mine),
+            "實際時長": fmt_duration(timedelta(seconds=seconds)) if ended else "—",
+            "結束原因": joined([END_REASON_LABELS.get(r.end_reason or "", r.end_reason or "進行中") for r in members]),
+            "執行次數": len(members),
+            "來源": joined(["舊程式" if (r.strategy_path or "").startswith("~/sat_strategy") else "strategy_lab"
+                          for r in members]),
+            "備註": members[-1].note or "",
+        })
+    return rows
+
+
 def fee_points(client: Any, symbol: str = "ETHUSDT") -> Dict[str, Any]:
     """手續費換成點數(使用者指定):現價 × maker 費率 × 2(買 + 賣)= 用 maker 開倉、maker 平倉,
     價格要往有利方向走幾點才賺回手續費。費率是這個帳戶在這個交易對的真實費率(只讀)。"""
@@ -382,17 +460,21 @@ def db_url() -> Optional[str]:
     return os.getenv("TRADING_DB_URL")
 
 
+UI_DEFAULT_ACCOUNT = "main"  # 頁面上帳戶選單預設選這個(2026-10-12);設定檔沒寫 account 仍是 test1(DEFAULT_ACCOUNT)
+
+
 def list_accounts() -> List[str]:
-    """.env 裡的帳戶名稱;預設帳戶 test1 永遠排第一(它可以用原本的 BYBIT_API_KEY)。"""
+    """.env 裡的帳戶名稱,頁面選單用:main 排第一(預設選它),接著 test1(可以用原本的 BYBIT_API_KEY,
+    .env 沒寫也一定有),其他照 .env 順序。.env 沒有 main 就是 test1 排第一。"""
     from strategy_lab.live import accounts
 
     try:
         found = accounts.list_accounts()
     except OSError:  # 沒有 .env
         found = []
-    rest = [a for a in found if a.upper() != DEFAULT_ACCOUNT.upper()]
-    first = next((a for a in found if a.upper() == DEFAULT_ACCOUNT.upper()), DEFAULT_ACCOUNT)
-    return [first, *rest]
+    test1 = next((a for a in found if a.upper() == DEFAULT_ACCOUNT.upper()), DEFAULT_ACCOUNT)
+    names = [test1, *(a for a in found if a.upper() != DEFAULT_ACCOUNT.upper())]
+    return sorted(names, key=lambda a: a.upper() != UI_DEFAULT_ACCOUNT.upper())  # 穩定排序:只把 main 移到最前面
 
 
 def make_client(account: Optional[str] = None) -> Any:

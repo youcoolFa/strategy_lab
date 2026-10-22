@@ -1,14 +1,14 @@
-"""Streamlit 第二階段的動作層:實盤啟動 / 運作中改參數 / 停止 / 脫離 / 改設定檔(2026-10-09)。
+"""Streamlit 第二階段的動作層:實盤啟動 / 運作中改參數 / 停止 / 交接 / 改設定檔(2026-10-09)。
 
 頁面只是外殼,背後全部走跟終端機同一套程式與檢查:
 - 預覽 + 啟動 → live/preflight.py 的 main()(預覽時回答空字串 = 取消;啟動時把使用者在頁面上
   打的字原樣交給它,實盤一樣要 `yes`)
 - 改建倉價 / 平倉距離 / loop → live/control.py 的 main()(在跑:送請求給背景程式;沒在跑:寫回設定檔)
-- 停止(收尾:取消掛單、市價平倉)/ 脫離(不收尾)→ live/daemon.py
+- 停止(收尾:取消掛單、市價平倉)/ 交接(不收尾)→ live/daemon.py
 
 額外的保護(終端機版沒有、頁面才需要的):
 - 啟動前一定要先預覽,而且預覽要在 10 分鐘內、設定檔在預覽之後沒被改過
-- 停止要打 STOP、脫離要打 DETACH
+- 停止要打 STOP、交接要打 HANDOVER
 - 背景程式在跑的時候不能改基本設定(只能用 control 改那三個參數)
 這裡不 import streamlit,可以單獨測試。
 """
@@ -182,6 +182,10 @@ def prepare_config(project_root: Path, strategy_path: str, symbol: str, settings
 
         band = BandEntry(buy_pct=params["band"].get("buy_pct"), sell_pct=params["band"].get("sell_pct"))  # 驗證
         changes["band"] = {"buy_pct": band.buy_pct, "sell_pct": band.sell_pct}
+    if params.get("direction") is not None and not info.get("band"):  # 做多 / 做空(2026-10-12)
+        if params["direction"] not in ("long", "short"):
+            raise ValueError(f"方向只能是 long 或 short,收到 {params['direction']!r}")
+        changes["direction"] = params["direction"]
     if "loop" in params and not info.get("band"):  # 區間策略固定做到收尾,不寫 loop
         loop = params["loop"]
         if loop is not None and (isinstance(loop, bool) or not isinstance(loop, int) or loop < 0):
@@ -369,7 +373,7 @@ def control_apply(config_path: Path, changes: Dict[str, Any], typed: str) -> Tup
 
 
 # ---------------------------------------------------------------------------
-# 停止 / 脫離
+# 停止 / 交接
 # ---------------------------------------------------------------------------
 
 def stop(config_path: Path, typed: str) -> str:
@@ -379,11 +383,11 @@ def stop(config_path: Path, typed: str) -> str:
     return daemon.stop(Path(config_path))
 
 
-def detach(config_path: Path, typed: str) -> str:
-    """脫離:直接結束、不收尾,掛單與持倉留在交易所給下次接手。"""
-    if typed.strip() != "DETACH":
-        raise ValueError("要在框裡打 DETACH(大寫)才會脫離")
-    return daemon.detach(Path(config_path))
+def handover(config_path: Path, typed: str) -> str:
+    """交接:直接結束、不收尾,掛單與持倉留在交易所給下次接手。"""
+    if typed.strip() != "HANDOVER":
+        raise ValueError("要在框裡打 HANDOVER(大寫)才會交接")
+    return daemon.handover(Path(config_path))
 
 
 # ---------------------------------------------------------------------------
@@ -465,3 +469,28 @@ def pnl_changes(original: List[Dict[str, Any]], edited: List[Dict[str, Any]]) ->
             out.append({"run_id": before["run_id"], "event_index": before["event_index"],
                         **{k: norm(after.get(k)) for k in PNL_EDITABLE}})
     return out
+
+
+def save_sat_notes(db_url: str, edits: List[Dict[str, Any]]) -> int:
+    """sat_strategy 分頁改的備註寫回 sl_run.note(每一列要有 run_id;空白 = 清空)。全部找得到才寫。回傳寫了幾列。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from strategy_lab.storage.models import SlRun
+
+    engine = create_engine(db_url, future=True)
+    try:
+        with Session(engine) as s:
+            planned = []
+            for n, row in enumerate(edits, 1):
+                run = s.get(SlRun, row["run_id"])
+                if run is None:
+                    raise ValueError(f"第 {n} 列找不到這次執行(可能已被刪除),請重新整理")
+                note = None if _blank(row.get("備註")) else str(row["備註"]).strip()
+                planned.append((run, note))
+            for run, note in planned:
+                run.note = note
+            s.commit()
+    finally:
+        engine.dispose()
+    return len(planned)

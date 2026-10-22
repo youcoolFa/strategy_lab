@@ -5,7 +5,7 @@
 - 只綁本機 127.0.0.1(頁面上有會寫資料庫的按鈕,不能開到區域網路)。
 - 總覽 / 交易紀錄 / Log 全部只讀:不下單、不取消、不動 daemon。
 - 策略分頁(2026-10-09 改版):選策略(free style 是其中一個)→ 填參數 → 開始;上面的進行中清單
-  每一列可以改參數 / 停止(打 STOP)/ 脫離(打 DETACH)/ 結束 free style。一般策略開始前要先
+  每一列可以改參數 / 停止(打 STOP)/ 交接(打 HANDOVER)/ 結束 free style。一般策略開始前要先
   「寫入參數並預覽」(preflight),再打 yes;頁面只做真正的交易環境(沒有 dry-run / 測試網)。背後全部走 strategy_lab/ui/actions.py,
   跟終端機同一套檢查;設定檔(live_*.yaml)自動找或自動建立,使用者不用管。
 - 關掉這個頁面不影響任何正在跑的實盤程式(daemon 是獨立的背景程式)。
@@ -92,11 +92,13 @@ def _unrecorded_section():
     st.code("\n".join(_backfill_command(u) for u in items), language="bash")
 
 # 分頁順序(2026-10-14 使用者指定):損益表、策略、交易紀錄、Log;總覽放最後
-tab_pnl, tab_strategy, tab_records, tab_log, tab_overview = st.tabs(["損益表", "策略", "交易紀錄", "Log", "總覽"])
+# sat_strategy 分頁放在損益表後面(2026-10-22 使用者要求)
+tab_pnl, tab_sat, tab_strategy, tab_records, tab_log, tab_overview = st.tabs(
+    ["損益表", "sat_strategy", "策略", "交易紀錄", "Log", "總覽"])
 
 # ---------------------------------------------------------------------------
 with tab_overview:
-    st.subheader("背景程式(daemon)")
+    st.subheader("背景程式")
     try:
         daemons = data.list_daemons()
         unfinished = data.unfinished_runs(DB_URL) if DB_URL else {}
@@ -235,7 +237,7 @@ def _strategy_info(root, strategy_path):
 
 
 def _running_strategy_row(row, root):
-    """在跑的策略:改參數(control)、停止、脫離。所有 key 都加上設定檔名,一頁可以有好幾列。"""
+    """在跑的策略:改參數(control)、停止、交接。所有 key 都加上設定檔名,一頁可以有好幾列。"""
     c = row["config"]
     path = data.config_path(c)
     cfg = _read_yaml(path)
@@ -244,10 +246,10 @@ def _running_strategy_row(row, root):
     st.caption(f"設定檔 {c}.yaml")
     band = bool(info.get("band"))
     if band:
-        st.caption("區間策略:運作中不能改參數,也不提供脫離(脫離後不能接手,單會留在交易所沒人管);只能停止並收尾。")
+        st.caption("區間策略:運作中不能改參數,也不提供交接(交接後不能接手,單會留在交易所沒人管);只能停止並收尾。")
     else:
         _running_params(c, path, cfg, info, word)
-    _stop_buttons(c, path, allow_detach=not band)
+    _stop_buttons(c, path, allow_handover=not band)
 
 
 def _running_params(c, path, cfg, info, word):
@@ -297,7 +299,7 @@ def _running_params(c, path, cfg, info, word):
 
 
 
-def _stop_buttons(c, path, allow_detach=True):
+def _stop_buttons(c, path, allow_handover=True):
     left, right = st.columns(2)
     with left:
         st.markdown("**停止(收尾)**:取消所有掛單、**市價平倉**後結束")
@@ -310,18 +312,18 @@ def _stop_buttons(c, path, allow_detach=True):
                 st.error(str(e))
             except Exception as e:  # noqa: BLE001  DaemonError 等
                 st.error(f"停止失敗:{e}")
-    if not allow_detach:
+    if not allow_handover:
         return
     with right:
-        st.markdown("**脫離**:直接結束、**不收尾**,掛單與持倉留在交易所(下次用「接手現有持倉」開始)")
-        typed_detach = st.text_input("輸入 DETACH", key=f"detach_typed_{c}")
-        if st.button("⏏️ 脫離", key=f"detach_btn_{c}"):
+        st.markdown("**交接**:直接結束、**不收尾**,掛單與持倉留在交易所(下次用「接手現有持倉」開始)")
+        typed_handover = st.text_input("輸入 HANDOVER", key=f"handover_typed_{c}")
+        if st.button("⏏️ 交接", key=f"handover_btn_{c}"):
             try:
-                st.success(actions.detach(path, typed_detach))
+                st.success(actions.handover(path, typed_handover))
             except ValueError as e:
                 st.error(str(e))
             except Exception as e:  # noqa: BLE001
-                st.error(f"脫離失敗:{e}")
+                st.error(f"交接失敗:{e}")
 
 
 def _free_style_row(row):
@@ -360,12 +362,10 @@ def _start_free_style(accounts):
     since_day = day_col.date_input("開始日期(HKT,預設現在,可往前選)", value=now.date(), max_value=now.date(), format="YYYY-MM-DD",
                                    key="fs_since_day")
     since_time = time_col.time_input("開始時間(HKT)", value=now.time(), step=60, key="fs_since_time")
-    ok = st.checkbox("我確認要開始記錄(會寫進 trading 資料庫)", key="fs_start_confirm")
+    # 不用勾確認(2026-10-12):free style 只記帳、不下單,開始就是要寫進 trading 資料庫
     if st.button("▶️ 開始 free style", key="fs_start"):
         if not symbol:
             st.warning("請填幣種")
-        elif not ok:
-            st.warning("請先勾「我確認」")
         else:
             when = datetime.combine(since_day, since_time, tzinfo=HKT).astimezone(timezone.utc)
             if when > datetime.now(timezone.utc):
@@ -382,7 +382,8 @@ def _start_free_style(accounts):
 def _start_strategy(choice, root, accounts):
     strategy_path = f"strategies/{choice}.yaml"
     info = _strategy_info(root, strategy_path)
-    st.caption(f"方向 {info.get('direction')}" + (f"|分注 {info['lots']} 注" if info.get("scale_in") else ""))
+    if info.get("scale_in"):
+        st.caption(f"分注 {info['lots']} 注")
     symbol = _symbol_input("WLD", key="new_symbol")
     if not symbol:
         st.caption("填幣種後繼續")
@@ -425,6 +426,13 @@ def _start_strategy(choice, root, accounts):
     params = {}
     try:
         overrides = cfg.get("strategy_overrides") or {}
+        if band:
+            st.caption("方向 both(區間策略上下同時掛單)")
+        else:  # 每個策略都能做多做空(2026-10-12);預設 = 設定檔上次選的,沒有就用策略 YAML 的
+            directions = ["long", "short"]
+            default_direction = overrides.get("direction") or info.get("direction") or "long"
+            params["direction"] = st.radio("方向", directions, index=directions.index(default_direction), horizontal=True,
+                                           format_func={"long": "long 做多", "short": "short 做空"}.get, key="new_direction")
         if band:
             band_default = overrides.get("band") or {}
             b1, b2 = st.columns(2)
@@ -636,3 +644,61 @@ with tab_pnl:
     st.subheader("損益表")
     _pnl_section()
 
+
+_SAT_SHOWN = ["週末", "開始", "結束", "起點價", "掛單價", "方向", "輪數", "數量", "真實損益", "手續費", "實際時長",
+              "結束原因", "來源", "備註"]
+
+
+def _sat_section():
+    """sat_strategy 分頁(2026-10-22 使用者要求):每個週末一列,顯示起點價、掛單價。版面參考 free style 但不一樣:
+    一列 = 一個週末(不是一對交易);沒有預估時長 / 目標價 / 停損價;只有備註可以改;帳戶預設 test1(舊 sat_strategy 用的帳戶)。"""
+    if not DB_URL:
+        st.warning(".env 沒有 TRADING_DB_URL")
+        return
+    accounts = data.list_accounts()
+    test1 = next((i for i, a in enumerate(accounts) if a.upper() == "TEST1"), 0)
+    account = st.selectbox("帳戶", accounts, index=test1, key="sat_account")
+    try:
+        rows = data.sat_weekends(DB_URL, account)
+    except Exception as e:  # noqa: BLE001  資料庫連不上不能讓整頁掛掉
+        st.error(f"讀取 trading 資料庫失敗:{e}")
+        return
+    if not rows:
+        st.caption(f"帳戶 {account} 還沒有 sat_strategy 的紀錄")
+        return
+    traded = [r for r in rows if r["輪數"]]
+    wins = sum(1 for r in traded if r["真實損益"] > 0)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("週末數", len(rows))
+    m2.metric("有成交的週末", len(traded))
+    m3.metric("勝率", f"{wins / len(traded) * 100:.1f}%" if traded else "—",
+              help=f"有成交的週末裡,真實損益(淨利)> 0 的 = {wins} / {len(traded)}")
+    m4.metric("真實損益合計(USDT)", f"{sum(r['真實損益'] for r in rows):.4f}")
+    m5.metric("手續費合計(USDT)", f"{sum(r['手續費'] for r in rows):.4f}")
+    table = pd.DataFrame(rows)[["run_id"] + _SAT_SHOWN]
+    edited = st.data_editor(
+        table, key=f"sat_grid_{account}", hide_index=True, width="stretch",
+        disabled=[c for c in table.columns if c != "備註"],
+        column_config={"run_id": None, "真實損益": st.column_config.NumberColumn(format="%.4f"),
+                       "手續費": st.column_config.NumberColumn(format="%.4f"),
+                       "備註": st.column_config.TextColumn("備註 ✏️")})
+    st.caption("起點價 = 這個週末開始時的價格;掛單價 = 建倉限價單(舊程式 = 起點 −0.75% 的買單;strategy_lab 版 = 上下各一張)。"
+               "同一個週末跑了好幾次(例 10-17 舊程式停掉、strategy_lab 接手)合成一列,價格不同用 → 連起來。"
+               "10-17 05:09 前是舊程式(~/sat_strategy):有成交的週末從 Bybit 補進來;沒成交的週末 Bybit 不保留,起點價 / 掛單價來自舊程式的 log;"
+               "08-08 → 09-19 沒有 log 也沒有成交,所以沒有列。")
+    if st.button("💾 儲存備註", key="sat_save"):
+        before = {r["run_id"]: r["備註"] for r in rows}
+        changes = [{"run_id": r["run_id"], "備註": r["備註"]} for r in edited.to_dict("records")
+                   if (r["備註"] or "") != (before.get(r["run_id"]) or "")]
+        if not changes:
+            st.info("沒有修改")
+            return
+        try:
+            st.success(f"已儲存 {actions.save_sat_notes(DB_URL, changes)} 列")
+        except ValueError as e:
+            st.error(f"沒有儲存:{e}")
+
+
+with tab_sat:
+    st.subheader("sat_strategy")
+    _sat_section()

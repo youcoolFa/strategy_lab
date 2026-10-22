@@ -73,7 +73,7 @@ class TestPlan:
 
 
 def runner_with_exchange_state():
-    """模擬「舊程式脫離後」的交易所:PaperBroker 裡已經有 60 SUI 持倉和三張平倉單。"""
+    """模擬「舊程式交接後」的交易所:PaperBroker 裡已經有 60 SUI 持倉和三張平倉單。"""
     broker = PaperBroker()
     broker.tick(1.2254)
     broker.market_buy(60.0)  # 持倉 60
@@ -175,7 +175,7 @@ class TestAdoptExisting:
             adopt_existing(runner, FakeClient(SUI_ORDERS, 60.0, 1.2), "SUIUSDT", SUI_ORDERS, 60.0, NOW)
 
 
-class TestDetach:
+class TestHandover:
     def test_run_forever_exits_without_cleanup_and_leaves_orders(self, monkeypatch):
         from loguru import logger
 
@@ -194,7 +194,7 @@ class TestDetach:
             clock["now"] += timedelta(minutes=5)
             clock["n"] += 1
             if clock["n"] == 3:
-                runner.request_detach()  # daemon detach 送的 SIGUSR1
+                runner.request_handover()  # daemon handover 送的 SIGUSR1
             return 1000.0
 
         sent = []
@@ -208,7 +208,7 @@ class TestDetach:
 
         assert runner.state != RunState.STOPPED and runner.stop_reason is None  # 沒有收尾
         assert runner.broker.fetch_order(runner.entry_order.id).status == "open"  # 掛單還在
-        assert any("脫離" in m for m in sent) and not any("🏁" in m for m in sent)
+        assert any("交接" in m for m in sent) and not any("🏁" in m for m in sent)
 
 
 class TestPreflightAdoptionPreview:

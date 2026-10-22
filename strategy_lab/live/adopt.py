@@ -5,7 +5,7 @@ strategy_lab/live/adopt.py
 每一注,接著照常運作。設定檔要明確打開 `adopt_existing_position: true` 才會做(沒打開時,有殘留掛單/持倉
 仍然拒絕啟動,見 live/main.py 的 ensure_clean_start)。
 
-搭配 `python -m strategy_lab.live.daemon detach`:舊程式「脫離」(直接結束、不收尾),掛單與持倉原封不動
+搭配 `python -m strategy_lab.live.daemon handover`:舊程式「交接」(直接結束、不收尾),掛單與持倉原封不動
 留在交易所,新程式啟動時接手。用途:換新版程式、改不能熱改的參數,又不想被迫市價平倉認賠。
 
 對應規則(都用策略設定推算,對不上就 AdoptionError,絕不亂猜):
