@@ -4,6 +4,7 @@
     (在 Bybit App / 網頁自己交易)
     .venv/bin/python -m strategy_lab.live.free_style stop --symbol ETHUSDT
     .venv/bin/python -m strategy_lab.live.free_style status
+    .venv/bin/python -m strategy_lab.live.free_style backfill --symbol ETHUSDT --start "2026-10-09 14:00" --end "2026-10-09 18:00"
 
 - start:只在 sl_run 寫一列(strategy_name = "free style"、開始時間、幣種;策略參數類欄位
   填 NA / NULL)就結束。中間不用有程式在跑,Mac 合蓋睡眠也不影響。
@@ -41,6 +42,11 @@ from strategy_lab.storage.recorder import RunInfo, TradeRecorder
 FREE_STYLE = "free style"
 NA = "NA"
 END_REASON = "free_style_stop"
+BACKFILL_END_REASON = "backfill"
+EARLY_ORDER_LOOKBACK = timedelta(days=30)  # 補記時往前找「先掛好、期間內才成交」的訂單
+MAX_BACKFILL_AGE = timedelta(days=730)  # Bybit 的訂單歷史 / 成交明細最多查 2 年
+BACKFILL_DIRECTIONS = ("long", "short", "both")
+MAX_NOTE_CHARS = 500
 MAX_QUERY_SPAN = timedelta(days=7)
 HKT = ZoneInfo("Asia/Hong_Kong")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -68,6 +74,8 @@ class StopResult:
     net_pnl: float
     open_position: float
     account: str = "test1"  # 用哪個 Bybit 帳戶(2026-10-12)
+    strategy_name: str = FREE_STYLE
+    backfill: bool = False  # 補記過去一段(2026-10-13)
 
 
 # ---------------------------------------------------------------------------
@@ -126,31 +134,259 @@ def stop(db_url: Optional[str], client: Any, symbol: str, now: datetime, pending
     run_row["started_at"] = started
 
     fetch_executions = _chunked(client.get_executions)
-    orders = _orders_in(client, symbol, started, now)
-    executions = [e for e in fetch_executions(symbol, started, now) if (e.get("execType") or "Trade") != "Funding"]
-    events, order_event = _replay(orders, executions)
-
+    orders, executions = _fetch_window(client, symbol, started, now)
     recorder = TradeRecorder(db_url=db_url, pending_dir=pending_dir, fetch_executions=fetch_executions)
     recorder.run_id, recorder._run = run_row["run_id"], run_row
+    return _write_window(recorder, symbol, orders, executions, started, now, END_REASON,
+                         open_position=client.get_position_qty(symbol), account=run_row.get("account") or account)
+
+
+def _fetch_window(client: Any, symbol: str, start: datetime, end: datetime) -> Tuple[List[dict], List[dict]]:
+    """這段期間的訂單與成交(不含資金費;資金費由 recorder.event_costs 另外算)。"""
+    executions = [e for e in _chunked(client.get_executions)(symbol, start, end)
+                  if (e.get("execType") or "Trade") != "Funding"]
+    orders = _orders_in(client, symbol, start, end)
+    # 限價單常常先掛好、過一陣子才成交:建立時間早於開始、但在這段期間成交的訂單也要記(2026-10-14)
+    missing = {e.get("orderId") for e in executions} - {o["orderId"] for o in orders} - {None, ""}
+    if missing:
+        earlier = _chunked(client.list_order_history)(symbol, start - EARLY_ORDER_LOOKBACK, start)
+        orders += [o for o in earlier if o["orderId"] in missing]
+    return orders, executions
+
+
+def _write_window(recorder: TradeRecorder, symbol: str, orders: List[dict], executions: List[dict],
+                  start: datetime, end: datetime, end_reason: str, open_position: float, account: str,
+                  strategy_name: str = FREE_STYLE) -> StopResult:
+    events, order_event = _replay(orders, executions)
     for o in sorted(orders, key=lambda o: int(o["createdTime"])):
         _record_order(recorder, o, order_event[o["orderId"]])
     for event in events:
         recorder.record_event(event)
-    recorder.end_run(now, END_REASON, summarize(events))
+    recorder.end_run(end, end_reason, summarize(events))
 
     costs = [recorder.event_costs(e.index) or (0.0, 0.0) for e in events]
     gross = sum(e.realized_pnl for e in events)
     fees, funding = sum(c[0] for c in costs), sum(c[1] for c in costs)
     return StopResult(
-        run_id=run_row["run_id"], symbol=symbol, started_at=started, ended_at=now, events=len(events),
+        run_id=recorder.run_id, symbol=symbol, started_at=start, ended_at=end, events=len(events),
         orders=len(orders), gross_pnl=gross, fees=fees, funding=funding, net_pnl=gross - fees - funding,
-        open_position=client.get_position_qty(symbol), account=run_row.get("account") or account,
+        open_position=open_position, account=account, strategy_name=strategy_name,
+        backfill=end_reason == BACKFILL_END_REASON,
     )
+
+
+# ---------------------------------------------------------------------------
+# 補記過去一段(2026-10-13):通用,策略名稱可填(預設 free style)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BackfillPreview:
+    symbol: str
+    account: str
+    strategy_name: str
+    start: datetime
+    end: datetime
+    orders: int
+    events: int
+    gross_pnl: float
+    trade_fees: float  # 成交手續費(資金費寫入時才算)
+    open_position: float  # 結束時的持倉(帶正負;0 = 已平)
+    warnings: List[str]
+    direction: str = NA  # 從成交判斷(每一對的第一筆:買 = long、賣 = short;兩種都有 = both);使用者填了就用使用者的
+
+
+def preview_backfill(db_url: Optional[str], client: Any, symbol: str, start: datetime, end: datetime, now: datetime,
+                     account: Optional[str] = None, strategy_name: str = FREE_STYLE,
+                     expected_hold: Optional[timedelta] = None, direction: Optional[str] = None,
+                     note: Optional[str] = None, target_price: Optional[float] = None,
+                     stop_price: Optional[float] = None) -> BackfillPreview:
+    """只讀:檢查時間、重疊、事後補填的值,從 Bybit 拉回那段期間的單與成交並算出每一輪。不寫 DB。"""
+    user = _user_fields(expected_hold, direction, note, target_price, stop_price)
+    _, _, preview = _prepare_backfill(db_url, client, symbol, start, end, now, account, strategy_name)
+    preview.direction = user["direction"] or preview.direction
+    _check_target_stop(preview.direction, user["target_price"], user["stop_price"])
+    return preview
+
+
+def _user_fields(expected_hold: Optional[timedelta], direction: Optional[str], note: Optional[str],
+                 target_price: Optional[float] = None, stop_price: Optional[float] = None) -> Dict[str, Any]:
+    """補記時使用者事後填的值(都選填):預計持倉時間、方向(不填 = 從成交判斷)、備註、目標價、停損價。
+    回傳要寫進 sl_run 的欄位;user_filled 只列使用者自己填的。"""
+    filled: List[str] = []
+    out: Dict[str, Any] = {"expected_hold_seconds": None, "direction": None, "note": None,
+                           "target_price": None, "stop_price": None}
+    if expected_hold is not None:
+        if expected_hold.total_seconds() <= 0:
+            raise FreeStyleError("預計持倉時間要大於 0")
+        out["expected_hold_seconds"] = round(expected_hold.total_seconds())
+        filled.append("expected_hold")
+    if direction:
+        if direction not in BACKFILL_DIRECTIONS:
+            raise FreeStyleError(f"方向只能是 {' / '.join(BACKFILL_DIRECTIONS)},收到 {direction!r}")
+        out["direction"] = direction
+        filled.append("direction")
+    note = (note or "").strip()
+    if note:
+        if len(note) > MAX_NOTE_CHARS:
+            raise FreeStyleError(f"備註最多 {MAX_NOTE_CHARS} 字")
+        out["note"] = note
+        filled.append("note")
+    for key, label, value in (("target_price", "目標價", target_price), ("stop_price", "停損價", stop_price)):
+        if value is not None:
+            if value <= 0:
+                raise FreeStyleError(f"{label}要大於 0")
+            out[key] = float(value)
+            filled.append(key)
+    _check_target_stop(out["direction"], out["target_price"], out["stop_price"])
+    out["user_filled"] = filled
+    return out
+
+
+def _check_target_stop(direction: Optional[str], target: Optional[float], stop: Optional[float]) -> None:
+    if target is None or stop is None:
+        return
+    if direction == "long" and stop >= target:
+        raise FreeStyleError(f"做多時停損價要低於目標價(停損 {stop:g}、目標 {target:g})")
+    if direction == "short" and stop <= target:
+        raise FreeStyleError(f"做空時停損價要高於目標價(停損 {stop:g}、目標 {target:g})")
+
+
+def _direction_of(executions: List[dict]) -> str:
+    """每一對交易(持倉 0 → 0)的第一筆:買 = long、賣 = short;兩種都有 = both;沒有成交 = NA。"""
+    sides, pos = set(), 0.0
+    for e in sorted(executions, key=lambda e: (int(e["execTime"]), e["execId"])):
+        qty = float(e["execQty"]) * (1 if e.get("side") == "Buy" else -1)
+        after = pos + qty
+        if abs(pos) < 1e-9:
+            sides.add("long" if qty > 0 else "short")
+        elif pos * after < 0 and abs(after) > 1e-9:  # 穿過 0 = 反向開倉(小數誤差的 −4e-16 不算)
+            sides.add("long" if qty > 0 else "short")
+        pos = 0.0 if abs(after) < 1e-9 else after
+    return sides.pop() if len(sides) == 1 else "both" if sides else NA
+
+
+def parse_hold(text: Optional[str]) -> Optional[timedelta]:
+    """預計持倉時間的簡寫:90m / 4h / 1.5d;空白 = 不填。"""
+    text = (text or "").strip().lower()
+    if not text:
+        return None
+    units = {"m": "minutes", "h": "hours", "d": "days"}
+    try:
+        value, unit = float(text[:-1]), units[text[-1]]
+    except (ValueError, KeyError):
+        raise FreeStyleError(f"預計持倉時間要寫成 90m / 4h / 1.5d,收到 {text!r}") from None
+    return timedelta(**{unit: value})
+
+
+def backfill(db_url: Optional[str], client: Any, symbol: str, start: datetime, end: datetime, now: datetime,
+             account: Optional[str] = None, strategy_name: str = FREE_STYLE,
+             pending_dir: Path = PENDING_DIR, expected_hold: Optional[timedelta] = None,
+             direction: Optional[str] = None, note: Optional[str] = None, target_price: Optional[float] = None,
+             stop_price: Optional[float] = None) -> StopResult:
+    """重新檢查、重新拉資料後一次寫進 DB:sl_run(started/ended = 選的時間,end_reason = backfill)、
+    sl_order / sl_fill / sl_event。"""
+    user = _user_fields(expected_hold, direction, note, target_price, stop_price)
+    orders, executions, p = _prepare_backfill(db_url, client, symbol, start, end, now, account, strategy_name)
+    direction = user["direction"] or p.direction
+    _check_target_stop(direction, user["target_price"], user["stop_price"])
+    recorder = TradeRecorder(db_url=db_url, pending_dir=pending_dir, fetch_executions=_chunked(client.get_executions))
+    if not recorder.db_available:
+        raise FreeStyleError("交易資料庫連不上;請先確認 trading-postgres 有在跑")
+    recorder.start_run(RunInfo(
+        strategy_name=p.strategy_name, strategy_path=NA, strategy_yaml=NA, strategy_params={},
+        config={"mode": "backfill", "symbol": symbol, "backfilled_at": now.isoformat(),
+                "user_filled": user["user_filled"]},  # 這些欄位是補記時使用者事後填的
+        symbol=symbol, category="linear", direction=direction, origin_price=None, origin_source=None,
+        qty=None, order_type=NA, loop=None, testnet=False, preflight=None, log_path=None, started_at=start,
+        account=p.account, expected_hold_seconds=user["expected_hold_seconds"], note=user["note"],
+        target_price=user["target_price"], stop_price=user["stop_price"],
+    ))
+    return _write_window(recorder, symbol, orders, executions, start, end, BACKFILL_END_REASON,
+                         open_position=p.open_position, account=p.account, strategy_name=p.strategy_name)
+
+
+def _prepare_backfill(db_url, client, symbol, start, end, now, account, strategy_name):
+    account = _account_name(account)
+    name = (strategy_name or "").strip()
+    if not name:
+        raise FreeStyleError("請填策略名稱(例:free style)")
+    start, end, now = _utc(start), _utc(end), _utc(now)
+    if start >= end:
+        raise FreeStyleError("開始要早於結束")
+    if end > now:
+        raise FreeStyleError("結束不能晚於現在(補記只做已經結束的期間)")
+    if now - start > MAX_BACKFILL_AGE:
+        raise FreeStyleError("Bybit 的訂單歷史最多只能查 2 年")
+    _check_overlap(db_url, symbol, account, start, end, now)
+
+    orders, executions = _fetch_window(client, symbol, start, end)
+    if not orders and not executions:
+        raise FreeStyleError(f"{_hkt(start)} → {_hkt(end)} {symbol} 沒有交易(帳戶 {account})")
+    first = min(executions, key=lambda e: (int(e["execTime"]), e["execId"])) if executions else None
+    if first is not None and float(first.get("closedSize") or 0) > 0:
+        raise FreeStyleError(f"開始時已經有持倉({_hkt(_ms(first['execTime']))} 的第一筆成交是平倉),"
+                             "算不出成本;請把開始時間往前移到建倉之前")
+    events, _ = _replay(orders, executions)
+    position = round(sum((1 if e.get("side") == "Buy" else -1) * float(e["execQty"]) for e in executions), 10)
+    warnings = []
+    if position:
+        warnings.append(f"結束時還有持倉 {position:g}:最後這一輪沒算進損益(成交明細照樣寫進 sl_fill)")
+    preview = BackfillPreview(
+        symbol=symbol, account=account, strategy_name=name, start=start, end=end, orders=len(orders),
+        events=len(events), gross_pnl=sum(e.realized_pnl for e in events),
+        trade_fees=sum(float(e.get("execFee") or 0) for e in executions), open_position=position, warnings=warnings,
+        direction=_direction_of(executions))
+    return orders, executions, preview
+
+
+@dataclass(frozen=True)
+class Segment:
+    """DB 裡一筆紀錄的時段(還沒結束的算到現在)。"""
+    run_id: str
+    strategy_name: str
+    start: datetime
+    end: datetime
+    running: bool
+
+    def label(self) -> str:
+        return f"{self.strategy_name} {_hkt(self.start)} → {'進行中' if self.running else _hkt(self.end)}"
+
+
+def existing_segments(db_url: Optional[str], symbol: str, account: Optional[str], now: datetime) -> List[Segment]:
+    """同帳戶、同幣種已有的紀錄時段(不分策略:成交是靠帳戶 + 幣種歸到紀錄的),舊的在前。只查 DB。"""
+    account = _account_name(account)
+    engine = _engine(db_url)
+    try:
+        with Session(engine) as s:
+            runs = list(s.scalars(select(SlRun).where(SlRun.symbol == symbol)))
+    except Exception as e:  # noqa: BLE001
+        raise FreeStyleError(f"交易資料庫連不上:{e}") from None
+    finally:
+        engine.dispose()
+    segs = [Segment(r.run_id, r.strategy_name, _utc(r.started_at), _utc(r.ended_at) if r.ended_at else _utc(now),
+                    r.ended_at is None) for r in runs if _account_name(r.account).upper() == account.upper()]
+    return sorted(segs, key=lambda g: g.start)
+
+
+def overlap_marks(segments: List[Segment], start: datetime, end: datetime) -> Dict[str, Any]:
+    """開始落在哪一段、結束落在哪一段、整段被包住的有哪些。剛好接上(結束 = 下一段開始)不算重疊。"""
+    start, end = _utc(start), _utc(end)
+    at_start = next((g for g in segments if g.start <= start < g.end), None)
+    at_end = next((g for g in segments if g.start < end <= g.end), None)
+    inside = [g for g in segments if start <= g.start and g.end <= end and g not in (at_start, at_end)]
+    return {"start": at_start, "end": at_end, "inside": inside}
+
+
+def _check_overlap(db_url, symbol, account, start, end, now) -> None:
+    """同帳戶、同幣種、時間重疊的紀錄 → 成交會被算兩次。還沒結束的紀錄算到現在。"""
+    for g in existing_segments(db_url, symbol, account, now):
+        if g.start < end and g.end > start:
+            raise FreeStyleError(f"跟已有的紀錄重疊:{g.label()}(run_id {g.run_id});同一段成交會被算兩次")
 
 
 def summary_message(r: StopResult) -> str:
     lines = [
-        f"🏁 free style 結束|{r.symbol}|帳戶 {r.account}",
+        (f"📝 {r.strategy_name} 補記" if r.backfill else "🏁 free style 結束") + f"|{r.symbol}|帳戶 {r.account}",
         f"{_hkt(r.started_at)} → {_hkt(r.ended_at)}(共 {_duration(r.ended_at - r.started_at)})",
         f"完成 {r.events} 輪|訂單 {r.orders} 張",
         f"合計淨利 {r.net_pnl:+.2f} USDT(毛利 {r.gross_pnl:+.2f} − 手續費 {r.fees:.4f} − 資金費 {r.funding:.4f})",
@@ -304,6 +540,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_stop = sub.add_parser("stop", help="結束,從 Bybit 拉回期間的訂單 / 成交寫進資料庫")
     p_stop.add_argument("--symbol", required=True)
     p_stop.add_argument("--account", help="Bybit 帳戶名稱;不填 = test1")
+    p_back = sub.add_parser("backfill", help="補記過去一段(開始、結束都在過去),從 Bybit 拉回那段期間的單寫進資料庫")
+    p_back.add_argument("--symbol", required=True)
+    p_back.add_argument("--start", required=True, help="HKT,格式 \"2026-10-09 14:00\"")
+    p_back.add_argument("--end", required=True, help="HKT,格式 \"2026-10-09 18:00\"")
+    p_back.add_argument("--name", default=FREE_STYLE, help="策略名稱(預設 free style)")
+    p_back.add_argument("--account", help="Bybit 帳戶名稱;不填 = test1")
+    p_back.add_argument("--hold", help="選填:預計持倉時間,例 90m / 4h / 1.5d")
+    p_back.add_argument("--direction", choices=BACKFILL_DIRECTIONS, help="選填:方向(不填 = 從成交判斷)")
+    p_back.add_argument("--note", help="選填:備註")
+    p_back.add_argument("--target", type=float, help="選填:目標價(沒掛單的止盈)")
+    p_back.add_argument("--stop", type=float, help="選填:停損價(心理停損)")
     sub.add_parser("status", help="列出進行中的 free style")
     args = parser.parse_args(argv)
 
@@ -319,8 +566,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         except accounts.AccountError as e:
             raise FreeStyleError(str(e)) from e
         client = BybitClient(api_key=account.api_key, api_secret=account.api_secret, testnet=False)
-        symbol = args.symbol.upper()
+        from strategy_lab.ui.actions import perp_symbol
+
+        symbol = perp_symbol(args.symbol)  # 只填幣名也可以:eth → ETHUSDT
         now = datetime.now(timezone.utc)
+        if args.command == "backfill":
+            result = backfill(db_url, client, symbol, _parse_since(args.start), _parse_since(args.end), now,
+                              account=args.account, strategy_name=args.name, expected_hold=parse_hold(args.hold),
+                              direction=args.direction, note=args.note, target_price=args.target,
+                              stop_price=args.stop)
+            text = summary_message(result)
+            print(text)
+            send_telegram(text)
+            return 0
         if args.command == "start":
             when = _parse_since(args.since) if args.since else now
             run_id = start(db_url, client, symbol, when, account=args.account)

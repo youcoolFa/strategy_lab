@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -57,7 +57,42 @@ if top_r.button("🔄 重新整理", key="refresh"):
     st.cache_data.clear()
     st.rerun()
 
-tab_overview, tab_records, tab_log, tab_strategy = st.tabs(["總覽", "交易紀錄", "Log", "策略"])
+def _backfill_command(u) -> str:
+    """終端機補記指令:開始 = 第一筆的那一分鐘,結束 = 最後一筆的下一分鐘(HKT)。"""
+    start = u.first.astimezone(HKT).replace(second=0, microsecond=0)
+    end = (u.last.astimezone(HKT) + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    return (f".venv/bin/python -m strategy_lab.live.free_style backfill --account {u.account} "
+            f"--symbol {u.symbol} --start \"{start:%Y-%m-%d %H:%M}\" --end \"{end:%Y-%m-%d %H:%M}\"")
+
+
+def _unrecorded_section():
+    """每日對帳(2026-10-13)找到的交易會自動記成 free style(2026-10-14);這裡只列記不了的,附終端機補記指令
+    (補記分頁 10-14 拿掉)。"""
+    from strategy_lab.live import reconcile as rc
+
+    st.subheader("未記錄的交易(每日對帳,08:00 HKT)")
+    last = rc.last_run()
+    left, right = st.columns([4, 1])
+    left.caption(f"上次對帳:{hkt(last) if last else '還沒跑過'}。Bybit 上有成交、DB 卻沒有紀錄的交易會自動記成 "
+                 "free style(到「損益表」補填);策略紀錄漏記的會自動補回。這裡只列**自動記不了**的(例:時間跟已有紀錄重疊)。")
+    if right.button("🔄 立即對帳", key="reconcile_now"):
+        with st.spinner("對帳中(只讀 Bybit)…"):
+            rc.run_daily(DB_URL, datetime.now(timezone.utc))
+        st.success("對帳完成,有問題會發 Telegram 系統警報")
+    items = sorted(rc.load_unrecorded(), key=lambda u: u.first, reverse=True)  # 最近的排最前面(使用者要求)
+    if not items:
+        st.caption("沒有未記錄的交易")
+        return
+    st.markdown(f"**最新更新:{hkt(last) if last else '還沒對帳'} HKT**(由新到舊)")
+    st.caption("訂單 = 你在 Bybit 送出的買 / 賣;一張訂單可以拆成好幾筆成交(跟幾個對手撮合就幾筆)。")
+    st.dataframe(pd.DataFrame([{"帳戶": u.account, "幣種": u.symbol, "第一筆(HKT)": hkt(u.first),
+                                "最後一筆(HKT)": hkt(u.last), "訂單數": u.orders, "成交筆數": u.count} for u in items]),
+                 hide_index=True, width="stretch")
+    st.caption("記不了的原因在 Telegram 警告裡;處理好之後,用終端機補記(或下次對帳會再試一次):")
+    st.code("\n".join(_backfill_command(u) for u in items), language="bash")
+
+# 分頁順序(2026-10-14 使用者指定):損益表、策略、交易紀錄、Log;總覽放最後
+tab_pnl, tab_strategy, tab_records, tab_log, tab_overview = st.tabs(["損益表", "策略", "交易紀錄", "Log", "總覽"])
 
 # ---------------------------------------------------------------------------
 with tab_overview:
@@ -116,6 +151,8 @@ with tab_overview:
             c2.caption("沒有掛單")
     except Exception as e:  # noqa: BLE001
         st.error(f"查詢 Bybit 失敗:{e}")
+
+    _unrecorded_section()
 
 # ---------------------------------------------------------------------------
 with tab_records:
@@ -314,14 +351,15 @@ def _symbol_input(placeholder: str, key: str) -> str:
 
 
 def _start_free_style(accounts):
-    st.caption("自己在 Bybit 手動交易,這裡只負責記帳:開始只記時間,結束時從 Bybit 拉回這段期間的單寫進資料庫。不會下單或取消。")
+    st.caption("自己在 Bybit 手動交易,這裡只負責記帳:開始只記時間,結束時從 Bybit 拉回這段期間的單寫進資料庫。不會下單或取消。"
+               "這裡是**還沒結束**的交易;已經結束、忘了記的交易,每天 08:00 對帳時會自動記成 free style。")
     symbol = _symbol_input("ETH", key="fs_symbol")
-    # 補記開始時間用選的(不用打字):預設是打開這頁的這一刻,日曆停在當年當月;往前選 = 補記之前已經開始的手動交易
+    # 開始時間用選的(不用打字):預設是打開這頁的這一刻;往前選 = 交易其實之前就開始了
     now = datetime.now(HKT).replace(second=0, microsecond=0)
     day_col, time_col = st.columns(2)
-    since_day = day_col.date_input("補記開始日期(HKT)", value=now.date(), max_value=now.date(), format="YYYY-MM-DD",
+    since_day = day_col.date_input("開始日期(HKT,預設現在,可往前選)", value=now.date(), max_value=now.date(), format="YYYY-MM-DD",
                                    key="fs_since_day")
-    since_time = time_col.time_input("補記開始時間(HKT)", value=now.time(), step=60, key="fs_since_time")
+    since_time = time_col.time_input("開始時間(HKT)", value=now.time(), step=60, key="fs_since_time")
     # 不用勾確認(2026-10-12):free style 只記帳、不下單,開始就是要寫進 trading 資料庫
     if st.button("▶️ 開始 free style", key="fs_start"):
         if not symbol:
@@ -329,7 +367,7 @@ def _start_free_style(accounts):
         else:
             when = datetime.combine(since_day, since_time, tzinfo=HKT).astimezone(timezone.utc)
             if when > datetime.now(timezone.utc):
-                st.error("補記開始時間不能在未來")
+                st.error("開始時間不能在未來")
                 return
             for account in accounts:  # 每個帳戶各記一段;某個失敗不影響其他
                 try:
@@ -498,3 +536,109 @@ with tab_strategy:
         _start_free_style(accounts)
     else:
         _start_strategy(choice, root, accounts)
+
+
+
+# ---------------------------------------------------------------------------
+_PNL_SHOWN = ["日期", "幣種", "方向", "數量", "建倉價格", "建倉時間", "平倉價格", "真實損益", "手續費", "手續費佔比(%)",
+              "預估時長", "預估單位", "實際時長", "目標價", "停損價", "備註"]
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _fee_points(account):
+    return data.fee_points(data.make_client(account))
+
+
+def _fee_points_metric(col, account):
+    """手續費點數(使用者指定):ETHUSDT 現價 × 這個帳戶的 maker 費率 × 2(買 + 賣),30 秒快取。"""
+    label = "手續費點數(ETHUSDT,maker 買+賣)"
+    try:
+        f = _fee_points(account)
+    except Exception as e:  # noqa: BLE001  查不到 Bybit 不影響損益表
+        col.metric(label, "—", help=f"查詢 Bybit 失敗:{e}")
+        return
+    col.metric(label, f"{f['points']:.2f} 點",
+               help=f"現價 {f['price']:g} × maker {f['maker_rate'] * 100:.4f}% × 2(買一次 + 賣一次)= "
+                    f"用 maker 開倉、maker 平倉,價格要往有利方向走這麼多點才賺回手續費(帳戶 {account})")
+
+
+def _pnl_section():
+    """每個策略的損益表(2026-10-14):每一對交易(持倉 0 → 0)一列。表格是 AG Grid 免費版:像 Excel 一樣
+    點欄位標題排序 / 篩選;預估時長 / 目標價 / 停損價 / 備註(淡黃底)可以直接在格子裡改,按儲存寫回 DB。
+    上方合計和最底總結列跟著表格目前的篩選。"""
+    import st_aggrid
+
+    from strategy_lab.ui import grid
+
+    if not DB_URL:
+        st.warning(".env 沒有 TRADING_DB_URL")
+        return
+    accounts = data.list_accounts()
+    main = next((i for i, a in enumerate(accounts) if a.upper() == "MAIN"), 0)
+    c1, c2, c3 = st.columns([3, 3, 1.4])
+    account = c1.selectbox("帳戶", accounts, index=main, key="pnl_account")
+    c3.write("")  # 跟下拉選單對齊
+    if c3.button("🔄 更新", key="pnl_update", help="馬上對帳一次:剛做完、已經平倉的交易會自動記成 free style"):
+        from strategy_lab.live import reconcile as rc
+
+        with st.spinner("對帳中(只讀 Bybit)…"):
+            rc.run_daily(DB_URL, datetime.now(timezone.utc))
+        st.cache_data.clear()
+        st.success("更新完成:已平倉的新交易已記成 free style(還沒平倉的等平倉後再按一次)")
+    try:
+        strategy = c2.selectbox("策略", data.pnl_strategies(DB_URL, account), key="pnl_strategy")
+        rows = data.pnl_rows(DB_URL, account, strategy)
+    except Exception as e:  # noqa: BLE001  資料庫連不上不能讓整頁掛掉
+        st.error(f"讀取 trading 資料庫失敗:{e}")
+        return
+    if not rows:
+        st.caption(f"帳戶 {account} 的 {strategy} 還沒有任何交易紀錄(全手動交易會在每天 08:00 對帳時自動記成 free style)")
+        return
+    m1, m_win, m2, m3, m4 = st.columns(5)  # 先佔位置,等表格回傳篩選後的列再填
+    _fee_points_metric(m4, account)
+    st.caption("點欄位標題右邊的 ☰ → 排序 / 篩選(像 Excel);淡黃底的欄位可以直接點進去改;預估時長打數字,單位從旁邊下拉選。")
+    table = pd.DataFrame(rows).rename(columns={"手續費佔比": "手續費佔比(%)"})
+    table = table[_PNL_SHOWN + [c for c in grid.HIDDEN if c in table.columns]]
+    response = st_aggrid.AgGrid(
+        table, gridOptions=grid.pnl_grid_options(_PNL_SHOWN), key=f"pnl_grid_{account}_{strategy}",
+        height=min(80 + 36 * len(table), 520), theme="streamlit", allow_unsafe_jscode=True,
+        data_return_mode="FILTERED_AND_SORTED", update_on=["filterChanged", "sortChanged", "cellValueChanged"])
+    shown = response.data if response is not None and response.data is not None else table
+    shown_rows = [{k: (None if isinstance(v, float) and v != v else v) for k, v in r.items()}
+                  for r in pd.DataFrame(shown).to_dict("records")]
+    m1.metric("交易對數", len(shown_rows))
+    wins = sum(1 for r in shown_rows if (r.get("真實損益") or 0) > 0)
+    m_win.metric("勝率", f"{wins / len(shown_rows) * 100:.1f}%" if shown_rows else "—",
+                 help=f"真實損益(淨利,已扣手續費、資金費)> 0 的對數 ÷ 總對數 = {wins} / {len(shown_rows)}")
+    m2.metric("真實損益合計(USDT)", f"{sum(r.get('真實損益') or 0 for r in shown_rows):.0f}")
+    m3.metric("手續費合計(USDT)", f"{sum(r.get('手續費') or 0 for r in shown_rows):.0f}")
+    if not shown_rows:
+        st.caption("篩選後沒有交易,放寬欄位標題上的篩選看看")
+        return
+    summary = data.pnl_summary([{**r, "手續費佔比": r.get("手續費佔比(%)")} for r in shown_rows])
+    shown_summary = {  # 總結表:只放有數字的欄位(2026-10-21 使用者:沒用的欄位去掉、加勝率)
+        "總結": f"{len(shown_rows)} 對",
+        "勝率": f"{summary['勝率'] * 100:.1f}%",
+        "數量(平均)": f"{summary['數量']:.2f}" if summary["數量"] is not None else "",
+        "真實損益(總和)": f"{summary['真實損益']:.0f}", "手續費(總和)": f"{summary['手續費']:.0f}",
+        "手續費佔比(%,平均)": f"{summary['手續費佔比']:.2f}" if summary["手續費佔比"] is not None else "",
+        "實際時長(平均)": summary["實際時長"], "預估時長(平均)": summary["預估時長"] or "未填",
+    }
+    st.dataframe(pd.DataFrame([shown_summary]), hide_index=True, width="stretch")
+    st.caption("真實損益 = 淨利(已扣手續費、資金費);手續費佔比 = 手續費 ÷ 價差毛利;日期 = 平倉日(HKT);"
+               "數量 = 這一對交易的最大持倉。儲存只會存目前表格看得到(沒被篩掉)的列。")
+    if st.button("💾 儲存後補欄位", key="pnl_save"):
+        changes = actions.pnl_changes(rows, shown_rows)
+        if not changes:
+            st.info("沒有修改")
+            return
+        try:
+            st.success(f"已儲存 {actions.save_pnl_edits(DB_URL, changes)} 列")
+        except ValueError as e:
+            st.error(f"沒有儲存:{e}")
+
+
+with tab_pnl:
+    st.subheader("損益表")
+    _pnl_section()
+

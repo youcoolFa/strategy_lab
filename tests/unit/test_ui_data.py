@@ -282,3 +282,107 @@ class TestMultiAccount:
         monkeypatch.setattr(accounts, "ENV_PATH", env)
         assert data.make_client("main")._http.api_key == "mainkey"
         assert data.make_client()._http.api_key == "legacy"
+
+
+class TestPnlTable:
+    """損益表(2026-10-14):選帳戶 + 策略,每一對交易(sl_event)一列,最近的在前。"""
+
+    def add_round(self, db, tmp_path, account, strategy, symbol, start, minutes, entry, exit_, qty=2.0, fees=0.5,
+                  direction="long", **run_extra):
+        from strategy_lab.engine.events import Event
+
+        rec = TradeRecorder(db_url=db, pending_dir=tmp_path / "p", fetch_executions=lambda *a: [])
+        rec.start_run(RunInfo(
+            strategy_name=strategy, strategy_path="NA", strategy_yaml="NA", strategy_params={}, config={},
+            symbol=symbol, category="linear", direction=direction, origin_price=None, origin_source=None, qty=None,
+            order_type="NA", loop=None, testnet=False, preflight=None, log_path=None, started_at=start,
+            account=account, **run_extra))
+        sign = 1 if direction == "long" else -1
+        ev = Event(index=1, direction=direction, start_time=start, end_time=start + timedelta(minutes=minutes), fills=2,
+                   max_position=qty, avg_entry=entry, avg_exit=exit_, realized_pnl=sign * (exit_ - entry) * qty,
+                   max_drawdown=-1.0, forced=False)
+        rec._fills["x"] = {"exec_id": "x", "event_index": 1, "exec_type": "Trade", "fee": fees}
+        rec.record_event(ev)
+
+    def test_rows_for_account_and_strategy_newest_first(self, db, tmp_path):
+        self.add_round(db, tmp_path, "MAIN", "free style", "ETHUSDT", NOW - timedelta(days=2), 90, 2500, 2510,
+                       expected_hold_seconds=4 * 3600, target_price=2520.0, stop_price=2480.0, note="試單")
+        self.add_round(db, tmp_path, "MAIN", "free style", "ETHUSDT", NOW - timedelta(days=1), 30, 2600, 2590)
+        self.add_round(db, tmp_path, "MAIN", "scale_in_ladder", "SUIUSDT", NOW, 10, 1.2, 1.3)  # 別的策略
+        self.add_round(db, tmp_path, "test1", "free style", "ETHUSDT", NOW, 10, 1, 2)  # 別的帳戶
+
+        rows = data.pnl_rows(db, "main", "free style")
+
+        assert [r["建倉價格"] for r in rows] == [2600.0, 2500.0]  # 最近的在前
+        older = rows[1]
+        assert older["日期"] == "2026/10/07" and older["建倉時間"] == "10-07 18:00"
+        assert (older["幣種"], older["方向"], older["數量"], older["平倉價格"]) == ("ETHUSDT", "long", 2.0, 2510.0)
+        assert older["真實損益"] == pytest.approx(20.0 - 0.5) and older["手續費"] == pytest.approx(0.5)
+        assert older["手續費佔比"] == pytest.approx(2.5)  # 0.5 / 20 毛利
+        assert (older["預估時長"], older["預估單位"], older["實際時長"]) == (4, "小時", "1 小時 30 分")
+        assert (older["預估秒數"], older["實際秒數"]) == (4 * 3600, 5400)  # 給總結列算平均,畫面不顯示
+        assert (older["目標價"], older["停損價"], older["備註"]) == (2520.0, 2480.0, "試單")
+        assert rows[0]["預估時長"] is None and rows[0]["預估單位"] == "" and rows[0]["目標價"] is None
+        assert {"run_id", "event_index"} <= set(older)  # 存檔用,畫面不顯示
+
+    def test_strategies_of_an_account_start_with_free_style(self, db, tmp_path):
+        self.add_round(db, tmp_path, "MAIN", "scale_in_ladder", "SUIUSDT", NOW, 10, 1.2, 1.3)
+        assert data.pnl_strategies(db, "MAIN") == ["free style", "scale_in_ladder"]
+        assert data.pnl_strategies(db, "nobody") == ["free style"]
+
+    def test_old_rows_without_account_belong_to_test1(self, db, tmp_path):
+        self.add_round(db, tmp_path, None, "scale_in_ladder", "SUIUSDT", NOW, 10, 1.2, 1.3)
+        assert len(data.pnl_rows(db, "test1", "scale_in_ladder")) == 1
+
+    @pytest.mark.parametrize("seconds,parts", [(None, (None, "")), (45, (45, "秒")), (5400, (90, "分鐘")),
+                                               (4 * 3600, (4, "小時")), (36 * 3600, (1.5, "天")), (2 * 86400, (2, "天"))])
+    def test_hold_parts_number_and_unit(self, seconds, parts):
+        """預估時長拆成「數字 + 單位」(2026-10-14 使用者:單位用下拉選,不用手打 4h)"""
+        assert data.hold_parts(seconds) == parts
+        if seconds:
+            assert data.hold_seconds(*parts) == seconds
+
+
+def test_pnl_summary_row():
+    """損益表最底的總結列(2026-10-14):數量平均、真實損益總和、手續費總和、手續費佔比平均、
+    實際時長平均、預估時長平均(只算有填的);其他欄位空白。"""
+    rows = [{"數量": 10.0, "真實損益": 60.24, "手續費": 19.6, "手續費佔比": 24.4, "實際秒數": 3600, "預估秒數": 4 * 3600},
+            {"數量": 5.0, "真實損益": -20.0, "手續費": 3.7, "手續費佔比": None, "實際秒數": 7200, "預估秒數": None},
+            {"數量": 3.0, "真實損益": 1.0, "手續費": 0.3, "手續費佔比": 10.0, "實際秒數": 1800, "預估秒數": 2 * 3600}]
+    s = data.pnl_summary(rows)
+    assert s["日期"] == "總結(3 對)"
+    assert s["數量"] == pytest.approx(6.0) and s["真實損益"] == pytest.approx(41.24) and s["手續費"] == pytest.approx(23.6)
+    assert s["手續費佔比"] == pytest.approx(17.2)  # 只平均有數字的
+    assert s["實際時長"] == "1 小時 10 分" and s["預估時長"] == "3 小時 0 分"
+    assert {k for k, v in s.items() if v not in ("", None)} == {"日期", "勝率", "數量", "真實損益", "手續費", "手續費佔比", "實際時長", "預估時長"}
+
+
+def test_pnl_summary_of_nothing_is_empty():
+    from strategy_lab.ui.data import pnl_summary
+
+    assert pnl_summary([]) == {}
+
+
+def test_fee_points_round_trip_at_maker_rate():
+    """損益表的手續費點數(2026-10-14 使用者):ETHUSDT 現價 × maker 費率 × 2(買 + 賣)
+    = 價格要往有利方向走幾點才賺回手續費。費率是這個帳戶的真實費率。"""
+    class Client:
+        def get_last_price(self, symbol):
+            assert symbol == "ETHUSDT"
+            return 2516.0
+
+        def get_fee_rates(self, symbol):
+            return 0.0002, 0.00055
+
+    got = data.fee_points(Client())
+    assert (got["symbol"], got["price"], got["maker_rate"]) == ("ETHUSDT", 2516.0, 0.0002)
+    assert got["points"] == pytest.approx(2516.0 * 0.0002 * 2)
+
+
+def test_pnl_summary_win_rate():
+    """勝率(2026-10-21 使用者):真實損益(淨利)> 0 的對數 ÷ 總對數;剛好 0 不算贏"""
+    rows = [{"數量": 1.0, "真實損益": 5.0, "手續費": 1.0, "手續費佔比": None, "實際秒數": 60, "預估秒數": None},
+            {"數量": 1.0, "真實損益": -3.0, "手續費": 1.0, "手續費佔比": None, "實際秒數": 60, "預估秒數": None},
+            {"數量": 1.0, "真實損益": 0.0, "手續費": 1.0, "手續費佔比": None, "實際秒數": 60, "預估秒數": None},
+            {"數量": 1.0, "真實損益": 8.0, "手續費": 1.0, "手續費佔比": None, "實際秒數": 60, "預估秒數": None}]
+    assert data.pnl_summary(rows)["勝率"] == pytest.approx(0.5)

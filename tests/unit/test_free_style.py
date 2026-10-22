@@ -286,3 +286,243 @@ def test_cli_account_option_uses_that_accounts_keys(monkeypatch, tmp_path):
         key=client._http.api_key, account=k.get("account"), symbol=symbol) or "run-1")
     assert fs.main(["start", "--symbol", "ethusdt", "--account", "main"]) == 0
     assert seen == {"key": "mainkey", "account": "main", "symbol": "ETHUSDT"}
+
+
+class TestBackfill:
+    """補記過去一段(2026-10-13):選帳戶、幣種、開始與結束(都在過去)、策略名稱(預設 free style),
+    從 Bybit 拉回那段期間的單與成交,先預覽、確認後一次寫進 DB(sl_run.end_reason = backfill)。"""
+
+    NOW = t(24 * 60)
+
+    def client(self):
+        orders, executions = two_round_trips()
+        return FakeClient(orders=orders, executions=executions)
+
+    def test_preview_counts_without_writing(self, db):
+        p = fs.preview_backfill(db, self.client(), "ETHUSDT", T0, t(90), self.NOW)
+        assert (p.orders, p.events, p.gross_pnl, p.open_position) == (5, 2, pytest.approx(3.0), 0)
+        assert p.strategy_name == "free style" and p.account == "test1" and p.warnings == []
+        assert rows(db, SlRun) == []
+
+    def test_backfill_writes_one_finished_run_with_the_chosen_window_and_name(self, db, tmp_path):
+        result = fs.backfill(db, self.client(), "ETHUSDT", T0, t(90), self.NOW, account="MAIN",
+                             strategy_name="sat_weekend", pending_dir=tmp_path)
+        [run] = rows(db, SlRun)
+        assert run.strategy_name == "sat_weekend" and run.account == "MAIN" and run.end_reason == "backfill"
+        assert run.started_at.replace(tzinfo=timezone.utc) == T0 and run.ended_at.replace(tzinfo=timezone.utc) == t(90)
+        assert len(rows(db, SlOrder)) >= 5 and len(rows(db, SlEvent)) == 2 and len(rows(db, SlFill)) >= 4
+        assert {e.strategy_name for e in rows(db, SlEvent)} == {"sat_weekend"}
+        assert result.events == 2 and result.net_pnl == pytest.approx(3.0 - result.fees - result.funding)
+
+    def test_only_the_chosen_window_is_used(self, db):
+        p = fs.preview_backfill(db, self.client(), "ETHUSDT", T0, t(35), self.NOW)  # 只有第 1 輪
+        assert (p.events, p.gross_pnl) == (1, pytest.approx(1.0))
+
+    @pytest.mark.parametrize("start,end,match", [
+        (t(90), T0, "開始要早於結束"),
+        (T0, t(24 * 60 + 1), "結束不能晚於現在"),
+        (T0 - timedelta(days=731), t(90), "2 年"),
+    ])
+    def test_bad_windows_are_refused(self, db, start, end, match):
+        with pytest.raises(fs.FreeStyleError, match=match):
+            fs.preview_backfill(db, self.client(), "ETHUSDT", start, end, self.NOW)
+
+    def test_strategy_name_is_required(self, db):
+        with pytest.raises(fs.FreeStyleError, match="策略名稱"):
+            fs.preview_backfill(db, self.client(), "ETHUSDT", T0, t(90), self.NOW, strategy_name="  ")
+
+    def test_overlapping_an_existing_run_on_the_same_account_is_refused(self, db, tmp_path):
+        """同帳戶同幣種、時間重疊的紀錄 → 成交會被算兩次;別的帳戶不算重疊"""
+        fs.backfill(db, self.client(), "ETHUSDT", T0, t(35), self.NOW, pending_dir=tmp_path)
+        with pytest.raises(fs.FreeStyleError, match="重疊"):
+            fs.preview_backfill(db, self.client(), "ETHUSDT", t(30), t(90), self.NOW)
+        fs.preview_backfill(db, self.client(), "ETHUSDT", t(30), t(90), self.NOW, account="MAIN")
+        fs.preview_backfill(db, self.client(), "ETHUSDT", t(36), t(90), self.NOW)  # 接在後面不算重疊
+
+    def test_unfinished_run_overlaps_until_now(self, db, tmp_path):
+        fs.start(db, FakeClient(), "ETHUSDT", t(100), pending_dir=tmp_path)
+        with pytest.raises(fs.FreeStyleError, match="重疊"):
+            fs.preview_backfill(db, self.client(), "ETHUSDT", t(200), t(300), self.NOW)
+
+    def test_position_already_open_at_the_start_is_refused(self, db):
+        """第一筆成交就是平倉(Bybit closedSize > 0)= 開始前已經有持倉,算不出成本"""
+        client = self.client()
+        client.executions[0]["closedSize"] = "0.1"
+        with pytest.raises(fs.FreeStyleError, match="開始時已經有持倉"):
+            fs.preview_backfill(db, client, "ETHUSDT", T0, t(90), self.NOW)
+
+    def test_position_left_at_the_end_is_a_warning(self, db):
+        p = fs.preview_backfill(db, self.client(), "ETHUSDT", T0, t(55), self.NOW)  # 第 2 輪只開了空單
+        assert p.open_position == pytest.approx(-0.2) and p.events == 1
+        assert any("結束時還有持倉" in w for w in p.warnings)
+
+    def test_empty_window_is_refused(self, db):
+        with pytest.raises(fs.FreeStyleError, match="沒有交易"):
+            fs.preview_backfill(db, FakeClient(), "ETHUSDT", T0, t(90), self.NOW)
+
+    def test_cli_backfill(self, db, monkeypatch, tmp_path):
+        from strategy_lab.live import accounts
+
+        env = tmp_path / ".env"
+        env.write_text("BYBIT_API_KEY=k\nBYBIT_API_SECRET=s\n")
+        monkeypatch.setattr(accounts, "ENV_PATH", env)
+        monkeypatch.setattr(fs, "load_dotenv", lambda *a, **k: None)
+        monkeypatch.setenv("TRADING_DB_URL", db)
+        seen = {}
+        monkeypatch.setattr(fs, "backfill", lambda db_, client, symbol, start, end, now, **k: seen.update(
+            symbol=symbol, start=start, end=end, **k) or "RESULT")
+        monkeypatch.setattr(fs, "summary_message", lambda r: f"總結 {r}")
+        monkeypatch.setattr(fs, "send_telegram", lambda text: None)
+        assert fs.main(["backfill", "--symbol", "ethusdt", "--start", "2026-10-09 10:00", "--end", "2026-10-09 11:30",
+                        "--name", "sat_weekend"]) == 0
+        assert seen["symbol"] == "ETHUSDT" and seen["strategy_name"] == "sat_weekend" and seen["account"] is None
+        assert (seen["start"], seen["end"]) == (T0, t(90))  # HKT 10:00 = UTC 02:00
+
+
+def test_backfill_summary_names_the_strategy_and_says_backfill(db, tmp_path):
+    orders, executions = two_round_trips()
+    result = fs.backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", T0, t(90), t(24 * 60),
+                         strategy_name="sat_weekend", pending_dir=tmp_path)
+    text = fs.summary_message(result)
+    assert text.splitlines()[0] == "📝 sat_weekend 補記|ETHUSDT|帳戶 test1"
+
+
+class TestBackfillUserFields:
+    """補記時可以事後填:預計持倉時間、方向、備註(2026-10-13,使用者選 B:只寫自己確定的值)。
+    都是選填;填了寫進 sl_run(預計持倉時間也寫到每一輪 sl_event),config.user_filled 標明是事後補填。"""
+
+    NOW = t(24 * 60)
+
+    def write(self, db, tmp_path, **k):
+        orders, executions = two_round_trips()
+        return fs.backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", T0, t(90), self.NOW,
+                           pending_dir=tmp_path, **k)
+
+    def test_filled_values_are_written_and_marked(self, db, tmp_path):
+        self.write(db, tmp_path, expected_hold=timedelta(hours=4), direction="both", note="  週末試手感  ")
+        [run] = rows(db, SlRun)
+        assert (run.expected_hold_seconds, run.direction, run.note) == (4 * 3600, "both", "週末試手感")
+        assert run.config["user_filled"] == ["expected_hold", "direction", "note"]
+        assert {e.expected_hold_seconds for e in rows(db, SlEvent)} == {4 * 3600}
+
+    def test_nothing_filled_stays_empty_and_direction_comes_from_the_fills(self, db, tmp_path):
+        """方向不用填:每一對交易的第一筆是買 = long、賣 = short;兩種都有 = both(這裡第 1 輪多、第 2 輪空)"""
+        self.write(db, tmp_path)
+        [run] = rows(db, SlRun)
+        assert (run.expected_hold_seconds, run.direction, run.note, run.target_price, run.stop_price) == (
+            None, "both", None, None, None)
+        assert run.config["user_filled"] == []
+
+    def test_direction_of_a_single_long_round(self, db):
+        orders, executions = two_round_trips()
+        p = fs.preview_backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", T0, t(35), self.NOW)
+        assert p.direction == "long"
+
+    def test_target_and_stop_are_written_and_marked(self, db, tmp_path):
+        self.write(db, tmp_path, target_price=2600.0, stop_price=2450.0, direction="long")
+        [run] = rows(db, SlRun)
+        assert (float(run.target_price), float(run.stop_price), run.direction) == (2600.0, 2450.0, "long")
+        assert run.config["user_filled"] == ["direction", "target_price", "stop_price"]
+
+    @pytest.mark.parametrize("k,match", [
+        ({"direction": "up"}, "方向"),
+        ({"expected_hold": timedelta(0)}, "預計持倉時間"),
+        ({"note": "x" * 501}, "備註"),
+        ({"target_price": 0}, "目標價"),
+        ({"stop_price": -1}, "停損價"),
+        ({"direction": "long", "target_price": 2400, "stop_price": 2500}, "停損價要低於目標價"),
+        ({"direction": "short", "target_price": 2500, "stop_price": 2400}, "停損價要高於目標價"),
+    ])
+    def test_bad_values_are_refused_at_preview(self, db, k, match):
+        orders, executions = two_round_trips()
+        with pytest.raises(fs.FreeStyleError, match=match):
+            fs.preview_backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", T0, t(90), self.NOW, **k)
+
+    @pytest.mark.parametrize("text,expected", [("90m", timedelta(minutes=90)), ("4h", timedelta(hours=4)),
+                                               ("1.5d", timedelta(days=1.5)), ("", None)])
+    def test_parse_hold(self, text, expected):
+        assert fs.parse_hold(text) == expected
+
+    def test_parse_hold_rejects_garbage(self):
+        with pytest.raises(fs.FreeStyleError, match="預計持倉時間"):
+            fs.parse_hold("4 hours")
+
+    def test_cli_passes_the_fields(self, db, monkeypatch, tmp_path):
+        from strategy_lab.live import accounts
+
+        env = tmp_path / ".env"
+        env.write_text("BYBIT_API_KEY=k\nBYBIT_API_SECRET=s\n")
+        monkeypatch.setattr(accounts, "ENV_PATH", env)
+        monkeypatch.setattr(fs, "load_dotenv", lambda *a, **k: None)
+        monkeypatch.setenv("TRADING_DB_URL", db)
+        seen = {}
+        monkeypatch.setattr(fs, "backfill", lambda *a, **k: seen.update(k) or "RESULT")
+        monkeypatch.setattr(fs, "summary_message", lambda r: "總結")
+        monkeypatch.setattr(fs, "send_telegram", lambda text: None)
+        assert fs.main(["backfill", "--symbol", "eth", "--start", "2026-10-09 10:00", "--end", "2026-10-09 11:30",
+                        "--hold", "4h", "--direction", "long", "--note", "測試", "--target", "2600", "--stop", "2450"]) == 0
+        assert (seen["expected_hold"], seen["direction"], seen["note"]) == (timedelta(hours=4), "long", "測試")
+        assert (seen["target_price"], seen["stop_price"]) == (2600.0, 2450.0)
+
+
+class TestSegments:
+    """補記的紅字(2026-10-13):同帳戶同幣種已有的紀錄時段(不分策略),開始 / 結束落在哪一段就標「重疊」。
+    只查 DB,不碰 Bybit,所以畫面一改就能馬上顯示。"""
+
+    NOW = t(24 * 60)
+
+    def setup_runs(self, db, tmp_path):
+        orders, executions = two_round_trips()
+        fs.backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", T0, t(90), self.NOW,
+                    pending_dir=tmp_path)  # 已結束:T0 → t(90)
+        fs.start(db, FakeClient(), "ETHUSDT", t(600), pending_dir=tmp_path)  # 進行中:t(600) → 現在
+
+    def test_segments_of_this_account_and_symbol_oldest_first(self, db, tmp_path):
+        self.setup_runs(db, tmp_path)
+        fs.start(db, FakeClient(), "BTCUSDT", t(5), pending_dir=tmp_path)  # 別的幣
+        segs = fs.existing_segments(db, "ETHUSDT", None, self.NOW)
+        assert [(s.strategy_name, s.start, s.end, s.running) for s in segs] == [
+            ("free style", T0, t(90), False), ("free style", t(600), self.NOW, True)]
+        assert fs.existing_segments(db, "ETHUSDT", "MAIN", self.NOW) == []  # 別的帳戶
+
+    def test_marks_start_end_and_windows_that_swallow_a_segment(self, db, tmp_path):
+        self.setup_runs(db, tmp_path)
+        segs = fs.existing_segments(db, "ETHUSDT", None, self.NOW)
+        assert fs.overlap_marks(segs, t(30), t(120)) == {"start": segs[0], "end": None, "inside": []}
+        assert fs.overlap_marks(segs, t(100), t(700)) == {"start": None, "end": segs[1], "inside": []}
+        assert fs.overlap_marks(segs, t(95), t(500)) == {"start": None, "end": None, "inside": []}
+        assert fs.overlap_marks(segs, t(-10), t(100)) == {"start": None, "end": None, "inside": [segs[0]]}
+        assert fs.overlap_marks(segs, t(90), t(600)) == {"start": None, "end": None, "inside": []}  # 剛好接上不算
+
+    def test_cli_symbol_only_needs_the_coin(self, db, monkeypatch, tmp_path):
+        from strategy_lab.live import accounts
+
+        env = tmp_path / ".env"
+        env.write_text("BYBIT_API_KEY=k\nBYBIT_API_SECRET=s\n")
+        monkeypatch.setattr(accounts, "ENV_PATH", env)
+        monkeypatch.setattr(fs, "load_dotenv", lambda *a, **k: None)
+        monkeypatch.setenv("TRADING_DB_URL", db)
+        seen = {}
+        monkeypatch.setattr(fs, "start", lambda db_, client, symbol, when, **k: seen.update(symbol=symbol) or "run-1")
+        assert fs.main(["start", "--symbol", "eth"]) == 0
+        assert seen["symbol"] == "ETHUSDT"
+
+
+def test_backfill_keeps_limit_orders_placed_before_the_window(db, tmp_path):
+    """限價單常常先掛好、過一陣子才成交:訂單建立時間早於補記開始,它的成交和手續費也要記(2026-10-14)"""
+    orders = [order("early", "Buy", "Limit", 0.1, 2500, "Filled", t(-120), t(10), avg=2500, filled=0.1),
+              order("o2", "Sell", "Limit", 0.1, 2510, "Filled", t(11), t(30), avg=2510, filled=0.1)]
+    executions = [execution("e1", "early", "Buy", 0.1, 2500, 0.05, t(10)), execution("e2", "o2", "Sell", 0.1, 2510, 0.05, t(30))]
+    result = fs.backfill(db, FakeClient(orders=orders, executions=executions), "ETHUSDT", t(10), t(30), t(24 * 60),
+                         pending_dir=tmp_path)
+    assert {o.order_id for o in rows(db, SlOrder)} == {"early", "o2"}
+    assert {f.exec_id for f in rows(db, SlFill)} == {"e1", "e2"}
+    assert result.fees == pytest.approx(0.1)
+
+
+def test_direction_ignores_float_residue_at_zero():
+    """0.1 + 0.2 − 0.3 這種小數誤差(真實資料:最後持倉 −4e-16)不能被當成穿過 0、反手開倉(2026-10-14 實際遇到)"""
+    rows = [execution("a", "o", "Buy", 0.3, 1, 0, t(0)), execution("b", "o", "Sell", 0.1, 1, 0, t(1)),
+            execution("c", "o", "Sell", 0.2, 1, 0, t(2))]  # 0.3 − 0.1 − 0.2 = −2.8e-17
+    assert 0.3 - 0.1 - 0.2 < 0
+    assert fs._direction_of(rows) == "long"

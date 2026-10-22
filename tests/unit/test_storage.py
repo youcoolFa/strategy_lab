@@ -451,3 +451,57 @@ class TestBackfillAccount:
         assert runs[old.run_id].account == "test1" and runs[new.run_id].account == "MAIN"
         [e] = rows(db, SlEvent)
         assert (e.account, e.strategy_name) == ("test1", "weekend_band_reversion")
+
+
+class TestRunNote:
+    """補記時使用者填的備註(2026-10-13):sl_run.note,選填、有中文說明。"""
+
+    def test_note_column(self):
+        from strategy_lab.storage.models import SlRun
+
+        col = SlRun.__table__.columns["note"]
+        assert col.nullable is True and "備註" in col.comment
+
+    def test_recorder_writes_the_note(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path, FakeExecutions([]))
+        rec.start_run(run_info(note="手動搶反彈"))
+        engine = create_engine(db)
+        with Session(engine) as s:
+            assert s.scalars(select(SlRun)).one().note == "手動搶反彈"
+        engine.dispose()
+
+
+class TestRunTargetAndStop:
+    """補記時使用者事後填的目標價、停損價(2026-10-13):交易所上沒有(沒掛單的止盈 / 心理停損),
+    填了可以跟實際平倉價、最大回撤比。"""
+
+    def test_columns(self):
+        for name, word in (("target_price", "目標價"), ("stop_price", "停損價")):
+            col = SlRun.__table__.columns[name]
+            assert col.nullable is True and word in col.comment
+
+    def test_recorder_writes_them(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path, FakeExecutions([]))
+        rec.start_run(run_info(target_price=2600.0, stop_price=2450.5))
+        engine = create_engine(db)
+        with Session(engine) as s:
+            run = s.scalars(select(SlRun)).one()
+            assert (float(run.target_price), float(run.stop_price)) == (2600.0, 2450.5)
+        engine.dispose()
+
+
+class TestEventUserFields:
+    """損益表(2026-10-14):每一對交易一列,目標價 / 停損價 / 備註要能一列一列後補 → sl_event 也有這三欄;
+    寫入時先抄 sl_run 的值(補記時填的)。"""
+
+    def test_columns(self):
+        for name, word in (("target_price", "目標價"), ("stop_price", "停損價"), ("note", "備註")):
+            col = SlEvent.__table__.columns[name]
+            assert col.nullable is True and word in col.comment
+
+    def test_event_copies_run_values(self, db, tmp_path):
+        rec = make_recorder(db, tmp_path, FakeExecutions([]))
+        rec.start_run(run_info(target_price=2600.0, stop_price=2450.0, note="試單"))
+        rec.record_event(event())
+        [e] = rows(db, SlEvent)
+        assert (float(e.target_price), float(e.stop_price), e.note) == (2600.0, 2450.0, "試單")

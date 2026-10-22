@@ -9,12 +9,15 @@ time_window(排程時間窗)、kill_switch(市場行為觸發的終止條件,選
 `rules/`、`dsl/`、`engine/`)只對內建的模擬交易所(paper broker)與合成
 價格產生器運作,不連任何真實交易所。
 
-**現況(2026-10-10)**:另外疊加的 `strategy_lab/live/` 已經在 Bybit
+**現況(2026-10-14;目前沒有策略在跑,SUI 10-12 已收尾 §6.32)**:另外疊加的 `strategy_lab/live/` 已經在 Bybit
 mainnet 小額帳戶實盤(分注策略 `scale_in_ladder`,preflight → 背景 daemon),
 交易紀錄寫進共用的 `trading` PostgreSQL(§6.21),Telegram 通知(§6.24);
 另有不用策略 YAML、只記帳的 free style(§6.27)、每注持倉計時(§6.28),
 以及 Streamlit 介面(§6.29:狀態頁 + 策略分頁:選策略 → 填參數 → 開始 / 改參數 / 停止,只做真正的交易環境)、
 上下同時掛單的區間策略 `weekend_band_reversion`(§6.30)。`weekend_mean_reversion` 已刪除(§6.30)。
+**2026-10-12 ~ 14**:多帳戶(§6.31,test1 / MAIN,帳戶名寫進 DB)、SUI 收尾事故(§6.32)、補記過去一段(§6.27)、
+每日 08:00 對帳(§6.33:策略漏記自動補回,全手動交易沒記的自動記成 free style)、
+損益表分頁(§6.34:AG Grid,像 Excel 點欄位標題排序 / 篩選,後補欄位直接在格子裡改;頁面第一個分頁)。
 Live 層的元件關係見 §1.1。
 
 本文件涵蓋元件關係、核心狀態機、單次執行流程、目前已知的設計限制,
@@ -532,6 +535,15 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | Telegram 設定簡化 + 實際驗證 | 兩個新 bot 的 chat id 預設共用 `TELEGRAM_CHAT_ID`(`.env` 只要加兩行 token);`scripts/telegram_route_check.py` 實際發 4 則測試訊息驗證分流;sat_strategy 測試的 log 導到臨時資料夾(之前會寫進真的 `logs/sat_strategy.log`) | 改 §6.24 | 已完成 |
 | 多帳戶 | 新增 `live/accounts.py`(.env 的 `ACCOUNT = 名稱` + `BYBIT_<名稱>_API_KEY/SECRET/UID`,不分大小寫;test1 = 原本的 `BYBIT_API_KEY`;其他帳戶找不到 key 就報錯)、`BybitClient.api_key_info()`(啟動前核對 UID / 唯讀 / 到期);`ExecutionConfig.account`;`sl_run.account` / `bybit_uid`、`sl_event.account` / `strategy_name`,`setup_db` 舊紀錄補成 test1;free style `--account`;頁面可選帳戶、總覽分帳戶 | 新增 §6.31 | 已完成;真 DB 已補欄位、Superset 已同步,兩個帳戶的 UID 已核對 |
 | 一次多個帳戶跑同一個策略 | `ui/actions.py` 的 `prepare_many` / `start_many`(`AccountPlan`、`StartResult`);頁面帳戶改多選;多個帳戶時數量只能用權益百分比;預覽沒過的帳戶不開始、其他照樣開始 | §6.31 新增小節 | 已完成 |
+| 補記過去一段(通用) | `live/free_style.py` 的 `preview_backfill` / `backfill`(`BackfillPreview`)、CLI `backfill --symbol --start --end [--name] [--account] [--hold] [--direction] [--note]`;頁面「補記」分頁;選填事後補填預計持倉時間 / 方向 / 備註(新欄位 `sl_run.note`,真 DB 已加、Superset 已同步) | §6.27 新增小節 | 已完成 |
+| 補記的重疊紅字 + 補記獨立分頁 | `free_style.existing_segments` / `overlap_marks`(`Segment`);頁面「補記」分頁列出同帳戶同幣種已有時段,開始 / 結束落在某段就在欄位下標紅字、不能預覽;CLI 幣種只填幣名 | §6.27 | 已完成 |
+| 每日對帳 | 新增 `live/reconcile.py`、`scripts/com.strategylab.reconcile.plist`(每天 08:00 HKT);`BybitClient.get_executions(None, …)` 不分幣種;總覽「未記錄的交易」+ 立即對帳 + 一鍵帶入補記 | 新增 §6.33 | 已完成 |
+| 對帳分組改成一對交易(0 → 0) | `reconcile._rounds_of` / `_look_back`、`OpenRound`:持倉 0 → 0 算一對(使用者的定義),起點持倉 = 現在持倉 − 期間成交,不是 0 就往前查(最多 2 年);穿過 0 的成交屬於兩對;進行中不列。取代 6 小時分組 | 改 §6.33 | 已完成;MAIN ETH 重新分組為 9 對,第一對 09-15 開倉 |
+| 補記:目標價、停損價、方向自動 | `sl_run.target_price` / `stop_price`(新欄位,真 DB 已加、Superset 已同步);`_direction_of` 從成交判斷方向;頁面兩個價格欄位、方向預設「自動」;CLI `--target` / `--stop` | 改 §6.27 | 已完成 |
+| 未記錄的交易:訂單數、由新到舊、最新更新 | `Unrecorded.orders`(訂單數,跟成交筆數分開列;Telegram 也寫「X 張訂單 / Y 筆成交」);總覽清單最近的排最前面;最頂顯示「最新更新:上次對帳時間」 | 改 §6.33 | 已完成 |
+| 損益表分頁 | `ui/data.pnl_strategies` / `pnl_rows` / `fmt_hold`;`ui/actions.pnl_changes` / `save_pnl_edits`;sl_event 新增 `target_price` / `stop_price` / `note`(真 DB 已加、Superset 已同步) | 新增 §6.34 | 已完成 |
+| 損益表篩選 / 排序 / 總結列;拿掉補記分頁;對帳自動記成 free style | `data.filter_pnl` / `sort_pnl` / `pnl_summary`;app 拿掉補記分頁與一鍵帶入,總覽改列終端機指令;`reconcile.run_daily` 把找到的每一對自動 `backfill` 成 free style;補記收「先掛好、期間內成交」的訂單;方向判斷忽略小數誤差 | 改 §6.29 / §6.33 / §6.34 | 已完成 |
+| 損益表改用 AG Grid 免費版 + 分頁重排 | 新增 `ui/grid.py`(`pnl_grid_options`:欄位標題排序 / 篩選、可編輯欄、數字格式、固定欄寬);依賴 `streamlit-aggrid==1.2.1.post2`;`actions.pnl_changes` 用 run_id + event_index 對列;拿掉上方篩選列與 `data.filter_pnl` / `sort_pnl`;分頁順序改成 損益表 / 策略 / 交易紀錄 / Log / 總覽 | 改 §6.29 / §6.34 | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1626,7 +1638,7 @@ logger.info / warning / error ...
 
 **交接**:`python -m strategy_lab.live.daemon handover --config …` 送 SIGUSR1。新版程式在這個 tick 結束後
 直接結束、**不收尾**(`runner.request_handover()`,`run_forever` 迴圈條件、Telegram 🔌、`sl_run.end_reason =
-detached`);還沒裝 SIGUSR1 處理器的舊版程式,預設動作就是立刻結束,效果一樣。`daemon stop` 仍是收尾後結束。
+handover`);還沒裝 SIGUSR1 處理器的舊版程式,預設動作就是立刻結束,效果一樣。`daemon stop` 仍是收尾後結束。
 
 **接手**:設定檔明確打開 `adopt_existing_position: true` 才做(預設 false,有殘留仍拒絕,錯誤訊息會提示這個
 選項)。`ensure_clean_start(adopt=True)` 回傳殘留 → `runner.start()` 之後、第一個 tick 之前 `adopt_existing()`:
@@ -1691,6 +1703,50 @@ stop 時還有持倉 → 這一輪不算進 `sl_event`(成交明細照寫),總�
 執行都用 `COMMENT ON` 寫進 Postgres(說明有冒號,用 `exec_driver_sql` 原樣送出,不能用 `text()`;psycopg2 會把 `%` 當格式符號,送出前改成 `%%`)。
 Superset 的 dataset 欄位描述另外從資料庫同步過一次(不會自動同步,改了說明要再同步)。
 
+#### 補記過去一段(2026-10-13,通用)
+
+忘了按開始的手動交易、或沒寫進這個資料庫的程式交易(例如 sat_strategy 的 BTC),事後補進 DB。
+開始、結束都在過去;**策略名稱可填**(預設 `free style`)。
+
+- `preview_backfill(db, client, symbol, start, end, now, account, strategy_name)`:只讀,回傳 `BackfillPreview`
+  (訂單數、完成幾輪、毛利、成交手續費、結束時持倉、警告)。
+- `backfill(...)`:重新檢查、重新拉資料後一次寫入:`sl_run`(started / ended = 選的時間,`end_reason = backfill`,
+  `config.mode = backfill`)+ sl_order / sl_fill / sl_event;結束總結標「📝 <策略名稱> 補記」並發 Telegram。
+- 跟 stop 共用 `_fetch_window`(訂單 + 成交,7 天分段)與 `_write_window`(重播成 event、寫入、算手續費 / 資金費)。
+
+**擋下**:開始不早於結束、結束晚於現在、超過 2 年(Bybit 歷史上限)、策略名稱空白、這段沒有交易、
+**跟同帳戶同幣種已有的紀錄時間重疊**(還沒結束的紀錄算到現在;不然成交會算兩次)、
+**開始時已經有持倉**(第一筆成交的 Bybit `closedSize > 0` = 是平倉,算不出成本)。
+**警告**:結束時還有持倉(最後一輪不算進損益,成交明細照樣寫)。
+
+**事後補填(選填,使用者選「只寫自己確定的值」)**:補記**不會**帶入策略 YAML / 執行設定
+(`strategy_path`、`strategy_yaml` = NA、`strategy_params` = {}、數量 / 建倉價 / loop / preflight / 預估結束都是空的),
+因為程式不知道當時實際用了什麼,帶入現在的版本可能是錯的。使用者可以自己填:
+- **預計持倉時間** → `sl_run.expected_hold_seconds`,每一輪 `sl_event.expected_hold_seconds` 也有(跟實際 `hold_seconds` 比)
+- **方向**(long / short / both)→ `sl_run.direction`;**不填 = 從成交判斷**(`_direction_of`:每一對交易的第一筆,
+  買 = long、賣 = short,兩種都有 = both;同一天改,交易所查得到的不用手填),頁面預設「自動(從成交判斷)」
+- **備註** → `sl_run.note`(新欄位,最多 500 字)
+- **目標價**(沒掛單的止盈)→ `sl_run.target_price`、**停損價**(心理停損)→ `sl_run.stop_price`(同一天加,新欄位):
+  交易所查不到的計劃,填了可以跟實際平倉價、最大回撤比。兩個都填時檢查方向:做多停損要低於目標、做空要高於目標
+填了哪些記在 `sl_run.config.user_filled`(例 `["expected_hold", "direction", "note", "target_price", "stop_price"]`;
+自動判斷的方向不算),表示是事後補填、不是程式當時記的。
+CLI:`--hold 90m|4h|1.5d`、`--direction long|short|both`、`--note "..."`、`--target 2600`、`--stop 2450`。
+
+交易所查得到、**不用填**的:開倉 / 平倉時間、方向、每筆價格數量、最大持倉、手續費、資金費、損益、最大回撤、實際持倉時間、
+掛過的單(含沒成交的止盈止損單)。只有使用者知道的:預計持倉時間、目標價、停損價、備註(進場理由等)。
+
+**重疊紅字(同一天,使用者的方案)**:不用等預覽,選時間的當下就知道。`existing_segments(db, symbol, account, now)`
+只查 DB,列出**同帳戶、同幣種**已有的紀錄時段(不分策略:成交是靠帳戶 + 幣種歸到紀錄的;還沒結束的算到現在);
+`overlap_marks(segments, start, end)` → 開始落在哪段、結束落在哪段、整段被包住的。頁面把已有時段列出來(方便挑空檔),
+開始 / 結束欄位下面標「🔴 開始重疊 / 結束重疊:<策略> <時段>」,有重疊時預覽按鈕不能按;剛好接上(結束 = 下一段開始)不算。
+寫入前 `_check_overlap` 用同一份時段再檢查一次。DB 漏記(斷線、紀錄不完整)由 §6.33 每日對帳處理。
+
+```
+.venv/bin/python -m strategy_lab.live.free_style backfill --symbol ETHUSDT --start "2026-10-09 14:00" --end "2026-10-09 18:00" [--name sat_weekend] [--account MAIN]
+```
+頁面:「補記」分頁(2026-10-13 從「策略」分頁搬出來,使用者分不清「現在開始記錄」和「補回過去」;free style 的開始時間也不再叫「補記」):帳戶、幣種(只填幣名)、策略名稱、開始 / 結束日期與時間 → 🔍 預覽 →
+勾確認 → 💾 寫入;預覽之後改了條件要重新預覽。
+
 ### 6.28 持倉計時(時間暴露)與預估持倉時間(`engine/hold_time.py`,2026-10-09)
 
 **每一注**從建倉成交到平倉成交的時間(`Lot.filled_at` → 平倉成交那個 tick):
@@ -1719,6 +1775,12 @@ cd /Users/mac/strategy_lab && .venv/bin/streamlit run strategy_lab/ui/app.py --s
 載不到會印出 `_arrow_right` 之類的文字,重跑上面的指令即可)。只綁本機 127.0.0.1(頁面上有會動到實盤的按鈕,
 不能開到區域網路)。頁面啟動時 `os.chdir` 到專案根目錄(設定檔裡的 `strategies/*.yaml` 是相對路徑)。
 背景程式(daemon)跟頁面完全無關:關掉頁面不影響交易。程式改了要**重開伺服器**(背後的模組不會自動重新載入)。
+只按瀏覽器重新整理會「半新半舊」:`app.py` 是新的,`live/`、`storage/` 等已載入的模組還是舊的,會出現
+`AttributeError: module ... has no attribute ...`(10-12、10-13 各遇過一次);開新的瀏覽器分頁也一樣,要重開的是伺服器。
+
+**分頁**(2026-10-14,順序照使用者指定):損益表(§6.34)/ 策略(選帳戶 → 選策略 → 開始;進行中清單)/ 交易紀錄 / Log /
+總覽(daemon、Bybit 帳戶、未記錄的交易 §6.33,放最後)。「補記」分頁同一天拿掉(使用者要求):每日對帳會把找到的交易自動記成 free style,
+不需要手動補記的頁面;補記的程式(`free_style.preview_backfill` / `backfill`)與終端機指令保留,自動記錄就是用它。
 
 **三層**:`app.py` 只負責畫面;`data.py`(唯讀)與 `actions.py`(動作)不 import streamlit,可以單獨測試;
 動作全部走跟終端機同一套程式——**頁面只是外殼,不另外寫交易邏輯**。
@@ -1901,3 +1963,152 @@ BYBIT_MAIN_UID=...
 | `ui/app.py` | `new_accounts` 多選;已經在跑的帳戶列出並排除;多帳戶時沒有數量模式選單、數量欄改成「權益百分比 %」;free style 多選 = 每個帳戶各記一段 |
 
 測試:`test_ui_actions.py::TestManyAccounts`、`test_ui_app.py` 的「一次多個帳戶」。
+
+### 6.32 事故:SUI 收尾晚了 1 小時,收尾紀錄沒進資料庫(2026-10-12)
+
+SUI scale_in_ladder(test1,10-07 04:16 開始,舊碼 `f251f84`)預定 10-12 05:55 HKT 強制收尾。
+
+| 時間(HKT) | 發生什麼(來源) |
+|---|---|
+| 05:17 | 最後一則 ⚫ 狀態「距強制收尾還有 0 小時 38 分」(console log) |
+| 05:50:24 | **合上蓋子,Mac 睡眠**(`pmset -g log`:`Entering Sleep state due to 'Clamshell Sleep'`)→ 程式被凍住 |
+| 06:07、06:24 | 系統短暫 DarkWake;06:24 log 一則 get_tickers 網路錯誤,等 1 秒重試 → 又睡著 |
+| 06:56:43 | 醒來,重試成功,**開始收尾**:取消 3 張平倉單 |
+| 06:56:46 | 寫資料庫失敗(`server closed the connection unexpectedly`)→ 剩下的紀錄改寫 `logs/db_pending/b57a1dde-….jsonl`(§6.21 的設計) |
+| 06:56:46.38 | 市價賣 60 @ 1.1237 成交(Bybit 成交明細)|
+| 06:56:47 | 程式結束(`window_cleanup`) |
+
+**結果**:這輪毛利 −6.103、手續費 0.037、資金費 −0.004(收到)、淨利 **−6.136 USDT**,最大回撤 −13.66。
+晚收尾的 1 小時沒有多虧:平倉價 1.1237 與 02:28 的標記價 1.1296 差不多(價格一直遠低於平倉單 1.231 起)。
+
+**補救(10-13)**:`python -m strategy_lab.storage.backfill` 補進 24 筆(1 run、5 order、16 fill、2 event 行,
+upsert 不重複),檔案改名 `.jsonl.done`;再跑 `setup_db` 確認 account = test1。補之前 sl_run 一直是「進行中」,
+會讓頁面誤判、也讓補記(§6.27)把 test1 的 SUI 10-07 之後全部判成重疊。
+
+**教訓 / 待辦**:
+- 收尾時間要在 Mac 醒著的時候(或接電源、不合蓋);睡眠時程式不會跑,收尾一定延後。§6.24 每小時的 ⚫ 狀態
+  在 05:17 之後就停了,可以用來發現。
+- DB 斷線時紀錄不會掉,但**要記得跑 backfill**;之後可以考慮在頁面總覽顯示「有待補的紀錄」。
+- **時間不一致(待查)**:DB 裡強制平倉單 / event 的時間記成 06:07:26(DarkWake 那一刻),實際成交是 06:56:46;
+  看起來紀錄時間取自凍住前最後一個 tick,而不是成交時間。sl_run.ended_at(06:56:46)是對的。
+
+### 6.33 每日對帳(`live/reconcile.py`,2026-10-13)
+
+使用者的設計:兩種漏記分開處理。
+
+| | 情況 1:策略紀錄有漏 | 情況 2:全手動交易沒記 |
+|---|---|---|
+| 判斷 | Bybit 的成交落在**同帳戶、同幣種某筆紀錄的時間裡**,sl_fill 卻沒有這個 execId | 成交**不在任何紀錄的時間裡**(資金費不算) |
+| 原因 | DB 斷線(`logs/db_pending/`)、同步失敗 | 沒按 free style 開始,也沒有策略參數 |
+| 處理 | **自動補回**:先 replay `db_pending`;還缺的成交寫進那筆紀錄的 sl_fill(對得上 sl_event 時段就填 event_index) | **自動記成 free style**(2026-10-14 使用者決定,原本是只警告):每一對完整交易(0 → 0)呼叫 `free_style.backfill`(開倉 → 平倉),發「📝 已自動記成 free style」,使用者到「損益表」補填預估時長 / 目標價 / 停損價 / 備註。**記不了的**(例:時間跟已有紀錄重疊)才留在「未記錄的交易」,發 ⚠️ 系統警報(附原因),請使用者到「補記」分頁手動補 |
+
+**流程**(`run_daily`,每天 08:00 HKT,launchd `scripts/com.strategylab.reconcile.plist`;Mac 睡著醒來補跑):
+1. `replay_pending`:`storage/backfill.py` 把 `logs/db_pending/*.jsonl` 補進 DB → 「🔧 已把本機暫存的 N 筆紀錄補進資料庫」
+2. 每個帳戶(.env 的帳戶 + 一定包含 test1;test1 沒 key 就略過):`get_executions(None, …)` 不分幣種拉「上次對帳 → 現在」
+   (第一次 7 天,7 天一段分段查)
+3. 用 execId 查 sl_fill → 情況 1 補回(「🔧 已自動補回 N 筆成交到 <策略>;這筆紀錄的每輪損益可能不完整」——只補成交明細,
+   sl_event 不重算)/ 情況 2 照**使用者對「一對交易」的定義**分組:**持倉 0 → 0 算一對**,中間加倉幾次、隔多久都不切
+   (例:買 5、1 小時後買 5、2 小時後平 5、4 小時後平 5 = 一對)。跟補記寫進 sl_event 的「一輪」是同一個定義。
+   - 查詢起點的持倉 = Bybit 現在的持倉 − 這段期間的成交(精確,不用猜);不是 0 → `_look_back` 一週一週往前查到持倉為 0
+     的那一刻(最多 2 年),這一對從那裡開始
+   - 一筆成交穿過 0(多 1 → 賣 2)= 平倉 + 反向開倉,這筆同時屬於前後兩對
+   - 現在還沒平倉的(進行中,`OpenRound`)先不列,平倉後才列
+   - 一對裡只要有一筆是未記錄的就整對列出,帶入補記的時間 = 開倉 → 平倉
+   (第一版用「兩筆間隔超過 6 小時就分組」,同一天改掉:會把一對交易從中間切開,補記兩邊都會被擋)
+4. 「未記錄的交易」= 之前的 + 這次的,去掉已經被紀錄涵蓋的 → 每一對自動記成 free style(舊的先記);
+   記不了的留著,**新的**才發警告(警告過的 execId 記 30 天,不重發);下次記成功就從清單移除
+5. 帳戶查詢失敗(key 失效等)→ 「❌ 對帳:帳戶 X 查詢失敗」,其他帳戶照常
+
+狀態檔 `logs/reconcile_state.json`:每個帳戶 `last_end`、`unrecorded`(給頁面)、`alerted`、`last_run`。
+手動:`.venv/bin/python -m strategy_lab.live.reconcile [--days 3]`、`launchctl kickstart gui/$(id -u)/com.strategylab.reconcile`、
+頁面總覽「🔄 立即對帳」。
+
+**頁面**(總覽,10-14 補記分頁拿掉後):「未記錄的交易」只剩**自動記不了**的,表格下面附現成的終端機補記指令
+(`_backfill_command`:第一筆那一分鐘 → 最後一筆的下一分鐘);原本的「📝 補記」一鍵帶入按鈕跟著拿掉。以下是拿掉前的設計:
+「未記錄的交易」表(帳戶、幣種、第一筆 / 最後一筆 HKT、**訂單數、成交筆數**——一張訂單可以拆成好幾筆成交,
+例 09-15 那一對是 9 張訂單 / 24 筆成交;`Unrecorded.orders`,同一天加);**最近的排最前面**(使用者要求;每一對 0 → 0 各自獨立,補記先後不影響結果);表格最頂一行粗體「**最新更新:<上次對帳時間> HKT**」(`reconcile.last_run()`;每天 08:00 或按立即對帳後更新);每組一個「📝 補記 …」按鈕 → 把帳戶、
+幣種、時間(第一筆的那一分鐘 → 最後一筆的下一分鐘)帶入「補記」分頁,再由使用者看紅字、預覽、寫入。
+
+**第一次對帳(10-13)**:test1 7 天 18 筆成交,2 筆 SUI 資金費不在 DB(情況 1,已自動補回);MAIN 102 筆 ETH 手動交易沒有紀錄
+(情況 2)。改成 0 → 0 分組後是 **9 對**,都已平倉;第一對往前查到 **09-15 04:35 開倉 → 10-07 18:07 平倉**(24 筆,
+之前 7 天成交淨額 −4.65 ETH 的來源)。
+
+**測試**:`test_reconcile.py`(情況 1 / 2、別的帳戶不算、進行中算到現在、7 天分段、0 → 0 分組(使用者的例子、
+回到 0 開新的一對、穿過 0、進行中不列、往前查起點、已記錄不列)、每日執行從上次接著查、
+不重發、補記後從清單移除、db_pending、帳戶失敗)、`test_reconcile_schedule.py`(plist)、`test_live_bybit_client.py`
+(不分幣種)、`test_ui_app.py`(未記錄清單、一鍵帶入、立即對帳)。
+
+### 6.34 損益表分頁(2026-10-14)
+
+頁面「損益表」分頁:選**帳戶**(預設 MAIN)+ **策略**(預設 free style;下拉選單 = 這個帳戶有紀錄的策略),
+**每一對交易(sl_event,持倉 0 → 0)一列,最近的在前**。上方合計:交易對數、真實損益合計、手續費合計。
+
+| 欄位 | 來源 |
+|---|---|
+| 日期(年/月/日) | 平倉日(`end_time`,HKT) |
+| 幣種 | sl_run.symbol |
+| 方向 / 數量 | `direction` / `max_position`(這一對的最大持倉) |
+| 建倉價格 / 建倉時間 / 平倉價格 | `avg_entry` / `start_time` / `avg_exit` |
+| 真實損益 | `net_pnl` = 價差毛利 − 手續費 − 資金費 |
+| 手續費 / 手續費佔比(%) | `fees` / 手續費 ÷ \|價差毛利\| |
+| 預估時長 + 單位(可後補) | `expected_hold_seconds` 拆成「數字 + 單位」(`data.hold_parts` / `hold_seconds`):數字自己打,單位從下拉選 秒 / 分鐘 / 小時 / 天(2026-10-14 使用者要求,原本要手打 4h);沒選單位當小時 |
+| 實際時長 | `hold_seconds`(自動) |
+| 目標價 / 停損價 / 備註(可後補) | sl_event 新欄位 `target_price` / `stop_price` / `note` |
+
+**勝率 + 精簡總結表**(2026-10-21 使用者):勝率 = 真實損益(淨利)> 0 的對數 ÷ 總對數(剛好 0 不算贏),跟著表格篩選。
+上方大字第 2 個就是勝率(交易對數 / 勝率 / 真實損益合計 / 手續費合計 / 手續費點數);表格下面的總結表只留有數字的欄位:
+總結(N 對)/ 勝率 / 數量(平均)/ 真實損益(總和)/ 手續費(總和)/ 手續費佔比(%,平均)/ 實際時長(平均)/ 預估時長(平均,沒填顯示「未填」)。
+`data.pnl_summary` 多回傳 `勝率`。
+
+**🔄 更新按鈕**(同一天,使用者剛做完一筆手動交易):損益表右上角,按下去馬上跑一次 `reconcile.run_daily`
+(跟每天 08:00 一樣:已平倉的新交易自動記成 free style、發 📝 通知),清快取後表格多出新的一列;還沒平倉的等平倉後再按。
+
+**手續費點數**(同一天,使用者要求):上方第 4 個數字「手續費點數(ETHUSDT,maker 買+賣)」= ETHUSDT 現價 × 所選帳戶的
+maker 費率 × 2(買一次 + 賣一次),例 2500 × 0.02% × 2 = 1.00 點 → 用 maker 開倉、maker 平倉,價格要往有利方向走這麼多點
+才賺回手續費。`data.fee_points`(只讀:`get_last_price` + `get_fee_rates`),頁面 30 秒快取,查不到顯示「—」。
+
+**費率事實(10-14 查證,Bybit 說明中心「Trading Fee Structure」2026-09-02 版 + 實際成交)**:
+- 手續費 = 成交價 × 數量 × 費率,**跟槓桿無關**:MAIN 近 14 天 137 筆成交反算,maker 全部 0.02%、taker 全部 0.055%。
+  提高槓桿只會讓手續費佔保證金的比例變高,不會變便宜。
+- 費率由 VIP 等級決定(資產餘額或近 30 天交易量,取較高的等級;主帳戶 + 子帳戶交易量合併;資金費不算交易量;
+  每天 UTC 7:00 更新;依下單當時等級):VIP 0 = 0.02% / 0.055%(兩個帳戶目前都是)、VIP 1 = 0.018% / 0.04%
+  (資產 ≥ 10 萬 USD 或 30 天合約量 ≥ 1,000 萬)、VIP 2 = 0.016% / 0.0375%(≥ 25 萬 / ≥ 2,500 萬)。
+  10-14 時 30 天合約量合計約 46.7 萬 USD。
+- 省手續費最有效的是多用 maker(taker 是 maker 的 2.75 倍)。手續費點數會自動用帳戶的實際費率,升 VIP 後不用改程式。
+
+**表格改用 AG Grid 免費版(Community)**(同一天,使用者要「像 Excel 一樣點欄位名稱再選功能」;`streamlit-aggrid==1.2.1.post2`,
+裝在 strategy_lab 的 `.venv`、寫進 requirements.txt):點欄位標題旁的圖示 → 排序 / 篩選(文字「包含 / 等於」、
+數字「大於 / 小於 / 介於」、日期區間)。Excel 那種勾選清單式篩選是付費版(Enterprise,約 US$999 / 開發者)才有,沒用。
+- 設定在 `ui/grid.py` 的 `pnl_grid_options`(不 import streamlit,單獨測):可編輯欄(淡黃底)、篩選種類、數字格式
+  (價格兩位、損益 / 手續費整數)、時長照秒數排、日期預設新到舊、每欄固定寬度(自動欄寬量不準中文,會把日期縮成一個字)、
+  run_id / event_index / 秒數欄隱藏。
+- 表格回傳「篩選 + 排序後」的列(`FILTERED_AND_SORTED`):上方合計、總結列都跟著表格目前的篩選;
+  `actions.pnl_changes` 改用 run_id + event_index 對回原本那一列(順序不同、有些被篩掉)。儲存只存目前看得到的列。
+- 原本表格上方的那排篩選 / 排序(`data.filter_pnl` / `sort_pnl`)拿掉。
+- 測試:`test_ui_grid.py`(設定);頁面測試把 `st_aggrid.AgGrid` 換成假的(AppTest 跑不了自訂元件)。
+
+**(AG Grid 之前的版本)篩選 / 排序**(同一天,使用者要「像 Excel 一樣」):Streamlit 表格沒有欄位標題上的下拉篩選,改在表格上方放一排:
+日期區間(平倉日)、幣種、方向(多選)、損益(全部 / 賺 / 虧)——`data.filter_pnl`;排序 = 選欄位 + 順序 / 逆序
+(預設日期逆序;時長照秒數排、空的排最後)——`data.sort_pnl`。表格、上方合計、總結列、儲存都只看篩選後的列;
+換篩選 / 排序會換一張表(`data_editor` 的 key 帶條件代號),沒存的修改不會套到別列。
+
+**總結列**(表格正下方,同欄位對齊,`data.pnl_summary`):數量(平均)、真實損益(總和)、手續費(總和)、
+手續費佔比(平均,只平均算得出的)、實際時長(平均)、預估時長(平均,只平均有填的),其他留白。
+價格顯示兩位小數、損益與手續費不顯示小數(只改畫面,DB 不變)。
+
+**可後補欄位直接在表格裡填、改、清空**(`st.data_editor`,其他欄位鎖住),按「💾 儲存後補欄位」:
+`pnl_changes(原本, 改後)` 只挑有改的列(表格空白數字是 NaN,當空白比)→ `save_pnl_edits` 寫回 sl_event。
+全部驗證過才寫(預估時長格式、價格 > 0、做多停損 < 目標 / 做空停損 > 目標、備註 ≤ 500 字),**一列不對就一列都不寫**;清空 = NULL。
+
+為什麼放 sl_event 而不是 sl_run:一筆紀錄(例如一次補記)可以有好幾對交易,目標價 / 停損價是一對一對的。
+補記時填的值寫進 sl_run,也抄到該紀錄的每一列 sl_event(`recorder._event_row`),之後在損益表一列一列改。
+
+**測試**:`test_storage.py::TestEventUserFields`、`test_ui_data.py::TestPnlTable`、`test_ui_actions.py::TestSavePnlEdits` /
+`test_pnl_changes_*`、`test_ui_app.py` 的損益表(預設 MAIN + free style、欄位順序、只存有改的列、沒改、錯誤、DB 連不上不掛)。
+
+**10-14 第一次自動記成 free style**:MAIN ETH 10 對(原本 9 對 + 10-13 新的一對),全部成功,清單清空。
+真實損益合計 −141.87 USDT、手續費合計 158.74 USDT。執行前先唯讀預覽每一對,發現兩個問題並修正:
+- 限價單先掛好、期間內才成交 → 訂單建立時間早於這一對的開始,原本會被漏掉(連帶它的成交、手續費)。
+  `free_style._fetch_window` 改成:期間內有成交、但訂單不在期間內建立的,往前 30 天(`EARLY_ORDER_LOOKBACK`)找回來。
+- 小數誤差:持倉最後是 −4e-16 被當成「穿過 0 反手開空」,方向判成 both。`_direction_of` 改成誤差範圍內算 0。
+

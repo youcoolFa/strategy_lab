@@ -15,3 +15,4 @@ psycopg2-binary>=2.9
 
 # Streamlit 狀態頁(strategy_lab/ui/,2026-10-09):
 streamlit>=1.30
+streamlit-aggrid==1.2.1.post2  # 損益表:點欄位標題排序 / 篩選(AG Grid 免費版,2026-10-14)

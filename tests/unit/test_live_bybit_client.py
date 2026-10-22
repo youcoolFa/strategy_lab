@@ -698,3 +698,17 @@ class TestApiKeyInfo:
                                                                "permissions": {"Withdraw": ["Withdraw"]}}}
         info = make_client(http).api_key_info()
         assert info["read_only"] is True and info["can_withdraw"] is True and info["expires_at"] is None
+
+
+class TestExecutionsAllSymbols:
+    """每日對帳(2026-10-13):不指定幣種,一次拉回帳戶所有 USDT 永續的成交。"""
+
+    def test_symbol_none_is_not_sent(self):
+        from datetime import datetime, timezone
+
+        http = FakeHTTP()
+        http.executions_pages = [{"result": {"list": [{"execId": "a", "symbol": "SUIUSDT"}], "nextPageCursor": ""}}]
+        start = datetime(2026, 10, 4, 4, 0, tzinfo=timezone.utc)
+        rows = make_client(http).get_executions(None, start, start)
+        assert rows == [{"execId": "a", "symbol": "SUIUSDT"}]
+        assert "symbol" not in http.calls[0][1] and http.calls[0][1]["category"] == "linear"

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    launchd job:每天 08:00 HKT 每日對帳(strategy_lab/live/reconcile.py):Bybit 成交 vs trading DB。
+    只讀 Bybit;策略紀錄漏記的自動補回,全手動交易沒記的發 Telegram 系統警報(見 docs/ARCHITECTURE.md §6.33)。
+    本機時區是 Asia/Hong_Kong,Hour/Minute 直接是 HKT;沒有 Weekday = 每天。
+    前景執行 .venv 的 Python(不要 nohup 丟背景,launchd 會把進程群組殺掉)。
+    Mac 在 08:00 睡著的話,醒來後會補跑;關機則跳過(下次從上次對帳接著查,不會有缺口)。
+
+    安裝:
+        cp scripts/com.strategylab.reconcile.plist ~/Library/LaunchAgents/
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.strategylab.reconcile.plist
+    解除安裝:
+        launchctl bootout gui/$(id -u)/com.strategylab.reconcile
+        rm ~/Library/LaunchAgents/com.strategylab.reconcile.plist
+    手動立刻跑一次:
+        launchctl kickstart gui/$(id -u)/com.strategylab.reconcile
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.strategylab.reconcile</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mac/strategy_lab/.venv/bin/python</string>
+        <string>-m</string>
+        <string>strategy_lab.live.reconcile</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/mac/strategy_lab</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mac/strategy_lab/logs/launchd_reconcile.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mac/strategy_lab/logs/launchd_reconcile.log</string>
+</dict>
+</plist>
