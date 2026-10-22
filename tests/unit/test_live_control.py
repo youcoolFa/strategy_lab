@@ -82,6 +82,11 @@ class TestWriteBack:
         assert yaml.safe_load(text)["strategy_overrides"] == {"loop": None, "exit_distance": {"value": 0.5, "unit": "pct"}}
 
 
+    def test_direction_is_written_and_kept_with_other_overrides(self, config_path):
+        control.write_back(config_path, {"direction": "short", "loop": 1})
+        control.write_back(config_path, {"loop": 2})
+        assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["strategy_overrides"] == {"direction": "short", "loop": 2}
+
 class TestOverridesAreUsedOnStartup:
     def test_loaded_config_overrides_strategy_loop_and_distance(self, config_path):
         control.write_back(config_path, {"loop": 5, "distance": {"value": 0.4, "unit": "pct"}})
@@ -293,3 +298,30 @@ class TestWriteBackBand:
         assert text.count("strategy_overrides:") == 1
         assert yaml.safe_load(text)["strategy_overrides"] == {"loop": 3, "band": {"buy_pct": 0.3, "sell_pct": 0.5}}
         assert "# 真實下單開關" in text  # 其他註解保留
+
+
+
+class TestDirectionOverride:
+    """每個策略都能做多做空(2026-10-12):設定檔 strategy_overrides.direction 蓋過策略 YAML。"""
+
+    def test_short_strategy_can_run_long(self, config_path):
+        control.write_back(config_path, {"direction": "long"})
+        config = load_execution_config(config_path=config_path)
+        strategy = apply_strategy_overrides(load_strategy("strategies/weekend_short_breakout.yaml"), config)
+        assert strategy.direction == "long"
+
+    def test_long_strategy_can_run_short(self, config_path):
+        control.write_back(config_path, {"direction": "short"})
+        config = load_execution_config(config_path=config_path)
+        assert apply_strategy_overrides(load_strategy("strategies/ma_crossover_bracket.yaml"), config).direction == "short"
+
+    def test_band_and_bad_values_are_rejected(self, config_path):
+        import dataclasses
+
+        config = load_execution_config(config_path=config_path)
+        with pytest.raises(ValueError, match="區間策略"):
+            apply_strategy_overrides(load_strategy("strategies/sat_strategy.yaml"),
+                                     dataclasses.replace(config, strategy_overrides={"direction": "short"}))
+        with pytest.raises(ValueError, match="long 或 short"):
+            apply_strategy_overrides(load_strategy("strategies/scale_in_ladder.yaml"),
+                                     dataclasses.replace(config, strategy_overrides={"direction": "both"}))

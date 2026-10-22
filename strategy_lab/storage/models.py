@@ -49,7 +49,7 @@ class SlRun(Base):
     ended_at = Column(TS, comment="結束時間;還在跑時為 NULL")
     end_reason = Column(String(30), comment="結束原因:window_cleanup 時間窗收尾 / stop_requested 手動停止 / loop_done 輪數做完 / "
                                             "kill_switch 風控停止 / crash 當掉 / refused_leftover 有殘留單被擋下沒啟動 / "
-                                            "detached 脫離(持倉留給下一次接手)/ free_style_stop free style 停止")
+                                            "handover 交接(持倉留給下一次接手)/ free_style_stop free style 停止")
     events_count = Column(Integer, comment="完成幾輪(部位 0 → 0 算一輪)")
     gross_pnl = Column(MONEY, comment="價差毛利總和(USDT,未扣手續費、資金費)")
     net_pnl = Column(MONEY, comment="淨利總和(USDT)= 毛利 − 手續費 − 資金費")

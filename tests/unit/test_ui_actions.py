@@ -1,5 +1,5 @@
 """Streamlit 第二階段(實盤啟動 / 改參數 / 停止)背後的動作層 strategy_lab/ui/actions.py(2026-10-09)。
-頁面只是外殼:預覽與啟動走 preflight.main、運作中改參數走 control.main、停止 / 脫離走 daemon,
+頁面只是外殼:預覽與啟動走 preflight.main、運作中改參數走 control.main、停止 / 交接走 daemon,
 跟終端機版同一套檢查。這裡全部用假的 client / start_fn,不碰網路、不啟動任何程式。"""
 
 import time
@@ -156,18 +156,18 @@ class TestControl:
             actions.control_preview(config, {})
 
 
-class TestStopAndDetach:
+class TestStopAndHandover:
     def test_stop_requires_typing_STOP(self, config, monkeypatch):
         monkeypatch.setattr(actions.daemon, "stop", lambda path: "已停止")
         with pytest.raises(ValueError, match="STOP"):
             actions.stop(config, typed="stop please")
         assert actions.stop(config, typed="STOP") == "已停止"
 
-    def test_detach_requires_typing_DETACH(self, config, monkeypatch):
-        monkeypatch.setattr(actions.daemon, "detach", lambda path: "已脫離")
-        with pytest.raises(ValueError, match="DETACH"):
-            actions.detach(config, typed="")
-        assert actions.detach(config, typed="DETACH") == "已脫離"
+    def test_handover_requires_typing_HANDOVER(self, config, monkeypatch):
+        monkeypatch.setattr(actions.daemon, "handover", lambda path: "已交接")
+        with pytest.raises(ValueError, match="HANDOVER"):
+            actions.handover(config, typed="")
+        assert actions.handover(config, typed="HANDOVER") == "已交接"
 
 
 class TestStrategyInfo:
@@ -307,6 +307,14 @@ class TestBandStrategyFromThePage:
         assert path.name == "live_sat_strategy_xrpusdt.yaml"
         assert data["strategy_overrides"] == {"band": {"buy_pct": 0.3, "sell_pct": 0.5}}
         assert data["dry_run"] is False and data["testnet"] is False
+
+    def test_prepare_config_writes_direction(self, root):
+        path = actions.prepare_config(root, "strategies/weekend_short_breakout.yaml", "eth", TestPrepareConfig.SETTINGS,
+                                      {"direction": "long", "loop": 0}, example=root / "live_execution_config.example.yaml")
+        assert yaml.safe_load(path.read_text(encoding="utf-8"))["strategy_overrides"] == {"direction": "long", "loop": 0}
+        with pytest.raises(ValueError, match="long 或 short"):
+            actions.prepare_config(root, "strategies/scale_in_ladder.yaml", "ETH", TestPrepareConfig.SETTINGS,
+                                   {"direction": "both"}, example=root / "live_execution_config.example.yaml")
 
     def test_bad_band_pct_rejected_before_writing(self, root):
         with pytest.raises(ValueError, match="buy_pct"):
@@ -513,3 +521,28 @@ def test_pnl_hold_number_and_unit():
     assert (hold_seconds(90, "分鐘"), hold_seconds(1.5, "天"), hold_seconds(30, "秒")) == (5400, 129600, 30)
     assert hold_seconds(4, "") == 4 * 3600 and hold_seconds(None, "小時") is None
     assert hold_seconds(float("nan"), "小時") is None
+
+
+def test_save_sat_notes_writes_sl_run_note(tmp_path):
+    from datetime import datetime, timezone
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from strategy_lab.storage.models import SlRun
+    from strategy_lab.storage.recorder import RunInfo, TradeRecorder
+    from strategy_lab.storage.setup_db import setup
+
+    url = f"sqlite:///{tmp_path / 'trading.db'}"
+    setup(url)
+    rec = TradeRecorder(db_url=url, pending_dir=tmp_path / "p", fetch_executions=lambda *a: [])
+    run_id = rec.start_run(RunInfo(
+        strategy_name="sat_strategy", strategy_path="NA", strategy_yaml="NA", strategy_params={}, config={},
+        symbol="BTCUSDT", category="linear", direction="long", origin_price=1.0, origin_source="x", qty=None,
+        order_type="limit", loop=None, testnet=False, preflight=None, log_path=None,
+        started_at=datetime(2026, 10, 17, tzinfo=timezone.utc), account="test1"))
+    assert actions.save_sat_notes(url, [{"run_id": run_id, "備註": " 大跌沒成交 "}]) == 1
+    with Session(create_engine(url)) as s:
+        assert s.get(SlRun, run_id).note == "大跌沒成交"
+    with pytest.raises(ValueError, match="找不到"):
+        actions.save_sat_notes(url, [{"run_id": "nope", "備註": "x"}])

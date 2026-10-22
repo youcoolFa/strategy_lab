@@ -44,6 +44,23 @@ class Or:
         return f"Or{self.conditions!r}"
 
 
+class ByDirection:
+    """依 ctx.direction 選一個條件:long 用 `long`、short 用 `short`(2026-10-12 每個策略都能做多做空)。
+    方向只看執行當下的 ctx(策略 YAML 或設定檔 strategy_overrides.direction),plugin 不用知道。"""
+
+    def __init__(self, long: Condition, short: Condition) -> None:
+        self.long, self.short = long, short
+
+    def evaluate(self, ctx: StrategyContext) -> bool:
+        return (self.short if ctx.direction == "short" else self.long).evaluate(ctx)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, ByDirection) and (self.long, self.short) == (other.long, other.short)
+
+    def __repr__(self) -> str:
+        return f"ByDirection(long={self.long!r}, short={self.short!r})"
+
+
 class Not:
     def __init__(self, condition: Condition) -> None:
         self.condition = condition

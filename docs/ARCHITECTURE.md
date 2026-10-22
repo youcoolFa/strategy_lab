@@ -111,7 +111,7 @@ flowchart TD
     subgraph Entry["入口(終端機,或 Streamlit 頁面 ui/app.py)"]
         UI["ui/app.py + actions.py / data.py<br/>Streamlit(只綁 127.0.0.1)"]
         PF["live/preflight.py<br/>啟動前預覽 + 輸入 yes"]
-        DM["live/daemon.py<br/>start / stop / detach / status"]
+        DM["live/daemon.py<br/>start / stop / handover / status"]
         CT["live/control.py<br/>運作中改參數(請求檔)"]
         FS["live/free_style.py<br/>start / stop / status(手動交易記帳)"]
     end
@@ -145,7 +145,7 @@ flowchart TD
 
     UI -->|"預覽 / 啟動(使用者打 yes)"| PF
     UI -->|"改參數"| CT
-    UI -->|"停止 STOP / 脫離 DETACH"| DM
+    UI -->|"停止 STOP / 交接 HANDOVER"| DM
     UI -.->|"唯讀:狀態、帳戶、紀錄"| DB
     PF -->|"使用者 yes"| DM --> MAIN
     CT -.->|"請求檔,tick 之間套用"| MAIN
@@ -523,10 +523,10 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | Telegram 看得懂的狀態 | 新增 `live/status.py`(`start_message`、`status_message`、`StatusReporter`):啟動訊息帶策略參數/各注→平倉價/最大部位/收尾時間;每小時狀態回報(⚪ #狀態,`STATUS_INTERVAL_MINUTES`);用語統一成 loop(第 k 個 loop/共 N、這輪與累計損益);訊息分類樣式(彩色圓點 + hashtag,HTML) | §6.24 新增「看得懂現在在幹嘛」與類別樣式表 | 已完成 |
 | 淨利與手續費比率 | `TradeRecorder.event_costs()`(Bybit 真實手續費/資金費);`live/status.py` 新增 `cost_totals`/`fee_ratio`/`net_summary`/`px`/`usd`;loop 結算、累計、每小時狀態、結束總結改成淨利 + 手續費佔利益(虧損)比率;價格 4 位、金額 2 位;「收尾還有」改成「距強制收尾還有」 | §6.24 新增「損益一律顯示淨利」「數字格式」「強制收尾」 | 已完成 |
 | 運作中改參數 | 新增 `live/control.py`(`set entry_prices/distance/loop`:預覽 + yes、請求檔/結果檔、等 90 秒、逾時撤回、超過 10 分鐘的請求不套用);`StrategyRunner`/`ScaleInRunner.apply_changes()`(先全部驗證、取消重掛、取消前已成交不重掛、越過現價拒絕);`ExecutionConfig.strategy_overrides` + `apply_strategy_overrides()`(啟動與 preflight 套用);`run_forever` 在 tick 之間 `process_control()` | 新增 §6.25 | 已完成 |
-| 接手現有持倉與脫離 | 新增 `live/adopt.py`(`plan_adoption`/`apply_adoption`,對不上就 `AdoptionError`);`ExecutionConfig.adopt_existing_position`;`ensure_clean_start(adopt=)`、`adopt_existing()`;SIGUSR1 → `runner.request_detach()`、`run_forever` 不收尾結束;`daemon detach`;`BybitClient.get_position_avg_price()`;preflight 預覽接手內容 | 新增 §6.26 | 已完成 |
+| 接手現有持倉與交接 | 新增 `live/adopt.py`(`plan_adoption`/`apply_adoption`,對不上就 `AdoptionError`);`ExecutionConfig.adopt_existing_position`;`ensure_clean_start(adopt=)`、`adopt_existing()`;SIGUSR1 → `runner.request_handover()`、`run_forever` 不收尾結束;`daemon handover`;`BybitClient.get_position_avg_price()`;preflight 預覽接手內容 | 新增 §6.26 | 已完成 |
 | free style + 資料表中文說明 | 新增 `live/free_style.py`(`start`/`stop`/`status`;只讀 Bybit,stop 時用 `EventTracker` 重播成交切出每一輪,`purpose = manual`、`end_reason = free_style_stop`;7 天分段查詢);`BybitClient.list_order_history()`;`storage/models.py` 每張表/欄位加 `comment`,`setup_db` 用 COMMENT ON 寫進 Postgres | 新增 §6.27 | 已完成 |
 | 持倉計時(時間暴露)+ 預估持倉時間 | 新增 `engine/hold_time.py`(`LotHold`、`format_hold`、`parse_expected_hold`、`hold_summary`);策略 YAML `expected_hold`(只限分注);`Lot.filled_at`/`hold_warned`、`ScaleInRunner.lot_holds`/`expected_hold`、超時 WARNING 一次、收尾強制平倉也計時;`OrderRecord.hold_seconds` → `sl_order.hold_seconds`;🟢 平倉成交、⚪ 狀態、🟣 結束總結顯示 | 新增 §6.28 | 已完成 |
-| Streamlit 介面(第一、二階段) | 新增 `strategy_lab/ui/`:`data.py`(唯讀資料層:daemon 狀態 / 程式版本 / log 新鮮度、Bybit 帳戶、sl_run / sl_event、log 內容)、`actions.py`(動作層:改設定檔保留註解、preflight 預覽 / 啟動、control 改參數、daemon 停止 / 脫離)、`app.py`(畫面);`BybitClient.list_positions()` / `list_open_orders()`;`free_style.send_telegram()`;requirements 加 streamlit | 新增 §6.29 | 已完成 |
+| Streamlit 介面(第一、二階段) | 新增 `strategy_lab/ui/`:`data.py`(唯讀資料層:daemon 狀態 / 程式版本 / log 新鮮度、Bybit 帳戶、sl_run / sl_event、log 內容)、`actions.py`(動作層:改設定檔保留註解、preflight 預覽 / 啟動、control 改參數、daemon 停止 / 交接)、`app.py`(畫面);`BybitClient.list_positions()` / `list_open_orders()`;`free_style.send_telegram()`;requirements 加 streamlit | 新增 §6.29 | 已完成 |
 | Streamlit 策略分頁改版 + 只做真正交易環境 | 「free style」「實盤控制」合併成「策略」分頁:進行中清單(`data.active_runs`)+ 選策略 → 填參數 → 開始;`actions.config_for` / `prepare_config`(自動找或建 `live_<策略>_<幣種>.yaml`,一律 `dry_run: false`、`testnet: false`);`data.project_root()`;拿掉 dry_run / testnet 開關 | 改寫 §6.29 | 已完成 |
 | 區間策略改版(上下同時掛單)| `sat_strategy.yaml` 改寫;新增 `engine/band_runner.py`、plugin `entry/band.py` / `exit/band.py`;schema `band` + `direction: both`;loader 檢查;`live/main` 建 BandRunner(不支援接手)、Telegram「區間」;`status` 啟動訊息;`estimates`:`OrderPlan.band_sell_price`、`build_band_plan`、掛單計畫 / 風險 / 每輪損益;`preflight` 分支;`strategy_overrides.band`(apply / write_back);頁面買賣 % 欄位、進行中只能停止 | 新增 §6.30 | 已完成 |
 | 刪除 `weekend_mean_reversion` | 檔案搬到垃圾桶;測試改用 `mean_reversion_breakout_guard`;`ExecutionConfig.strategy_path` 預設改 `scale_in_ladder`;demo / README / 範本設定檔 / 策略註解;`tests/unit/test_demo_run_from_yaml.py` | §6.14 加註、§6.30 | 已完成 |
@@ -544,6 +544,7 @@ switch,代表策略設計思路該重新考慮,不是加個參數能解決的。
 | 損益表分頁 | `ui/data.pnl_strategies` / `pnl_rows` / `fmt_hold`;`ui/actions.pnl_changes` / `save_pnl_edits`;sl_event 新增 `target_price` / `stop_price` / `note`(真 DB 已加、Superset 已同步) | 新增 §6.34 | 已完成 |
 | 損益表篩選 / 排序 / 總結列;拿掉補記分頁;對帳自動記成 free style | `data.filter_pnl` / `sort_pnl` / `pnl_summary`;app 拿掉補記分頁與一鍵帶入,總覽改列終端機指令;`reconcile.run_daily` 把找到的每一對自動 `backfill` 成 free style;補記收「先掛好、期間內成交」的訂單;方向判斷忽略小數誤差 | 改 §6.29 / §6.33 / §6.34 | 已完成 |
 | 損益表改用 AG Grid 免費版 + 分頁重排 | 新增 `ui/grid.py`(`pnl_grid_options`:欄位標題排序 / 篩選、可編輯欄、數字格式、固定欄寬);依賴 `streamlit-aggrid==1.2.1.post2`;`actions.pnl_changes` 用 run_id + event_index 對列;拿掉上方篩選列與 `data.filter_pnl` / `sort_pnl`;分頁順序改成 損益表 / 策略 / 交易紀錄 / Log / 總覽 | 改 §6.29 / §6.34 | 已完成 |
+| sat_strategy 分頁 + 舊程式紀錄補進 DB(2026-10-22) | `ui/data.sat_weekends` / `weekend_of`(每個週末一列:起點價、掛單價、輪數、淨利、手續費、時長、結束原因、來源;同一週末多次執行合成一列);`ui/actions.save_sat_notes`(備註寫回 sl_run.note);app 新分頁「sat_strategy」放在損益表後面,帳戶預設 test1,沒有預估時長。舊 `~/sat_strategy` 程式(10-17 05:09 前)補進 trading DB:有成交的 08-01、09-26 從 Bybit 只讀拉回(free_style.backfill),沒成交的 10-03、10-10、10-17 只有舊程式 log 的起點價 / 掛單價(sl_run 0 輪,掛單價在 config.entry_price);08-08 → 09-19 沒有 log 也沒有成交,不列 | — | 已完成 |
 
 ## 6. Live 遷移(進行中)——`strategy_lab/live/`
 
@@ -1629,14 +1630,16 @@ logger.info / warning / error ...
 
 **不能熱改**:幣種、方向、策略類型、數量/比重——要停止後重新啟動。
 
-### 6.26 接手現有持倉與脫離(`live/adopt.py`、`daemon detach`,2026-10-07)
+### 6.26 接手現有持倉與交接(`live/adopt.py`、`daemon handover`,2026-10-07)
+
+> 2026-10-12 改名:原本叫「脫離」(`daemon detach`、`end_reason = detached`、介面打 `DETACH`),改成比較好懂的「交接」(`daemon handover`、`end_reason = handover`、介面打 `HANDOVER`)。`daemon detach` 仍可用(舊名);下面 2026-10-07 實際執行當時下的指令是 `daemon detach`。
 
 **為什麼**:2026-10-06 SUI 那次三注全部成交後價格下跌,當時在跑的是不支援 §6.25 改參數的舊版程式。換新版程式
 原本只能「停止 → 重啟」,而停止會收尾(市價平掉 60 SUI 認賠)、啟動又會因為交易所上有殘留而拒絕。
 
-**脫離**:`python -m strategy_lab.live.daemon detach --config …` 送 SIGUSR1。新版程式在這個 tick 結束後
-直接結束、**不收尾**(`runner.request_detach()`,`run_forever` 迴圈條件、Telegram 🔌、`sl_run.end_reason =
-detached`);還沒裝 SIGUSR1 處理器的舊版程式,預設動作就是立刻結束,效果一樣。`daemon stop` 仍是收尾後結束。
+**交接**:`python -m strategy_lab.live.daemon handover --config …` 送 SIGUSR1。新版程式在這個 tick 結束後
+直接結束、**不收尾**(`runner.request_handover()`,`run_forever` 迴圈條件、Telegram 🔌、`sl_run.end_reason =
+handover`);還沒裝 SIGUSR1 處理器的舊版程式,預設動作就是立刻結束,效果一樣。`daemon stop` 仍是收尾後結束。
 
 **接手**:設定檔明確打開 `adopt_existing_position: true` 才做(預設 false,有殘留仍拒絕,錯誤訊息會提示這個
 選項)。`ensure_clean_start(adopt=True)` 回傳殘留 → `runner.start()` 之後、第一個 tick 之前 `adopt_existing()`:
@@ -1658,7 +1661,7 @@ preflight 同樣先預覽「會接手什麼」,對不上就拒絕。只支援分
 **實測**(唯讀預覽,真實交易所):SUI 60 @ 1.22542、平倉單 1.2322/1.2316/1.231 正確對應到第 1/2/3 注。
 
 **實際執行(2026-10-07)**:
-1. 03:58 `daemon detach` 舊版程式 PID 87768(它沒有 SIGUSR1 處理器,預設動作直接結束)→ log 最後一筆是 03:15
+1. 03:58 `daemon handover` 舊版程式 PID 87768(它沒有 SIGUSR1 處理器,預設動作直接結束)→ log 最後一筆是 03:15
    的狀態回報、沒有「開始收尾」;交易所上 60 SUI 與三張平倉單完全沒動。
 2. 設定檔打開 `adopt_existing_position: true` → preflight 顯示【接手現有持倉】→ 使用者輸入 yes
    → 04:16 新版程式 PID 54931 啟動並接手(Telegram 🔁)。
@@ -1800,8 +1803,8 @@ cd /Users/mac/strategy_lab && .venv/bin/streamlit run strategy_lab/ui/app.py --s
 - 策略列:
   - **改參數**(建倉價 / 平倉距離 / loop)→ `control.main()`:預覽變更 → 打 `yes` → 送請求給背景程式,下一個 tick
     套用、寫回設定檔(最多等 90 秒,沒回應自動撤回)。預覽後又改了參數 → 要重新預覽。
-  - **停止**(收尾:取消掛單、市價平倉)要打 `STOP`;**脫離**(不收尾,單留在交易所)要打 `DETACH`
-    → `daemon.stop` / `daemon.detach`。
+  - **停止**(收尾:取消掛單、市價平倉)要打 `STOP`;**交接**(不收尾,單留在交易所)要打 `HANDOVER`
+    → `daemon.stop` / `daemon.handover`。
 - free style 列:勾「我確認」→ 結束(§6.27 的 stop,發 🟣 Telegram)。
 
 **② 開始新的**:選策略(`strategies/*.yaml` 全部 + `free style`)
@@ -1817,14 +1820,14 @@ cd /Users/mac/strategy_lab && .venv/bin/streamlit run strategy_lab/ui/app.py --s
 dry-run / 測試網仍可從終端機用 preflight。
 
 **接手現有持倉**(`adopt_existing_position`,§6.26):交易所上這個幣已有持倉 / 掛單時,平常會拒絕開始;勾了就把
-那些單認成各注(對不上仍拒絕),不平倉直接接著管理。用途:換新版程式但保留持倉(脫離 → 勾接手 → 重新開始)。
+那些單認成各注(對不上仍拒絕),不平倉直接接著管理。用途:換新版程式但保留持倉(交接 → 勾接手 → 重新開始)。
 
 **`actions.py` 的保護**(終端機版沒有、頁面才需要的):
 - `prepare_config`:先全部驗證(建倉價用 `validate_entry_prices`、loop 型別)才寫;新建到一半失敗會刪掉,不留半成品;
   `set_config_values` 逐行替換值、**保留註解**,寫入前用 `yaml.safe_load` 驗證每個值;設定檔在跑時拒絕。
 - `preflight_start`:先預覽、預覽的檢查都通過(走到「輸入 yes」那一步)、**10 分鐘內**、設定檔內容(sha256)跟預覽時
   相同;打的字原樣交給 preflight(它自己判斷 `yes`);打錯字沒開始時保留預覽可以直接再試。
-- `stop` / `detach`:要打 `STOP` / `DETACH`(大寫)。
+- `stop` / `handover`:要打 `STOP` / `HANDOVER`(大寫)。
 
 **測試**:
 - `tests/unit/test_ui_data.py`、`test_ui_actions.py`:資料層 / 動作層(假 client / 假 start_fn)。
@@ -1834,7 +1837,7 @@ dry-run / 測試網仍可從終端機用 preflight。
   同名被 Streamlit 蓋掉,套用按鈕永遠不出現」的 bug。
 - `tests/integration/test_ui_daemon_lifecycle.py`:從頁面走完整流程到**真的設定檔 + 真的背景程式**:選策略 →
   填參數 → 真的從範本建立設定檔(真錢設定)→ 預覽 → 打 yes → 真的 `daemon.start`(pid 檔、進行中清單出現)
-  → 打 STOP → 真的 SIGTERM、收尾結束;DETACH 不收尾;打錯字不開始。只有背景程式是假的
+  → 打 STOP → 真的 SIGTERM、收尾結束;HANDOVER 不收尾;打錯字不開始。只有背景程式是假的
   (`_fake_live_program.py`,不連交易所),設定檔 / pid / log 都在臨時資料夾。
 
 **還沒做**:`expected_hold` 在策略 YAML,頁面還不能改;`strategy_overrides` 只支援 loop / 平倉距離;
@@ -1884,7 +1887,7 @@ origin 100、buy/sell 0.1%、數量 1:
 | `estimates/plan.py` / `model.py` | `build_band_plan`:direction long、entry = 買價、take_profit = 賣價(每輪損益照多單算,空單價差相同)、`band_sell_price` |
 | `estimates/metrics/*` | 掛單計畫列出兩張單與規則、現價已在區間外警告;風險註明持倉可能是多或空;每輪損益標「每次穿過區間」 |
 | `live/preflight.py` | 區間分支;交易所上有殘留就拒絕(不支援接手) |
-| `ui/actions.py` / `app.py` | `strategy_info` 帶出 band 與 %;`prepare_config` 寫 `strategy_overrides.band`、不寫 loop;頁面欄位「買單 % / 賣單 %」(沒有建倉價 / loop / 接手);進行中的區間策略**只能停止**(不能改參數;不提供脫離,因為脫離後不能接手) |
+| `ui/actions.py` / `app.py` | `strategy_info` 帶出 band 與 %;`prepare_config` 寫 `strategy_overrides.band`、不寫 loop;頁面欄位「買單 % / 賣單 %」(沒有建倉價 / loop / 接手);進行中的區間策略**只能停止**(不能改參數;不提供交接,因為交接後不能接手) |
 
 **測試**:`tests/integration/test_band_runner.py`(PaperBroker:上下各一張、買單成交對面補一張、穿過區間翻倉並記價差、
 連續循環、賣單先成交、區間內不動、外部取消重掛、收尾取消並平倉);`test_plugins_band.py`、`test_estimates_band.py`、
@@ -2121,10 +2124,10 @@ maker 費率 × 2(買一次 + 賣一次),例 2500 × 0.02% × 2 = 1.00 點 → �
 - `with tab_overview:` 在背景程式表後面先用 `st.container()` 留一個位置 `ops_slot`(`_stop_buttons` / `_free_style_row` 在檔案後面才定義,
   Streamlit 由上到下執行,不能在這裡直接呼叫);`tab_strategy` 區塊之後才用 `with ops_slot: _overview_actions(...)` 填進去。
 - `_overview_actions(daemons, unfinished)`:**只列存活的 daemon**(`d.alive`)→ 展開區塊「🟢 停止|設定檔|帳戶|幣種」,裡面是原本的
-  `_stop_buttons(allow_detach=False)`;進行中的 free style → 「⏺ 結束 free style|…」,裡面是原本的 `_free_style_row`。
+  `_stop_buttons(allow_handover=False)`;進行中的 free style → 「⏺ 結束 free style|…」,裡面是原本的 `_free_style_row`。
   沒有存活的 daemon 也沒有進行中的 free style → 什麼都不畫。
 - **確認方式完全沒變**:停止要在框裡打大寫 `STOP`(`actions.stop` 檢查);free style 結束要勾「我確認」。停止 = 取消所有掛單 + **市價平倉**,
-  所以刻意沒有做成一鍵。**總覽不放「脫離」**(使用者只要停止與結束;脫離不收尾、單留在交易所,風險不同)。
+  所以刻意沒有做成一鍵。**總覽不放「交接」**(使用者只要停止與結束;交接不收尾、單留在交易所,風險不同)。
 - 同一支 daemon 會同時畫在總覽跟策略分頁,Streamlit 元件 key 不能重複 → `_stop_buttons` / `_free_style_row` 加 `key_prefix`,
   總覽用 `ov_`(例 `ov_stop_btn_<設定檔>`、`ov_fs_stop_<帳戶>_<幣種>`),策略分頁的 key 不變。
 - 頁面文字同步:模組說明與頁首 caption 改成「總覽只有停止 / 結束,其餘只讀」。
